@@ -3,7 +3,7 @@
 """Reproducible, local GPL-compatible RadioFoundry P25 laboratory derivative.
 
 Never opens a serial port, flashes a radio or modifies the pristine checkout.
-Includes bounded native-PHY RF experiments, not an operational P25 voice mode.
+Experimental image: P25 and NXDN48 voice verified on the radio both ways.
 """
 import argparse
 import hashlib
@@ -261,7 +261,7 @@ def prepare(write=True, apply_series=True, limit=None):
         "files retain GPL-3.0-or-later; combined laboratory distribution is GPLv3+.\n"
         "Not an upstream MIT-only contribution. Derivative by lyra XE1POC.\n"
         "See COPYING-P25 and source manifest.\n"
-        "Hardware-unverified. Bounded native-PHY tests; no operational P25 voice mode.\n"
+        "Experimental. P25 and NXDN48 voice verified on the radio both ways (2026-11-14).\n"
     ).encode())
     if apply_series:
         apply_patches(limit)
@@ -443,7 +443,7 @@ def main():
             raise SystemExit("No recognized local stock codec; not claiming preserved DMR voice")
     inputs = [ROOT / "tools/build_radiofoundry.py", ROOT / "tools/codec_cache.py"] + [p for folder in (ROOT / "src/p25", ROOT / "src/modem", ROOT / "src/codec", ROOT / "integration/radiofoundry")
               for p in folder.rglob("*") if p.is_file()]
-    manifest = {"kind": "hardware-unverified RadioFoundry laboratory image; bounded native PHY tests, no operational P25 voice mode",
+    manifest = {"kind": "experimental RadioFoundry P25/NXDN derivative image; P25 and NXDN48 voice verified on the radio",
         "upstream_commit": PIN, "freertos_commit": git(DEST / "third_party/FreeRTOS-Kernel", "rev-parse", "HEAD"),
         "command": [str(x) for x in command], "p25_enabled": not args.disable, "native_interface_enabled":native,
         "firstboot_restrictions_enabled": args.first_boot,

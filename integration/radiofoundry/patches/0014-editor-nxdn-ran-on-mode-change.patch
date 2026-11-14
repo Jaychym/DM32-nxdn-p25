@@ -1,0 +1,121 @@
+--- a/site/static/js/editor/views.js
++++ b/site/static/js/editor/views.js
+@@ -6,7 +6,7 @@
+ 
+ import { h, button } from "../flasher/dom.js";
+ import { parseFreq, parseTone, mhz } from "../codeplug/fields.js";
+-import { LIMITS, POWER_NAMES } from "../codeplug/records.js";
++import { LIMITS, POWER_NAMES, NAC_ANY, NAC_DEFAULT } from "../codeplug/records.js";
+ import { refNumber, listenBand } from "../codeplug/model.js";
+ 
+ // --- Parsers shared by the columns and the forms ---
+@@ -61,6 +61,20 @@
+ const modeText = (r, t) => MODE_NAMES[r.mode] || (listenBand(r.rxHz) ? t(`editor.mode.${listenBand(r.rxHz)}`) : "FM");
+ const DIGITAL = new Set(["p25", "nxdn", "p25trunk"]);
+ const P25 = new Set(["p25", "p25trunk"]);
++
++// The mode of a channel. P25 NACs (hex, F7E = any) and NXDN RANs (0-63) share nacRx / nacTx, so a channel moved into
++// NXDN gets the decoder's RAN defaults (records.js) for a number that isn't a RAN, and one moved out of NXDN into P25
++// gets the P25 defaults: never the other family's number
++const setMode = (r, k, v) => {
++	if (v === "nxdn" && r.mode !== "nxdn") {
++		if (!(r.nacRx <= 63)) r.nacRx = 0;
++		if (!(r.nacTx <= 63)) r.nacTx = 1;
++	} else if (P25.has(v) && r.mode === "nxdn") {
++		r.nacRx = NAC_ANY;
++		r.nacTx = NAC_DEFAULT;
++	}
++	r[k] = v;
++};
+ 
+ // P25 NAC (hex, 0xF7E = any) and NXDN RAN (0-63)
+ const hexText = (digits) => (v) => (v ?? 0).toString(16).toUpperCase().padStart(digits, "0");
+@@ -152,7 +166,7 @@
+ 		return [
+ 			num,
+ 			col("name", "editor.col.name", "text", name(LIMITS.name)(t)),
+-			col("mode", "editor.col.mode", "select", pick, { options: MODE_OPTIONS, format: (v, r) => modeText(r, t) }),
++			col("mode", "editor.col.mode", "select", setMode, { options: MODE_OPTIONS, format: (v, r) => modeText(r, t) }),
+ 			col("rxHz", "editor.col.rx", "text", (r, k, v) => {
+ 				// a simplex channel stays simplex: TX follows RX when they were the same
+ 				const was = r.rxHz;
+@@ -260,7 +274,7 @@
+ 	return [
+ 		{ group: t("editor.form.basic") },
+ 		txt("name", "editor.col.name", name(LIMITS.name)(t)),
+-		sel("mode", "editor.col.mode", MODE_OPTIONS),
++		sel("mode", "editor.col.mode", MODE_OPTIONS, { set: (r, v) => setMode(r, "mode", v) }),
+ 		sel("power", "editor.col.power", () => powerOptions(t)),
+ 		// in a receive-only band TX follows RX, locked (rxFreq)
+ 		{ type: "pair", key: "freqs", disabled: (w, value) => listening(value),
+@@ -388,6 +402,8 @@
+ 	}
+ 	const byKey = (k) => rows.find((r) => r.f.key === k);
+ 	const value = (k) => byKey(k).input.value;
++	// keys two fields share (P25 NAC and NXDN RAN): the one that appears shows the record's value as the mode left it
++	const shared = new Set(rows.map((r) => r.f.key).filter((k, i, all) => k && all.indexOf(k) !== i));
+ 	const sync = () => {
+ 		for (const { f, input, row, label, tools } of rows) {
+ 			if (f.type === "pair") {
+@@ -413,7 +429,11 @@
+ 				input.disabled = on;
+ 			}
+ 			if (f.type === "bool") (f.set ? f.set(work, input.checked) : (work[f.key] = input.checked));
+-			if (f.show) row.hidden = !f.show(work);
++			if (f.show) {
++				const hide = !f.show(work);
++				if (row.hidden && !hide && shared.has(f.key)) input.value = f.format ? f.format(work[f.key]) : work[f.key];
++				row.hidden = hide;
++			}
+ 			if (typeof f.label === "function") label.textContent = f.label(work);
+ 			if (f.disabled) {
+ 				input.disabled = f.disabled(work, value);
+@@ -427,13 +447,14 @@
+ 	const dlg = h("dialog", { class: "confirm editor-dialog" });
+ 	const save = () => {
+ 		const bad = [];
+-		for (const { f, input } of rows) {
++		for (const { f, input, row } of rows) {
+ 			if (f.type === "bool" || f.type === "pair" || f.type === "group" || f.type === "note") continue;
+ 			if (f.type === "select") {
+ 				const v = input._opts[input.selectedIndex]?.[0];
+ 				f.set ? f.set(work, v) : (work[f.key] = v);
+ 				continue;
+ 			}
++			if (row.hidden) continue;	// another mode's field: the record keeps its value (or the one that shares its key)
+ 			const err = f.parse ? f.parse(work, f.key, input.value) : ((work[f.key] = input.value), null);
+ 			if (err) bad.push(`${typeof f.label === "function" ? f.label(work) : f.label}: ${err}`);
+ 		}
+--- a/site/tests/editor.test.mjs
++++ b/site/tests/editor.test.mjs
+@@ -60,6 +60,30 @@
+ 		["editor.mode.air", "editor.mode.bcast", "FM", "DMR"]);
+ });
+ 
++test("a channel moved between P25 and NXDN gets that family's NAC or RAN, never the other's number", () => {
++	const table = columns("channels", empty(), t).find((c) => c.key === "mode");
++	const form = field("mode");
++	for (const set of [(r, v) => table.set(r, v), (r, v) => form.set(r, v)]) {
++		const r = { mode: "p25", nacRx: 0xF7E, nacTx: 0x293 };
++		set(r, "nxdn");
++		assert.deepEqual([r.mode, r.nacRx, r.nacTx], ["nxdn", 0, 1]);	// the decoder's RAN defaults (records.js)
++		r.nacTx = 12;
++		set(r, "nxdn");
++		assert.equal(r.nacTx, 12);	// the same mode again changes nothing
++		set(r, "p25");
++		assert.deepEqual([r.mode, r.nacRx, r.nacTx], ["p25", 0xF7E, 0x293]);
++		const fm = { mode: "fm", nacRx: 0x293, nacTx: 0x293 };
++		set(fm, "nxdn");
++		assert.deepEqual([fm.nacRx, fm.nacTx], [0, 1]);
++		const ran = { mode: "dmr", nacRx: 5, nacTx: 7 };
++		set(ran, "nxdn");
++		assert.deepEqual([ran.nacRx, ran.nacTx], [5, 7]);	// already RANs: kept
++		const trunk = { mode: "p25", nacRx: 0x123, nacTx: 0x456 };
++		set(trunk, "p25trunk");
++		assert.deepEqual([trunk.nacRx, trunk.nacTx], [0x123, 0x456]);	// P25 to P25: kept
++	}
++});
++
+ test("Bulk Edit sets no names or numbers, and has nothing to set on zones and RX lists", () => {
+ 	const keys = (table) => bulkColumns(table, empty(), t).map((c) => c.key);
+ 	assert.deepEqual([keys("zones"), keys("rxLists")], [[], []]);
