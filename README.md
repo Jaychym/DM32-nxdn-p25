@@ -1,6 +1,6 @@
 # DM32-nxdn-p25 — Open25-DM32 multimodo (FM · DMR · P25 · NXDN) para el Baofeng DM-32UV
 
-Firmware abierto y multimodo para el **Baofeng DM-32UV**: FM, DMR, **APCO P25 fase 1** y **NXDN48** en canales convencionales, más recepción de troncal P25. Es una derivación de [Open25-DM32](https://github.com/tylerwatt12/Open25-DM32) (tylerwatt12), construida como serie de parches sobre [RadioFoundry](https://github.com/RadioFoundry/RadioFoundry). Esta rama la mantiene **lyra XE1POC**.
+Firmware abierto y multimodo para el **Baofeng DM-32UV**: FM, DMR, **APCO P25 fase 1** y **NXDN48** (RX y TX) en canales convencionales, más recepción de troncal P25. Es una derivación de [Open25-DM32](https://github.com/tylerwatt12/Open25-DM32) (tylerwatt12), construida como serie de parches sobre [RadioFoundry](https://github.com/RadioFoundry/RadioFoundry). Esta rama la mantiene **lyra XE1POC**.
 
 > Firmware experimental. Úsalo bajo tu responsabilidad, solo en frecuencias en las que tengas licencia y con un respaldo de tu radio.
 
@@ -11,7 +11,7 @@ Firmware abierto y multimodo para el **Baofeng DM-32UV**: FM, DMR, **APCO P25 fa
 | FM y DMR | Funcionan (base RadioFoundry) |
 | P25 convencional, RX y TX | Verificado en la radio (voz IMBE en ambos sentidos) |
 | NXDN48, RX | Verificado en la radio (tramas, llamada y voz AMBE sin errores) |
-| NXDN48, TX | **Experimental**: transmite, pero todavía nadie lo decodifica (ojo cerrado; ver `docs/nxdn-modem.md`) |
+| NXDN48, TX | Funciona: el receptor del firmware y dsd-fme decodifican la TX del DM-32 (RAN 1, llamada de grupo TG 1, voz), capturada con un Pluto+ |
 | Troncal P25 | Solo recepción; la TX troncal está desactivada |
 | APRS y posición GPS | Activados en esta versión; sin probar en el aire |
 | Tono de permiso estilo Motorola | P25/NXDN: TPT ASTRO 25 (3 bips de 910 Hz); DMR: chirp MOTOTRBO |
@@ -32,7 +32,7 @@ Parches de la serie (`integration/radiofoundry/patches/`):
 | Parche | Qué hace |
 |---|---|
 | `0009-digital-voice-status-recovery-and-credits` | Re-selección de canal digital sin perder la sesión, recuperación automática tras fallos del módem, pantalla «Digital: iniciando / fallo del módem» honesta, créditos |
-| `0010-nxdn-fm-tx-ram` | Ruta de TX NXDN por la TX RAM del HR_C7000 (experimental) |
+| `0010-nxdn-fm-tx-ram` | TX NXDN por la TX RAM del HR_C7000: la que hace que la TX NXDN se decodifique |
 | `0011-motorola-talk-permit` | Tono de permiso para hablar como Motorola; en P25/NXDN suena antes de dar portadora |
 | `0012-pink-theme` | El tema claro pasa a ser el tema «Rosa» |
 | `0013-tools-menu-built-features` | APRS y posición activados; Herramientas oculta lo que no está en la compilación (hotspot, red USB, repetidor de 1 frecuencia) |
@@ -62,7 +62,7 @@ El proyecto se distribuye bajo [GPL-3.0-or-later](LICENSE) salvo que un archivo 
 
 ## English summary
 
-Multi-mode open firmware (FM, DMR, P25 Phase 1, NXDN48, P25 trunking receive) for the Baofeng DM-32UV, derived from [Open25-DM32](https://github.com/tylerwatt12/Open25-DM32) on top of [RadioFoundry](https://github.com/RadioFoundry/RadioFoundry), maintained by lyra XE1POC. P25 voice works both ways and NXDN receive works on the radio; NXDN transmit is still experimental. Releases ship the image **without** the proprietary AMBE codec; the [web flasher](https://donttellmeimcute.github.io/dm32-web-cps-flasher/) takes the codec from your own radio or stock file inside the browser. GPL-3.0-or-later.
+Multi-mode open firmware (FM, DMR, P25 Phase 1, NXDN48, P25 trunking receive) for the Baofeng DM-32UV, derived from [Open25-DM32](https://github.com/tylerwatt12/Open25-DM32) on top of [RadioFoundry](https://github.com/RadioFoundry/RadioFoundry), maintained by lyra XE1POC. P25 and NXDN voice work both ways: the radio's NXDN transmission is decoded by the firmware's own receiver and by dsd-fme. Releases ship the image **without** the proprietary AMBE codec; the [web flasher](https://donttellmeimcute.github.io/dm32-web-cps-flasher/) takes the codec from your own radio or stock file inside the browser. GPL-3.0-or-later.
 
 ## Developer resources
 
