@@ -1,0 +1,207 @@
+--- a/drivers/modem/hrc7000/hrc7000.h
++++ b/drivers/modem/hrc7000/hrc7000.h
+@@ -305,6 +305,27 @@
+ 	return true;
+ }
+ 
++// --- FM transmit audio from the CPU (8.4, datasheet pp. 271, 339-340) ---
++#define C7_SYS_FM_TX		(1u << 15)
++#define C7_FM_TX_AUDIO		0x030u
++#define HRC7000_FM_TX_SAMPLES	256u
++
++void hrc7000_fm_tx_audio_irq(hrc7000_t *d, bool on);
++// half is the FM_ADDR_SW value captured at the interrupt (1 low, 2 high). High byte first, unlike the prompt FIFO.
++static inline bool hrc7000_fm_tx_audio(hrc7000_t *d, uint32_t half, const int16_t *pcm)
++{
++	if (half != 1u && half != 2u) {
++		return false;
++	}
++	volatile uint8_t *p = &d->buf[C7_FM_TX_AUDIO + (half - 1u) * HRC7000_FM_TX_SAMPLES * 2u];
++	for (uint16_t i = 0; i < HRC7000_FM_TX_SAMPLES; i++) {
++		uint16_t v = (uint16_t)pcm[i];
++		p[2u * i] = (uint8_t)(v >> 8);
++		p[2u * i + 1u] = (uint8_t)v;
++	}
++	return true;
++}
++
+ // --- FM receive audio to the CPU (8.5) ---
+ 
+ // In FM the modem writes its demodulated receive audio, 8 kHz, into two 256-sample halves of the RX RAM in turn (high
+--- a/drivers/modem/hrc7000/hrc7000.c
++++ b/drivers/modem/hrc7000/hrc7000.c
+@@ -210,6 +210,12 @@
+ 	}
+ }
+ 
++void hrc7000_fm_tx_audio_irq(hrc7000_t *d, bool on)
++{
++	uint32_t m = hrc7000_rd(d, C7_SYS_INTERP_MASK);
++	hrc7000_wr(d, C7_SYS_INTERP_MASK, on ? (m | C7_SYS_FM_TX) : (m & ~C7_SYS_FM_TX));
++}
++
+ void hrc7000_fm_rx_audio_irq(hrc7000_t *d, bool on)
+ {
+ 	uint32_t m = hrc7000_rd(d, C7_SYS_INTERP_MASK);
+--- a/drivers/modem/hrc7000/hrc7000_dmr.h
++++ b/drivers/modem/hrc7000/hrc7000_dmr.h
+@@ -125,6 +125,7 @@
+ 	// FM receive audio half ready (SYS_INTERP bit 14, modem-hrc7000.md 8.5): called from the system interrupt whether
+ 	// or not the engine runs, NULL for none. Set it after hrc7000_dmr_init
+ 	void (*fm_rx)(void);
++	void (*fm_tx)(void);	// FM TX RAM half available (SYS_INTERP bit 15), also outside DMR
+ 	bool lcss;		// LCSS on voice bursts B-E (user guide); false = 0 on every burst like the 2026 builds
+ 	dmr_config_t cfg;
+ 	int8_t cc_filter;	// -1 any (scan)
+--- a/drivers/modem/hrc7000/hrc7000_dmr.c
++++ b/drivers/modem/hrc7000/hrc7000_dmr.c
+@@ -720,6 +720,9 @@
+ 		}
+ 		w(e, C7_SYS_INTERP_CLEAR, list);
+ 		e->st.last_sys_list = list;
++		if ((list & C7_SYS_FM_TX) != 0 && e->fm_tx != NULL) {
++			e->fm_tx();
++		}
+ 		if ((list & C7_SYS_FM_RX) != 0 && e->fm_rx != NULL) {
+ 			e->fm_rx();
+ 		}
+--- a/platform/hrc7000/dmr_glue.c
++++ b/platform/hrc7000/dmr_glue.c
+@@ -119,7 +119,7 @@
+ 
+ static void irqs_enable(bool on)
+ {
+-	hrc_irq_enable(IRQ_MODEM_SYS, on || eng.fm_rx != NULL);	// FM receive audio uses it outside DMR too
++	hrc_irq_enable(IRQ_MODEM_SYS, on || eng.fm_rx != NULL || eng.fm_tx != NULL);	// FM receive audio uses it outside DMR too
+ 	hrc_irq_enable(IRQ_MODEM_TS_TX, on);
+ 	hrc_irq_enable(IRQ_MODEM_TS_RX, on);
+ 	hrc_irq_enable(IRQ_MODEM_RF_TX, on);
+@@ -186,7 +186,16 @@
+ 	uint32_t s = hrc_irq_save();
+ 	eng.fm_rx = fn;
+ 	hrc_irq_restore(s);
+-	hrc_irq_enable(IRQ_MODEM_SYS, active || fn != NULL);
++	hrc_irq_enable(IRQ_MODEM_SYS, active || fn != NULL || eng.fm_tx != NULL);
++	return true;
++}
++
++bool hrc_dmr_fm_tx_hook(void (*fn)(void))
++{
++	uint32_t s = hrc_irq_save();
++	eng.fm_tx = fn;
++	hrc_irq_restore(s);
++	hrc_irq_enable(IRQ_MODEM_SYS, active || fn != NULL || eng.fm_rx != NULL);
+ 	return true;
+ }
+ 
+--- a/platform/hrc7000/dmr_glue.h
++++ b/platform/hrc7000/dmr_glue.h
+@@ -33,6 +33,8 @@
+ // FM receive audio (fm_rx_audio.c): fn runs from the modem's system interrupt for each half the modem fills; NULL
+ // stops it. The system interrupt stays on for it outside DMR
+ bool hrc_dmr_fm_rx_hook(void (*fn)(void));
++// FM TX RAM: the half named by FM_ADDR_SW is writable; NULL stops the callback.
++bool hrc_dmr_fm_tx_hook(void (*fn)(void));
+ 
+ extern const hal_dmr_modem_t hrc_dmr;
+ 
+@@ -52,6 +54,7 @@
+ static inline bool hrc_dmr_tx_active(void) { return false; }
+ static inline void hrc_dmr_tx_drop(void) {}
+ static inline bool hrc_dmr_fm_rx_hook(void (*fn)(void)) { (void)fn; return false; }
++static inline bool hrc_dmr_fm_tx_hook(void (*fn)(void)) { (void)fn; return false; }
+ #endif
+ 
+ #endif
+--- a/boards/dm32/radio_dm32.c
++++ b/boards/dm32/radio_dm32.c
+@@ -531,7 +531,7 @@
+ // talk permit before the first burst). In FM TX the microphone has the modulator
+ static void ring_play(void)
+ {
+-	bool on = (pcm_on && !(transmitting && mode != RADIO_MODE_DMR)) || afsk_tx || data_tx;
++	bool on = (pcm_on && !(transmitting && mode != RADIO_MODE_DMR)) || afsk_tx;
+ 	hrc_audio_pcm_ring(&modem, on);
+ }
+ 
+--- a/tests/host/hrc7000DmrTest.c
++++ b/tests/host/hrc7000DmrTest.c
+@@ -940,6 +940,52 @@
+ 	REG(C7_SYS_INTERP_LIST) = 1u << 5;
+ 	hrc7000_dmr_isr_sys(&eng);	// another bit: no call
+ 	CHECK(fm_hook_calls == 1);
++}
++
++// TX RAM: only the named half, high byte first, and no write for an invalid selector.
++static int fm_tx_calls;
++static void fm_tx_hook(void) { fm_tx_calls++; REG(C7_SYS_INTERP_LIST) = 0; }
++static void test_fm_tx_audio(void)
++{
++	setup();
++	int16_t s[HRC7000_FM_TX_SAMPLES];
++	for (uint32_t i = 0; i < HRC7000_FM_TX_SAMPLES; i++) s[i] = (int16_t)(0x8000u + i * 127u);
++	memset(buf, 0x55, sizeof buf);
++	CHECK(!hrc7000_fm_tx_audio(&dev, 0, s));
++	CHECK(!hrc7000_fm_tx_audio(&dev, 3, s));
++	for (uint32_t i = 0; i < sizeof buf; i++) CHECK(buf[i] == 0x55);
++	for (uint32_t half = 1; half <= 2; half++) {
++		memset(buf, 0x55, sizeof buf);
++		CHECK(hrc7000_fm_tx_audio(&dev, half, s));
++		uint32_t start = C7_FM_TX_AUDIO + (half - 1u) * 512u;
++		CHECK(start == (half == 1 ? 0x30u : 0x230u));
++		for (uint32_t i = 0; i < sizeof buf; i++) {
++			uint16_t v = (uint16_t)s[((i - start) / 2u) & 255u];
++			CHECK(buf[i] == (i < start || i >= start + 512u ? 0x55u :
++			      (i & 1u ? (uint8_t)v : (uint8_t)(v >> 8))));
++		}
++	}
++	REG(C7_SYS_INTERP_MASK) = 0x1187Fu | C7_SYS_FM_RX;
++	hrc7000_fm_tx_audio_irq(&dev, true);
++	CHECK(REG(C7_SYS_INTERP_MASK) == (0x1187Fu | C7_SYS_FM_RX | C7_SYS_FM_TX));
++	hrc7000_fm_tx_audio_irq(&dev, false);
++	CHECK(REG(C7_SYS_INTERP_MASK) == (0x1187Fu | C7_SYS_FM_RX));
++	fm_tx_calls = fm_hook_calls = 0;
++	REG(C7_SYS_INTERP_LIST) = C7_SYS_FM_TX;
++	hrc7000_dmr_isr_sys(&eng);
++	CHECK(REG(C7_SYS_INTERP_CLEAR) == C7_SYS_FM_TX && fm_tx_calls == 0);
++	eng.fm_tx = fm_tx_hook;
++	REG(C7_SYS_INTERP_LIST) = C7_SYS_FM_TX;
++	hrc7000_dmr_isr_sys(&eng);
++	CHECK(fm_tx_calls == 1 && REG(C7_SYS_INTERP_CLEAR) == C7_SYS_FM_TX);
++	eng.fm_rx = fm_hook;
++	REG(C7_SYS_INTERP_LIST) = C7_SYS_FM_TX | C7_SYS_FM_RX;
++	hrc7000_dmr_isr_sys(&eng);
++	CHECK(fm_tx_calls == 2 && fm_hook_calls == 1);
++	eng.fm_tx = NULL;
++	REG(C7_SYS_INTERP_LIST) = C7_SYS_FM_RX;
++	hrc7000_dmr_isr_sys(&eng);
++	CHECK(fm_tx_calls == 2 && fm_hook_calls == 2);
+ }
+ 
+ // Prompt FIFO push (8.4): 32 samples low byte first while AUDIO_CONTROL b31 is clear; nothing written when full
+@@ -1292,6 +1338,7 @@
+ 	test_tx_tone();
+ 	test_subtone();
+ 	test_fm_rx_audio();
++	test_fm_tx_audio();
+ 	test_prompt_push();
+ 	if (failures) {
+ 		printf("hrc7000DmrTest: %d failures\n", failures);
+--- a/docs/spec/modem-hrc7000.md
++++ b/docs/spec/modem-hrc7000.md
+@@ -799,6 +799,15 @@
+ amplitudes; RF_MODE b10 sends a 40 Hz test square. The prompt FIFO path decodes on some boards but not on others,
+ which take the mixer route below.
+ 
++The CPU FM TX RAM interface is implemented as `hrc7000_fm_tx_audio`: capture FM_ADDR_SW b1:0 at the system
++interrupt, write the named half (1 low, 2 high), 256 signed samples with the high byte at the lower address.
++Selectors 0 and 3 are invalid. `hrc7000_fm_tx_audio_irq` enables SYS_INTERP b15 without changing other mask bits.
++The DMR engine dispatches `fm_tx` for that bit even while stopped; `hrc_dmr_fm_tx_hook` keeps the system IRQ active
++independently of the receive hook. Disable the mask and remove the hook before retiring its PCM source. Initialize
++both halves before selecting TX RAM, keep ring play off, and allow up to 64 ms of hardware playout after the
++software queue empties. A cancellation still stops immediately. Transport tests verify byte order, half boundaries,
++mask preservation and stopped-engine dispatch; deviation and filtering require measurements on each board.
++
+ The FM transmit limiter (FM_DEV_COEF b23:16) caps the deviation of audio that enters through the codec ADC, the
+ microphone and the mixer route below. The prompt FIFO's ring play is not capped by it: AFSK through
+ ring play reached 5.1 kHz peak with the limiter at 4. Through the ADC path the ceiling scales with limiter x TX

@@ -259,7 +259,8 @@ def prepare(write=True, apply_series=True, limit=None):
         "User-authorized GPL-compatible P25 development derivative.\n"
         "Original RadioFoundry files remain MIT with their notices. Added P25/IMBE\n"
         "files retain GPL-3.0-or-later; combined laboratory distribution is GPLv3+.\n"
-        "Not an upstream MIT-only contribution. See COPYING-P25 and source manifest.\n"
+        "Not an upstream MIT-only contribution. Derivative by lyra XE1POC.\n"
+        "See COPYING-P25 and source manifest.\n"
         "Hardware-unverified. Bounded native-PHY tests; no operational P25 voice mode.\n"
     ).encode())
     if apply_series:
@@ -336,7 +337,7 @@ def main():
         "CONFIG_P25_TRUNK=" + ("y" if native and not args.no_trunk else "n"),
         "CONFIG_P25_TRUNK_TX=" + ("y" if native and args.trunk_tx and not args.no_trunk else "n"),
         "CONFIG_P25_PHASE2=" + ("y" if native and not args.no_trunk and not args.no_phase2 else "n"),
-        "CONFIG_APRS=n", "CONFIG_SFR=n", "CONFIG_HOTSPOT=n", "CONFIG_ZONE_SHARE=n",
+        "CONFIG_SFR=n", "CONFIG_HOTSPOT=n", "CONFIG_ZONE_SHARE=n", "CONFIG_APRS_IGATE=n", "CONFIG_GPS_SKY=n",  # APRS (and with it Tools > Position) on, its iGate and sky plot off for RAM: requested 14-nov
         f"RFOUNDRY_VERSION=dfbaf20c-p25-{identity}", f"RFOUNDRY_GIT_TIME={git(UP, 'show', '-s', '--format=%ct', 'HEAD')}",
         "RFOUNDRY_GIT_DIRTY=1",
         "CONFIG_FIRSTBOOT="+("y" if args.first_boot else "n"),
@@ -366,12 +367,12 @@ def main():
         stack_args=[]
         extra=""
         if not args.no_nxdn:
-            # The board's flat FM paths live in the included dm32_nxdn.inc, which the scanner doesn't follow; its timer
-            # interrupt runs on the 2048-byte IRQ stack
-            extra+="\n# NXDN: the board's audio tap (boards/dm32/dm32_nxdn.inc) and its timer interrupt\n"
+            # The included board callback runs from the modem's system IRQ on its separate 2048-byte stack.
+            extra+="\n# NXDN: the board's audio tap (boards/dm32/dm32_nxdn.inc) and its system interrupt\n"
             extra+="ptr fm_rx_flat boards/dm32/radio_dm32.c:flat_rx\nptr fm_tx_inject boards/dm32/radio_dm32.c:flat_tx_inject\n"
-            extra+="ptr fm_rx_read hrc_fm_rx_read\ntask boards/dm32/radio_dm32.c:flat_tick 512\n"
-            extra+="ptr flat_pull core/dv/radio_nxdn.c:pull\n"
+            extra+="ptr fm_rx_read hrc_fm_rx_read\nptr fm_tx boards/dm32/radio_dm32.c:flat_half_ready\n"
+            extra+="task platform/hrc7000/dmr_glue.c:isr_sys 512\n"
+            extra+="call boards/dm32/radio_dm32.c:flat_half_ready core/dv/radio_nxdn.c:pull\n"
         if native:
             extra+="\n# Native interrupt entries use the separate 2048-byte IRQ stack.\n"
             extra+="".join(f"task platform/hrc7000/hrc_native_port.c:{fn} 512\n" for fn in ("sys","ts_tx","ts_rx","rftx","guard","pa"))

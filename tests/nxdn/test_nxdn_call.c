@@ -60,6 +60,20 @@ int main(void)
     assert(n_heard == 40 && !memcmp(heard, sent, 40 * 9));
     assert(rx.msg.source == 4001 && rx.msg.destination == 200 && rx.msg.call_type == NXDN_CALL_GROUP);
 
+    /* A receiver whose discriminator gives the other sign: every symbol negated (dibit ^ 2). The FSW is found
+     * inverted and the call decodes whole; the same receiver then hears a normal call after the hunt */
+    for (unsigned i = 0; i < n; i++) dib[i] ^= 2u;
+    n_heard = 0;
+    nxdn_rx_init(&rx, 12, 200, 9, sink, NULL);
+    feed(&rx, dib, n, 0);
+    assert(rx.inverted && rx.frames == 12 && rx.calls == 1 && rx.releases == 1 && !rx.bad_lich && !rx.bad_sacch);
+    assert(n_heard == 40 && !memcmp(heard, sent, 40 * 9));
+    for (unsigned i = 0; i < n; i++) dib[i] ^= 2u;
+    nxdn_rx_reset(&rx);
+    n_heard = 0;
+    feed(&rx, dib, n, 0);
+    assert(!rx.inverted && rx.calls == 2 && n_heard == 40 && !memcmp(heard, sent, 40 * 9));
+
     /* RAN 0 on RX hears any RAN; another RAN is refused */
     n_heard = 0;
     nxdn_rx_init(&rx, 0, 200, 9, sink, NULL);

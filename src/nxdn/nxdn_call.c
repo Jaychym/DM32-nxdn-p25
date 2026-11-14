@@ -105,6 +105,11 @@ int nxdn_tx_frame(nxdn_tx *tx, uint8_t f[NXDN_FRAME_BYTES])
 
 /* --- RX --- */
 enum { FSW_MAX_ERRORS = 2, FLYWHEEL_FRAMES = 3 };
+/* A symbol's sign inverted flips the first bit of its dibit (01 +3 <-> 11 -3, 00 +1 <-> 10 -1). A receiver's
+ * discriminator audio can be either way round (a high-side LO inverts it; the DM-32's RF_MODE sets b15, RX IQ invert,
+ * for the HR_C7000's own 4FSK receive; the FM RX RAM copy's sign is unmeasured), so the sync is hunted in both
+ * polarities, as p25.c does */
+#define FSW_INVERT 0xAAAAAu
 
 void nxdn_rx_init(nxdn_rx *rx, uint8_t ran, uint16_t group, uint16_t unit, nxdn_slot_sink sink, void *ctx)
 {
@@ -127,7 +132,7 @@ void nxdn_rx_reset(nxdn_rx *rx)
     end_call(rx);
     rx->state = NXDN_RX_HUNT;
     rx->shift = 0;
-    rx->fsw_hits = 0;
+    rx->fsw_hits = rx->fsw_inverted = 0;
     rx->tentative = false;
     rx->pos = 0;
     rx->misses = 0;
@@ -252,16 +257,17 @@ static void process(nxdn_rx *rx)
 
 /* Sync on the FSW that ended `ago` dibits back: the frame restarts with the FSW
  * and the dibits since, which are still in the shift register (ago < 10) */
-static void sync_at(nxdn_rx *rx, unsigned ago, unsigned errors)
+static void sync_at(nxdn_rx *rx, unsigned ago, unsigned errors, bool inverted)
 {
     rx->state = NXDN_RX_SYNCED;
     rx->tentative = true;
+    rx->inverted = inverted;
     rx->sync_errors = (uint8_t)errors;
     memset(rx->frame, 0, sizeof rx->frame);
     nxdn_put_fsw(rx->frame);
     rx->pos = NXDN_FSW_BITS;
     for (unsigned k = ago; k-- > 0;) {
-        uint8_t d = (uint8_t)((rx->shift >> (2 * k)) & 3u);
+        uint8_t d = (uint8_t)(((rx->shift >> (2 * k)) & 3u) ^ (inverted ? 2u : 0u));
         nxdn_set_bit(rx->frame, rx->pos, d >> 1);
         nxdn_set_bit(rx->frame, rx->pos + 1, d & 1u);
         rx->pos = (uint16_t)(rx->pos + 2);
@@ -282,19 +288,23 @@ static bool lich_plausible(const nxdn_rx *rx)
 int nxdn_rx_push_dibit(nxdn_rx *rx, uint8_t dibit)
 {
     rx->shift = ((rx->shift << 2) | (dibit & 3u)) & 0xFFFFFu;
-    unsigned errors = popcount(rx->shift ^ NXDN_FSW);
+    unsigned normal = popcount(rx->shift ^ NXDN_FSW), inverse = popcount(rx->shift ^ NXDN_FSW ^ FSW_INVERT);
+    bool inv = inverse < normal;
+    unsigned errors = inv ? inverse : normal;
     rx->fsw_hits = (uint16_t)(rx->fsw_hits << 1 | (errors <= FSW_MAX_ERRORS));
+    rx->fsw_inverted = (uint16_t)(rx->fsw_inverted << 1 | inv);
     if (rx->state == NXDN_RX_HUNT) {
-        if (rx->fsw_hits & 1u) sync_at(rx, 0, errors);
+        if (rx->fsw_hits & 1u) sync_at(rx, 0, errors, inv);
         return 0;
     }
     /* Until the next frame's FSW confirms a sync the hunt found, a cleaner FSW elsewhere
      * replaces it: the first may have been noise, its LICH by chance one a frame can carry */
     if (rx->tentative && errors < rx->sync_errors && rx->pos > NXDN_FSW_BITS) {
         rx->false_syncs++;
-        sync_at(rx, 0, errors);
+        sync_at(rx, 0, errors, inv);
         return 0;
     }
+    if (rx->inverted) dibit ^= 2u;
     nxdn_set_bit(rx->frame, rx->pos, dibit >> 1);
     nxdn_set_bit(rx->frame, rx->pos + 1, dibit & 1u);
     rx->pos = (uint16_t)(rx->pos + 2);
@@ -308,7 +318,7 @@ int nxdn_rx_push_dibit(nxdn_rx *rx, uint8_t dibit)
         uint16_t since = rx->fsw_hits & ((1u << (NXDN_LICH_BITS / 2)) - 1u);
         for (unsigned k = NXDN_LICH_BITS / 2; k-- > 0;)
             if (since >> k & 1u) {
-                sync_at(rx, k, FSW_MAX_ERRORS);
+                sync_at(rx, k, FSW_MAX_ERRORS, (rx->fsw_inverted >> k) & 1u);
                 break;
             }
         return 0;
@@ -316,7 +326,7 @@ int nxdn_rx_push_dibit(nxdn_rx *rx, uint8_t dibit)
     if (rx->pos == NXDN_FSW_BITS) {
         /* The next frame's FSW follows at once. The flywheel rides over a few damaged
          * ones; after that sync is lost, the call ends and the hunt starts again. */
-        if (errors > 2 * FSW_MAX_ERRORS) {
+        if ((rx->inverted ? inverse : normal) > 2 * FSW_MAX_ERRORS) {
             if (++rx->misses > FLYWHEEL_FRAMES) {
                 rx->sync_losses++;
                 nxdn_rx_reset(rx);

@@ -63,10 +63,12 @@ typedef struct {
     /* sync */
     uint32_t shift;
     uint16_t fsw_hits;        /* bit k: a frame sync word ended k dibits ago */
+    uint16_t fsw_inverted;    /* bit k: ... with every symbol's sign inverted */
     uint8_t frame[NXDN_FRAME_BYTES];
     uint16_t pos;             /* bits collected after the FSW start */
     uint8_t state, misses;
     bool tentative;           /* sync found by the hunt, not yet confirmed by the next frame's FSW */
+    bool inverted;            /* the stream's polarity is inverted (the sync's FSW was): dibits are flipped back */
     uint8_t sync_errors;      /* bit errors of the FSW a tentative sync started on */
     /* the call */
     bool in_call, have_msg, admitted, playing;

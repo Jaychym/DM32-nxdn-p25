@@ -97,6 +97,9 @@ def fetch_or_verify(fetch):
         print('verified', repo['path'])
     for f in lock['files']:
         path = ROOT / f['path']
+        if path.suffix.lower() == '.pdf':
+            print('skipped reference PDF', f['path'])
+            continue
         if not path.exists() and fetch:
             path.parent.mkdir(parents=True, exist_ok=True)
             partial = path.with_name(path.name + '.partial')

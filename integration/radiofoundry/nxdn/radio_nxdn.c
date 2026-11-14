@@ -24,10 +24,13 @@
 /* The board's flat paths: the transmit scale comes from the tap's nominal level (60 % of the channel's peak
  * deviation, 1.5 kHz at 12.5 kHz), the audio path's measured shape from its flat_* fields */
 #define NOMINAL_HZ 1500
+/* Two 32 ms hardware halves can still be playing after the software ring empties. */
+#define TX_DRAIN_MS 64u
 
 static nxdn_link link;
 static radio_dv_cfg_t cfg;
-static bool selected, rx_on, tx_on, ptt_up, keyed;
+static bool selected, rx_on, tx_on, ptt_up, keyed, tx_draining;
+static uint32_t tx_drain_ms;
 static uint32_t tx_calls, tx_blocks, last_frames, last_frame_ms;
 static uint8_t tx_reason;
 /* receive voice, paced to the sink */
@@ -35,6 +38,7 @@ static uint8_t vq[16][9];
 static uint8_t vq_head, vq_tail;
 static bool v_open;
 static uint32_t v_next_ms;
+nxdn_snap_t nxdn_snap;   /* bss: magic set at select */
 
 static const hal_audio_tap_t *tap(void)
 {
@@ -118,6 +122,8 @@ bool radio_nxdn_select(const radio_dv_cfg_t *c)
     nxdn_link_init(&link, &path, (uint8_t)(cfg.nac_rx & 63u), cfg.hear_all ? 0 : cfg.talkgroup, (uint16_t)cfg.unit_id,
                    slot_in, NULL);
     vq_head = vq_tail = 0;
+    nxdn_snap.magic = NXDN_SNAP_MAGIC;
+    nxdn_snap.n = 0;   /* the link's sample count restarts */
     last_frames = 0;
     last_frame_ms = 0;
     if (!rx_start()) return false;
@@ -175,7 +181,7 @@ bool radio_nxdn_ptt(bool down)
     nxdn_tx_cfg t = { (uint8_t)(cfg.nac_tx & 63u), (uint16_t)cfg.unit_id, cfg.talkgroup, false, false, NXDN_DIR_INBOUND };
     nxdn_link_tx_begin(&link, &t);
     nxdn_link_tx_fill(&link, next_slot, NULL);
-    ptt_up = false;
+    ptt_up = tx_draining = false;
     tx_on = true;
     tx_blocks = 0;
     if (!tap()->fm_tx_inject(pull, AUDIO_TAP_FLAT)) {
@@ -186,13 +192,53 @@ bool radio_nxdn_ptt(bool down)
     return true;
 }
 
+static void snap_take(const int16_t *pcm, uint16_t n, uint32_t now_ms)
+{
+    nxdn_snap_t *s = &nxdn_snap;
+    if (s->n == NXDN_SNAP_SAMPLES) {
+        if (now_ms - s->t_ms < NXDN_SNAP_HOLD_MS) return;
+        s->n = 0;
+    }
+    if (s->n == 0) {
+        s->start = link.rx_samples;
+        s->peak = s->clips = 0;
+    }
+    for (uint16_t i = 0; i < n && s->n < NXDN_SNAP_SAMPLES; i++) {
+        uint32_t v = (uint32_t)(pcm[i] < 0 ? -(int32_t)pcm[i] : pcm[i]);
+        if (v > s->peak) s->peak = v;
+        s->clips += v >= 32767u;
+        s->pcm[s->n++] = pcm[i];
+    }
+    if (s->n < NXDN_SNAP_SAMPLES) return;
+    const nxdn_rx *rx = &link.rx;
+    s->frames = rx->frames;
+    s->calls = rx->calls;
+    s->false_syncs = rx->false_syncs;
+    s->bad_lich = rx->bad_lich;
+    s->bad_sacch = rx->bad_sacch;
+    s->foreign_ran = rx->foreign_ran;
+    s->onsets = link.demod.onsets;
+    s->inverted = rx->inverted;
+    s->outer = link.demod.outer;
+    s->dc = link.demod.dc;
+    s->t_ms = now_ms;
+    s->seq++;
+}
+
 void radio_nxdn_service(uint32_t now_ms)
 {
     if (!selected) return;
     if (tx_on) {
         nxdn_link_tx_fill(&link, next_slot, NULL);
         tx_blocks = link.tx_frames;
-        if (ptt_up && nxdn_link_tx_done(&link)) tx_finish(NT_TX_COMPLETE);
+        if (ptt_up && nxdn_link_tx_done(&link)) {
+            if (!tx_draining) {
+                tx_draining = true;
+                tx_drain_ms = now_ms;
+            } else if (now_ms - tx_drain_ms >= TX_DRAIN_MS) {
+                tx_finish(NT_TX_COMPLETE);
+            }
+        }
         return;
     }
     if (!rx_on) return;
@@ -200,6 +246,7 @@ void radio_nxdn_service(uint32_t now_ms)
     for (unsigned guard = 0; guard < 16; guard++) {
         uint16_t n = tap()->fm_rx_read(buf, sizeof buf / sizeof buf[0]);
         if (n == 0) break;
+        snap_take(buf, n, now_ms);
         nxdn_link_rx_audio(&link, buf, n);
     }
     if (link.rx.frames != last_frames) {

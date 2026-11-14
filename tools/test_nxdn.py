@@ -32,6 +32,7 @@ def main():
     run([OUT / "test_nxdn_modem"])
     run(["clang", *CFLAGS, "tests/nxdn/test_nxdn_link.c", *LIB, "-lm", "-o", OUT / "test_nxdn_link"])
     run([OUT / "test_nxdn_link"])
+    run([OUT / "test_nxdn_link", "--tx-ram"])
     # The radio channel (integration/radiofoundry/nxdn/radio_nxdn.c) with RadioFoundry's voice bridge and a fake board
     inc = ["-Iintegration/radiofoundry", "-Iintegration/radiofoundry/nxdn", "-I" + str(RF), "-I" + str(RF.parent / "hal"),
            "-I" + str(RF / "native_modem"), "-I" + str(RF.parent / "drivers")]
@@ -39,6 +40,11 @@ def main():
          "-DCONFIG_DMR=1", *inc, "tests/nxdn/test_radio_nxdn.c", "integration/radiofoundry/nxdn/radio_nxdn.c", *LIB,
          RF / "dmr/ambe/ambeVoice.c", RF / "dmr/ambe/ambeFec.c", "-lm", "-o", OUT / "test_radio_nxdn"])
     run([OUT / "test_radio_nxdn"])
+    run([OUT / "test_radio_nxdn", "--tx-ram"])
+    run(["clang", *CFLAGS, "-Iintegration/radiofoundry/nxdn", "-I" + str(RF.parent / "hal"),
+         "-I" + str(RF.parent / "drivers"), "tests/nxdn/test_dm32_nxdn.c",
+         RF.parent / "drivers/modem/hrc7000/hrc7000.c", "-o", OUT / "test_dm32_nxdn"])
+    run([OUT / "test_dm32_nxdn"])
     if not (MMDVM / "NXDNSACCH.cpp").exists():
         print("SKIP MMDVMHost oracle: research/protocol/MMDVMHost missing (tools/build_validators.sh)")
         return 0

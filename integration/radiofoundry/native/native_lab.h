@@ -36,6 +36,7 @@ typedef struct {
 } native_channel;
 typedef struct {
     bool enabled, tx_pending, transmitting, keyed, receiving;
+    bool faulted;          /* the receive session faulted and the channel waits to re-arm it */
     uint8_t reason;          /* how the last transmission ended (NT_*) */
     uint32_t calls, blocks, faults;
     bool inbound;            /* P25 trunking: an inbound packet is on air (not counted as a call) */

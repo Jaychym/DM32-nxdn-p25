@@ -43,6 +43,7 @@ static void sink(void *ctx, const uint8_t slot[9])
 static const nxdn_audio_path flat = { 0, 0, 0, 2048 };   /* 8 LSB per Hz */
 
 /* Transmit `slots` voice slots, PTT released when the source has given them all */
+static bool tx_ram;
 static void transmit(nxdn_link *tx, unsigned slots, uint32_t first_slot_ms)
 {
     nxdn_tx_cfg cfg = { 7, 1234, 55, false, false, NXDN_DIR_INBOUND };
@@ -55,12 +56,13 @@ static void transmit(nxdn_link *tx, unsigned slots, uint32_t first_slot_ms)
     nxdn_link_tx_fill(tx, source, NULL);
     bool ended = false;
     while (!nxdn_link_tx_done(tx)) {
-        /* 2 ms interrupt: 16 samples */
-        uint16_t got = nxdn_link_pull(tx, air + n_air, 16);
-        (void)got;
-        n_air += 16;
-        assert(n_air + 16 < MAX_SAMPLES);
         now_us += 2000;
+        if (!tx_ram || now_us % 32000 == 0) {
+            uint16_t chunk = tx_ram ? 256 : 16;
+            nxdn_link_pull(tx, air + n_air, chunk);
+            n_air += chunk;
+            assert(n_air + chunk < MAX_SAMPLES);
+        }
         if (now_us % 10000 == 0) {
             if (!ended && n_sent == slots) {
                 nxdn_link_tx_end(tx);
@@ -71,8 +73,10 @@ static void transmit(nxdn_link *tx, unsigned slots, uint32_t first_slot_ms)
     }
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    (void)argv;
+    tx_ram = argc > 1;
     static nxdn_link tx, rx;
     nxdn_link_init(&tx, &flat, 7, 0, 0, NULL, NULL);
 

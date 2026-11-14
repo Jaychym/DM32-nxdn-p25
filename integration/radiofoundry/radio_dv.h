@@ -32,6 +32,7 @@ typedef struct {
 
 typedef struct {
     bool active;                /* the channel's receiver runs */
+    bool fault;                 /* its session faulted and the channel re-arms it (the modem failed) */
     bool sync;                  /* frames of any NAC in the last RADIO_DV_BUSY_MS */
     bool sync_ours;             /* ... the last of them with our NAC (or the channel hears any) */
     bool playing;               /* a call that passed the filters plays */

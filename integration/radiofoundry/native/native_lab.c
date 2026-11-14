@@ -11,7 +11,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 static nt_test test;
-static uint32_t pending_start, battery_at;
+static uint32_t pending_start, battery_at, rx_retry_at;
 static uint32_t voice_owner;
 /* The digital voice channel the radio core selected (native_lab_channel):
  * receive between calls, transmit while its PTT is down. */
@@ -41,7 +41,7 @@ static void deny(uint32_t sid)
     taskEXIT_CRITICAL();
 }
 void native_lab_init(void) {
-    pending_start=battery_at=voice_owner=0;
+    pending_start=battery_at=voice_owner=rx_retry_at=0;
     live_enabled=live_rx_pending=live_tx_pending=false;
     for (unsigned i=0;i<5;i++) live_summary[i]=0;
     chan=(native_channel){0};
@@ -129,7 +129,9 @@ static void live_next(radio_sm_t *sm)
         taskEXIT_CRITICAL();return;
     }
     live_tx_pending=false;
-    if (!tx) live_rx_pending=false;
+    /* live_rx_pending stays set while the channel is selected (a receive
+     * session is kept between calls): the receiver re-arms after any end,
+     * a fault or a failed start included. */
 #if CONFIG_P25_TRUNK_TX
     bool inbound=tx && live_inbound_pending;
     live_inbound_pending=false;
@@ -137,7 +139,10 @@ static void live_next(radio_sm_t *sm)
 #else
     bool inbound=false;
 #endif
-    if ((tx || rx) && test.state==NT_FAULT) nt_reset(&test);
+    bool faulted=test.state==NT_FAULT;
+    if ((tx || rx) && faulted) nt_reset(&test);
+    if (!tx && faulted) rx_retry_at=hal_millis()+500u; /* the modem faulted: back off before re-arming */
+    if (!tx && rx && (int32_t)(hal_millis()-rx_retry_at)<0) { taskEXIT_CRITICAL();return; }
     uint32_t sid=0;
     if (tx && lab_gate_tx() && nt_arm_live(&test,chan.tx_hz,chan.power)) voice_owner=sid=test.session;
 #if CONFIG_P25_TRUNK_TX
@@ -200,7 +205,13 @@ void native_lab_service(radio_sm_t *sm, uint32_t now)
 int native_lab_channel(const native_channel *c)
 {
     taskENTER_CRITICAL();
-    if (c && (updater() || (!live_enabled && (test.owned || test.state==NT_ARMED || pending_start || voice_owner)))) {
+    /* A finished session that only awaits the worker's release holds nothing:
+     * a channel re-select leaves and re-enters at once (radio_dv_select), and
+     * must not lose the channel to its own winding-down session. A bench
+     * session or the updater still holds the modem. */
+    int winding=test.state==NT_STOPPED || test.state==NT_FAULT || test.state==NT_IDLE;
+    if (c && (updater() || (!live_enabled && (test.owned || test.state==NT_ARMED || pending_start ||
+                                             (voice_owner && !winding))))) {
         taskEXIT_CRITICAL();return 0; /* a bench session or the updater has the modem */
     }
     if (c && live_enabled && c->rx_hz==chan.rx_hz && c->tx_hz==chan.tx_hz && c->power==chan.power) {
@@ -256,6 +267,7 @@ void native_lab_channel_state(native_channel_state *s)
     taskENTER_CRITICAL();
     s->enabled=live_enabled;
     s->tx_pending=live_tx_pending;
+    s->faulted=test.state==NT_FAULT || (rx_retry_at && (int32_t)(hal_millis()-rx_retry_at)<0);
     s->transmitting=live_owner() && (test.state==NT_ARMED || test.state==NT_TX || test.state==NT_DRAIN || pending_start);
     s->keyed=live_owner() && test.keyed;
     s->receiving=voice_owner && !live_owner() && test.state==NT_RX;

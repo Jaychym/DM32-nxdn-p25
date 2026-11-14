@@ -208,7 +208,7 @@ transmit path is not in the audio chain, so the transmit high-pass rows don't ap
 
 | Direction | Route | Why |
 |---|---|---|
-| Transmit | software modulation at 8 kHz (`nxdn_mod`), samples through the prompt FIFO into the FM modulator during an FM transmission, the route APRS uses (RadioFoundry `modem-hrc7000.md` 8.4, `hrc_afsk.c`) | no error floor, 10 dB less adjacent-channel power than the native route, the pulse is NXDN's own; the native route would also need its framer to send a non-DMR stream |
+| Transmit | software modulation at 8 kHz (`nxdn_mod`), 256-sample TX RAM halves requested by SYS_INTERP b15 (HR_C7000 guide pp. 271, 339-340) | replaces the prompt FIFO after off-air block distortion and no decoded frames with the microphone disconnected; TX RAM is documented but its RF response and scale are still unverified on this board |
 | Receive | software demodulation at 8 kHz (`nxdn_demod`) of the modem's copy of its FM receive audio in RX RAM (RadioFoundry `modem-hrc7000.md` 8.5, `fm_rx_audio.c`) | the only path from the receiver to the CPU below the native 4800-symbol/s framer; unsquelched, so the demodulator works below the squelch |
 
 In NXDN the radio is in FM mode (WORK_MODE 0x80) in both directions, with the 12.5 kHz receive filter (the
@@ -216,11 +216,21 @@ narrowest the chip has; the simulation uses 12.5 kHz). The FM voice processing m
 (FM_BANDWIDTH b6) and pre-emphasis (b4), and the speaker gets the decoded voice, not the discriminator.
 
 On the DM-32 the FM receiver is the FD6818, a BK4819-class chip; the HR_C7000's AF input, and so its RX RAM copy, is
-the FD6818's AF output (RadioFoundry `hardware-dm32.md`). RadioFoundry's FM entry writes the FD6818's AF filter
-register 0x2B = 0xC000: in the BK4819's layout (RadioFoundry `bk4819.h`: RX bits 15 high-pass, 14 low-pass,
-13 de-emphasis, set = bypassed) that bypasses the receive high-pass and low-pass and leaves the de-emphasis on. The
-NXDN receiver writes 0xE000, the de-emphasis bypassed too. The FD6818's bit layout is unverified, so the
-demodulator's de-emphasis compensation stays available: the tables show both outcomes.
+the FD6818's AF output (RadioFoundry `hardware-dm32.md`). Its AF filter register 0x2B: in the BK4819's layout bits
+10, 9 and 8 bypass the receive 300 Hz high-pass, 3 kHz low-pass and de-emphasis, bits 2, 1 and 0 the transmit ones
+(set = bypassed; the register comment in OneOfEleven's UV-K5 firmware, `app/aircopy.c`). The stock firmware's digital
+sets agree: the DM-32 writes 0x0700 when its HR_C7000 demodulates 4FSK (`hardware-dm32.md` 8.2, the set P25 receives
+through), the BK4819 boards 0x8707. RadioFoundry's `bk4819.h` comment (RX bits 15, 14, 13) does not match them, and the
+FM entry's 0xC000 leaves the receive filters on: the APRS receive measured the de-emphasis in the RX RAM copy
+(`dm32-bringup.md`). The NXDN receiver writes 0x0700. Until the receive response is measured on the radio, the
+demodulator's de-emphasis and high-pass compensation stay available: the tables show what each costs uncompensated
+(the frame error rate is 1.00 for either alone).
+
+The sign of the RX RAM copy is not known either: the HR_C7000's own 4FSK receive runs with RF_MODE b15 (RX IQ invert)
+set on this radio, a high-side LO's discriminator gives the other sign, and whether the FM copy follows b15 is
+unmeasured. The frame layer hunts the FSW in both polarities and flips the dibits of a call found inverted, as `p25.c`
+does. With one polarity only, an inverted stream gives no frame at all, and the occasional false sync shows a RAN read
+from noise (0, or a value whose SACCH CRC passed by chance): that matches what the radio showed.
 
 The sample rate gives the modem room: 3.33 samples a symbol at 8 kHz. The cost is about 220 k multiply-adds a second
 for both filters, which is small next to the AMBE+2 vocoder.
@@ -231,21 +241,32 @@ Measured on the hardware before NXDN is called working (`docs/hil-checklist.md`)
 
 1. **Transmit scale.** The prompt FIFO's LSB per Hz of deviation in NXDN's FM settings. APRS measured about
    2750 LSB for 3 kHz peak at 25 kHz (`radio_dm32.c`); the board's tap starts from that (`fm_tx_nominal_peak`
-   1375 for 1.5 kHz, `dm32_nxdn.inc`) and the value is calibrated with a service monitor on the 1200 Hz dotting
-   of the preamble (+-1050 Hz peak).
+   1375 for 1.5 kHz, `dm32_nxdn.inc`). This starting value is retained for the TX RAM candidate, not a measurement
+   of its gain. Calibrate that route with a service monitor on the 1200 Hz dotting of the preamble (+-1050 Hz peak).
 2. **Transmit low-frequency response.** Whether the prompt FIFO path has a high-pass or pre-emphasis with the voice
    processing off: send the +3 / -3 preamble and a long run of +3 symbols, measure the deviation's droop. The
    measured corner goes into the tap's `flat_tx_hpf_hz` (the link pre-compensates it), or nothing.
-3. **Receive frequency response** of the RX RAM copy with the band-pass off and FD6818 0x2B = 0xE000: 50 Hz,
+   **DM-32 off-air measurements, 2026-11-13:** the FIFO route with FD6818 0x2B=0xC000 rose about 7-8 dB/octave
+   (-12.5 dB at 300 Hz, +5 dB at 1.4 kHz relative to 1 kHz). Bypassing TX HPF/LPF/pre-emphasis with 0xC007 removed
+   the rise, leaving a low-frequency droop compatible with a roughly 290 Hz high-pass (-12 dB at 100 Hz). Changing
+   0x7E from 0x302E to 0x3006 did not remove it. A new 10 s capture with the programming cable connected and no
+   speech (`captura-nxdn-tx-sin-micro-20261113.c64`, conditions confirmed by the operator) still has 0 decoded
+   frames/calls, 2399.99 Bd and only 27.2% blind-eye score (reference 87.0%). Envelope lines at 125/250/500/1000 Hz
+   are 89.0/83.8/57.8/19.4 times the local floor. Disabling the microphone alone therefore does not resolve the
+   distortion. Do not set `flat_tx_hpf_hz` from this result while the eye remains closed; a TX RAM replacement needs
+   its own response and scale measurements. Source: off-air Pluto IQ, `analizar_tx.py --hpf 290`; dsd-fme finds 79
+   NXDN48 syncs but only spurious RAN 56, no VCALL or valid source/destination. No working TX is claimed.
+3. **Receive frequency response** of the RX RAM copy with the band-pass off and FD6818 0x2B = 0x0700: 50 Hz,
    300 Hz, 1 kHz and 2 kHz tones at the same deviation from a signal generator, their levels in the RX RAM samples.
    Flat: no compensation. A first-order roll-off above about 200 Hz: the de-emphasis is still on (`flat_rx_deemph_us`
    750). A droop at 50 Hz: a high-pass, its corner into `flat_rx_hpf_hz`. Then the receive gain against clipping
    (receiver noise reaches full scale with the reset AF gain, RadioFoundry `modem-hrc7000.md` 8.5).
-4. **The prompt FIFO reaches the modulator on this board** with the FM voice source switched to TX RAM
-   (AUDIO_CONTROL b0). RadioFoundry measured ring play reaching the modulator for APRS on some boards, the codec mixer
-   route on others; the mixer route passes the transmit limiter. With b0 set: no microphone audio on air (speak into
-   the radio during an NXDN transmission and listen on a receiver in FM), and the microphone still reaching the
-   vocoder (ambeVoice's `tx_mic_peak` and level statistics on the debug link).
+4. **TX RAM reaches the modulator without block corruption** with AUDIO_CONTROL b0 set and prompt ring play off.
+   SYS_INTERP b15 must alternate the writable FM_ADDR_SW half at 32 ms; samples are high byte first. Initialization
+   uses silence in both halves, and normal release waits 64 ms after the software queue empties; cancel and channel
+   change still stop immediately. Confirm continuity, four-level eye and absence of microphone audio on air while
+   microphone PCM still reaches the vocoder. The previous prompt FIFO candidate failed even with the cable
+   disconnecting the microphone. Neither a successful host test nor the documented TX RAM source proves RF success.
 5. **Speaker playback of decoded voice in FM mode**: the PCM stream and the speaker route while the receiver is in FM
    with the FD6818's audio on the HR_C7000's input.
 6. **Decoding by another receiver**: a commercial NXDN radio or dsd-fme from an SDR on the radio's transmission,

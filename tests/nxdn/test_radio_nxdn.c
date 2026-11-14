@@ -16,6 +16,9 @@
 #include <string.h>
 
 /* ---- fake board ---- */
+static bool tx_ram;
+static uint16_t tx_pos;
+static int16_t tx_pcm[512];
 static struct {
     int rx_calls, tx_calls, tx_off_calls, flat_on, flat_off, inject_on, inject_off, starts, stops, spk_on;
     uint32_t rx_hz, tx_hz;
@@ -80,6 +83,8 @@ static bool f_inject(audio_tap_pull_t pull, audio_tap_mode_t mode)
     if (pull) {
         assert(hw.transmitting && !hw.flat);
         hw.inject_on++;
+        tx_pos = 0;
+        memset(tx_pcm, 0, sizeof tx_pcm);
     } else {
         hw.inject_off++;
     }
@@ -138,7 +143,15 @@ static void step_ms(unsigned ms)
 {
     for (unsigned k = 0; k < ms; k++) {
         now_ms++;
-        if (now_ms % 2 == 0 && hw.pull) {
+        if (tx_ram && hw.pull) {
+            /* Two hardware halves: play 8 samples/ms, then refill the half just consumed. */
+            assert(tx_have + 8 <= AIR_MAX);
+            memcpy(tx_air + tx_have, tx_pcm + tx_pos, 8 * sizeof tx_pcm[0]);
+            tx_have += 8;
+            tx_pos = (tx_pos + 8) % 512;
+            if (tx_pos % 256 == 0) hw.pull(tx_pcm + (tx_pos == 256 ? 0 : 256), 256);
+        }
+        if (!tx_ram && now_ms % 2 == 0 && hw.pull) {
             assert(tx_have + 16 <= AIR_MAX);
             hw.pull(tx_air + tx_have, 16);   /* the tap's timer interrupt */
             tx_have += 16;
@@ -215,8 +228,10 @@ static radio_dv_cfg_t channel(void)
     return c;
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    (void)argv;
+    tx_ram = argc > 1;
     ambeVoiceInit(&audio, &vocoder);
     radio_dv_cfg_t c = channel();
 
@@ -247,6 +262,35 @@ int main(void)
     assert(n_dec - k >= 60 && !memcmp(dec[k], sent[0], 49));
     for (unsigned i = 0; i < 60; i++) assert(!memcmp(dec[k + i], sent[i], 49));
 
+    /* The bench capture (nxdn_snap): the samples the demodulator got, from the stream index it names, held whole */
+    uint32_t seq0 = nxdn_snap.seq;
+    for (unsigned guard = 0; nxdn_snap.seq == seq0 && guard < 300; guard++) step_ms(10);   /* a fresh one */
+    assert(nxdn_snap.magic == NXDN_SNAP_MAGIC && nxdn_snap.seq >= 2 && nxdn_snap.n == NXDN_SNAP_SAMPLES);
+    assert(nxdn_snap.start + NXDN_SNAP_SAMPLES <= rx_pos && nxdn_snap.frames >= 15 && nxdn_snap.calls == 1);
+    assert(!memcmp(nxdn_snap.pcm, rx_air + nxdn_snap.start, sizeof nxdn_snap.pcm));
+    int32_t peak = 0;
+    for (unsigned i = 0; i < NXDN_SNAP_SAMPLES; i++) {
+        int32_t v = nxdn_snap.pcm[i] < 0 ? -nxdn_snap.pcm[i] : nxdn_snap.pcm[i];
+        if (v > peak) peak = v;
+    }
+    assert(nxdn_snap.peak == (uint32_t)peak && nxdn_snap.clips == 0);
+    uint32_t seq = nxdn_snap.seq, held_at = nxdn_snap.t_ms;
+    step_ms(NXDN_SNAP_HOLD_MS - 20);
+    assert(nxdn_snap.seq == seq && nxdn_snap.t_ms == held_at);   /* held for the host */
+
+    /* A receiver whose discriminator gives the other sign: a call with every sample negated plays whole */
+    unsigned dec0 = n_dec;
+    n_sent = 0;
+    size_t at = rx_have + 2400;
+    make_call(at, 20, 12, 3210, 200);
+    for (size_t i = at; i < call_end; i++) rx_air[i] = (int16_t)-rx_air[i];
+    while (rx_have < call_end + 8000) step_ms(10);
+    k = dec0;
+    while (k < n_dec && silence_or(dec[k])) k++;
+    fprintf(stderr, "rx inverted: decoded %u of %u slots\n", n_dec - k, n_sent);
+    assert(n_dec - k >= 20);
+    for (unsigned i = 0; i < 20; i++) assert(!memcmp(dec[k + i], sent[i], 49));
+
     /* Transmit: the board keys FM on the TX frequency at the channel's power, the receive path is off meanwhile, the
      * mic's frames go out whole; after PTT the release frame and tail go, then the carrier drops and receive resumes */
     n_enc = 0;
@@ -261,6 +305,10 @@ int main(void)
     unsigned spoken = n_enc;
     for (unsigned guard = 0; hw.tx_off_calls == 0 && guard < 1000; guard++) step_ms(10);
     assert(hw.tx_off_calls == 1 && hw.inject_off >= 1 && hw.pull == NULL);
+    if (tx_ram) {
+        /* Normal release waits for queued hardware samples; immediate cancellation below does not. */
+        for (unsigned i = 0; i < 512; i++) assert(tx_pcm[i] == 0);
+    }
     assert(hw.rx_calls == rx_before + 1 && hw.flat && hw.rx_hz == 451125000);
     radio_nxdn_status(&st, now_ms);
     assert(!st.transmitting && st.tx_calls == 1 && st.tx_reason == NT_TX_COMPLETE && st.tx_blocks >= 12);
@@ -273,7 +321,7 @@ int main(void)
     fprintf(stderr, "tx: %zu samples, %u slots heard, %u encoded (%u while PTT), calls %u rel %u src %u\n", tx_have,
             n_heard_slots, n_enc, spoken, rx.rx.calls, rx.rx.releases, rx.rx.msg.source);
     assert(rx.rx.calls == 1 && rx.rx.releases == 1 && rx.rx.msg.source == 4001 && rx.rx.msg.destination == 200);
-    /* the voice heard: the encoder's frames in order, from the first, maybe after leading silence */
+    /* The encoder's frames stay in order across any padding silence (the block-paced route can need it). */
     unsigned h = n_heard_slots, j = 0;
     uint8_t p[49];
     ambe_fec_result_t r;
@@ -284,7 +332,7 @@ int main(void)
     unsigned voice = 0;
     for (; j < h; j++) {
         ambeFecDecode(heard_slots[j], p, &r);
-        if (silence_or(p)) break;
+        if (silence_or(p)) continue;
         assert(!memcmp(p, enc[voice], 49));
         voice++;
     }
@@ -306,7 +354,7 @@ int main(void)
     assert(radio_nxdn_select(NULL));
     assert(hw.pull == NULL && !hw.transmitting && !hw.flat && hw.stops == stops + 1);
 
-    printf("PASS NXDN radio channel: receive to the vocoder in order, PTT keys FM with the flat path, the mic's frames "
+    printf("PASS NXDN radio channel: receive to the vocoder in order (either polarity), the bench capture, PTT keys FM with the flat path, the mic's frames "
            "on air in order, release then carrier off then receive, board refusal, leaving while on air\n");
     return 0;
 }

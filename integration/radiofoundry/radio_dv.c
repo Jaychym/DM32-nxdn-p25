@@ -40,6 +40,7 @@ static void p25_status(radio_dv_status_t *o, uint32_t now_ms)
     native_lab_channel_state(&ch);
     bool recent = rx.last_frame_ms && now_ms - rx.last_frame_ms < RADIO_DV_BUSY_MS;
     o->active = ch.enabled && ch.receiving;
+    o->fault = ch.faulted;
     o->sync = recent;
     o->sync_ours = recent && rx.ours;
     o->playing = recent && rx.playing && !rx.ended && !ch.transmitting;

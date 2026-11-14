@@ -1,0 +1,306 @@
+--- a/core/radio/beep.c
++++ b/core/radio/beep.c
+@@ -23,8 +23,11 @@
+ // Distinct sounds (radio users tell them apart without looking, docs/ux/survey.md)
+ static const beep_seg_t p_key[] = { { 1000, 25 } };
+ static const beep_seg_t p_error[] = { { 400, 150 } };
+-static const beep_seg_t p_permit[] = { { 1600, 50 }, { 0, 40 }, { 1600, 50 } };
+-static const beep_seg_t p_permit_short[] = { { 1600, 80 } };	// the same pitch, once: it delays keying
++// Talk permits as Motorola radios sound them (hobbyist measurements, no official spec; RadioFoundry issue 387).
++// DMR: the MOTOTRBO chirp, four 40 ms notes G6 C6 G6 E6 without gaps (160 ms; also the one played before keying).
++// P25 / NXDN: the ASTRO 25 permit, three 910 Hz beeps
++static const beep_seg_t p_permit[] = { { 1570, 40 }, { 1046, 40 }, { 1570, 40 }, { 1318, 40 } };
++static const beep_seg_t p_permit_dv[] = { { 910, 70 }, { 0, 20 }, { 910, 30 }, { 0, 20 }, { 910, 60 } };
+ static const beep_seg_t p_deny[] = { { 300, 400 } };
+ static const beep_seg_t p_call_end[] = { { 1200, 50 }, { 0, 30 }, { 900, 70 } };
+ static const beep_seg_t p_tot[] = { { 1000, 100 }, { 0, 100 }, { 1000, 100 } };
+@@ -53,7 +56,8 @@
+ 	[BEEP_SCAN_HOLD] = PAT(p_scan_hold),
+ 	[BEEP_EMERGENCY] = PAT(p_emergency),
+ 	[BEEP_MESSAGE] = PAT(p_message),
+-	[BEEP_TX_PERMIT_SHORT] = PAT(p_permit_short),
++	[BEEP_TX_PERMIT_SHORT] = PAT(p_permit),
++	[BEEP_TX_PERMIT_DV] = PAT(p_permit_dv),
+ };
+ 
+ // One period of a sine, Q15
+@@ -112,6 +116,11 @@
+ bool beep_busy(void)
+ {
+ 	return cb_active || LOAD(req_seq) != cb_seq;
++}
++
++bool beep_streaming(void)
++{
++	return own_stream;
+ }
+ 
+ void beep_play(beep_t b, uint8_t level, bool shared)
+--- a/core/radio/beep.h
++++ b/core/radio/beep.h
+@@ -30,7 +30,8 @@
+ 	BEEP_SCAN_HOLD,		// the scan stopped on a signal (unused by default)
+ 	BEEP_EMERGENCY,		// DMR: someone's emergency heard (alarm or emergency call; core/dmr/dmr_emergency.h)
+ 	BEEP_MESSAGE,		// a text message arrived (the UI, if Settings > Sound > Message tone)
+-	BEEP_TX_PERMIT_SHORT,	// DMR: talk now, played before keying (CAP_BEEP_NOT_ON_AIR): one short tone
++	BEEP_TX_PERMIT_SHORT,	// DMR: talk now, played before keying (CAP_BEEP_NOT_ON_AIR)
++	BEEP_TX_PERMIT_DV,	// P25 / NXDN: talk now, played before keying (Motorola ASTRO 25 style)
+ 	BEEP_COUNT
+ } beep_t;
+ 
+@@ -59,6 +60,8 @@
+ bool beep_mix(int16_t *spk);
+ // Whether a pattern is still playing (as last seen by the audio side)
+ bool beep_busy(void);
++// Whether the beep's own stream still runs (radio task). A stream started after it would be stopped by beep_service
++bool beep_streaming(void);
+ // The pattern's segments (for tests and docs); count returned
+ uint8_t beep_pattern(beep_t b, const beep_seg_t **segs);
+ void beep_get_stats(beep_stats_t *out);
+--- a/core/radio/radio_sm.c
++++ b/core/radio/radio_sm.c
+@@ -867,6 +867,7 @@
+ 		sm->dv_running = false;
+ 		sm->board_mode = RADIO_MODE_FM;
+ 	}
++	sm->dv_permit_ms = 0;
+ 	sm->view.dv.active = false;
+ 	sm->view.dv.state = RDV_IDLE;
+ }
+@@ -983,8 +984,29 @@
+ }
+ 
+ #if RADIO_SM_DV
+-// PTT on a digital voice channel: the TX rules passed (tx_check); its session switches to transmit
+-static void dv_ptt_down(radio_sm_t *sm, uint32_t now_ms)
++// The talk permit before keying a digital voice channel (BEEP_TX_PERMIT_DV, Motorola style): the beep plays while the
++// channel still receives, then the session keys. The hold also waits for the beep's own stream to stop: the transmit
++// session starts the microphone's stream, and beep_service would stop that one under it
++#define DV_PERMIT_MAX_MS	600u	// keys after this long whatever the beep says
++
++// Not on trunked channels: there the permit means the system granted the call, not that PTT was pressed
++static bool dv_permit_on(const radio_sm_t *sm)
++{
++	return CONFIG_BEEP && sm->set.talk_permit && !sm->view.ch.no_beep && sm->view.ch.mode != RADIO_MODE_P25_TRUNK;
++}
++
++static bool dv_permit_busy(void)
++{
++#if CONFIG_BEEP
++	const hal_audio_t *a = board.audio;
++	return beep_busy() || beep_streaming() || (a != NULL && a->spk_pending != NULL && a->spk_pending());
++#else
++	return false;
++#endif
++}
++
++// The TX rules passed (tx_check) and the talk permit (if any) played: the channel's session switches to transmit
++static void dv_key(radio_sm_t *sm, uint32_t now_ms)
+ {
+ 	radio_dv_status_t s;
+ 	radio_dv_status(&s, now_ms);
+@@ -1008,6 +1030,27 @@
+ 	sm->view.dv.call_ms = now_ms;
+ 	outputs(sm);
+ 	changed(sm);
++}
++
++// PTT on a digital voice channel: the talk permit first, if it is on
++static void dv_ptt_down(radio_sm_t *sm, uint32_t now_ms)
++{
++	if (!dv_permit_on(sm)) {
++		dv_key(sm, now_ms);
++		return;
++	}
++	beep(sm, BEEP_TX_PERMIT_DV);
++	sm->dv_permit_ms = now_ms != 0 ? now_ms : 1;
++}
++
++// Every tick: key once the talk permit is over (PTT let go during it: ptt_release dropped it)
++static void dv_permit_poll(radio_sm_t *sm, uint32_t now_ms)
++{
++	if (sm->dv_permit_ms == 0 || (dv_permit_busy() && now_ms - sm->dv_permit_ms < DV_PERMIT_MAX_MS)) {
++		return;
++	}
++	sm->dv_permit_ms = 0;
++	dv_key(sm, now_ms);
+ }
+ 
+ // The native session's state into the view: calls heard, the end of our transmission, its time-out
+@@ -4025,6 +4068,10 @@
+ 	sm->ptt = false;
+ 	activity(sm, now_ms);
+ #if RADIO_SM_DV
++	if (sm->dv_permit_ms != 0) {
++		sm->dv_permit_ms = 0;	// let go during the talk permit: never keyed
++		return;
++	}
+ 	if (sm->dv_running && sm->view.state == RS_TX) {
+ 		radio_dv_ptt(false);	// the terminator goes out; dv_follow ends RS_TX once it is off air
+ 		dv_follow(sm, now_ms);
+@@ -6165,6 +6212,7 @@
+ 	sm->dv_now_ms = now_ms;
+ 	if (sm->dv_running) {
+ 		radio_dv_service(now_ms);	// NXDN's modem runs here
++		dv_permit_poll(sm, now_ms);
+ 		dv_follow(sm, now_ms);
+ 	}
+ #endif
+--- a/core/radio/radio_sm.h
++++ b/core/radio/radio_sm.h
+@@ -271,6 +271,7 @@
+ 	bool dv_running;		// a digital voice channel runs (radio_dv.h): P25's native session or NXDN's modem
+ 	bool dv_tot;			// the time-out ended this digital transmission: denied once it has gone off air
+ 	uint32_t dv_tx_calls;		// radio_dv_status_t.tx_calls when this transmission began
++	uint32_t dv_permit_ms;		// the talk permit before keying started (PTT held, not keyed yet), 0 = none
+ 	uint32_t dv_now_ms;		// the time of the last poll or tick (radio_dv_status ages its frames by it)
+ 
+ 	radio_settings_t set;		// the settings in effect
+--- a/core/radio/radio.h
++++ b/core/radio/radio.h
+@@ -55,7 +55,7 @@
+ 	// Beeps (CONFIG_BEEP)
+ 	uint8_t beep_level;	// 0 = silent .. 100: the loudest a beep gets (it follows the volume up to this)
+ 	bool key_beep;		// radio_req_beep(BEEP_KEY) sounds
+-	bool talk_permit;	// DMR: the talk permit tone when the voice goes on air (channels without no_beep)
++	bool talk_permit;	// the talk permit tone (DMR, P25, NXDN; channels without no_beep)
+ 	// VOX (CONFIG_VOX)
+ 	uint8_t vox;		// radio_vox_t
+ 	uint8_t vox_level;	// sensitivity 1 (needs a loud voice) .. 10
+--- a/tests/host/radioCoreTest.c
++++ b/tests/host/radioCoreTest.c
+@@ -4616,6 +4616,7 @@
+ #if RADIO_SM_DV
+ // ---- P25 and NXDN channels: a fake session behind radio_dv.h ----
+ #include "dv/radio_dv.h"
++#include "radio/beep.h"
+ enum { NT_USER_STOP_ = 1, NT_TX_COMPLETE_ = 3, NT_LATE_ = 8, NT_DENIED_ = 14 };	// native_test.h
+ static struct {
+ 	bool selected, refuse;
+@@ -4673,6 +4674,13 @@
+ 	dv.st.transmitting = false;
+ 	dv.st.tx_calls++;
+ 	dv.st.tx_reason = reason;
++}
++// PTT down through the talk permit: it plays before the session keys (with no audio blocks fed, the beep's stream
++// gives up after its stall polls)
++static void dv_ptt(void)
++{
++	req(RREQ_PTT, 1);
++	run(400);
+ }
+ static void dv_heard(bool ours, bool playing, uint16_t tg, uint32_t src)
+ {
+@@ -4721,7 +4729,7 @@
+ 	CHECK(sm.view.state == RS_IDLE);
+ 
+ 	// PTT on air and off, as P25
+-	req(RREQ_PTT, 1);
++	dv_ptt();
+ 	CHECK(sm.view.state == RS_TX && dv.downs == 1 && hw.tx_calls == 0);
+ 	CHECK(sm.view.dv.talkgroup == 200 && sm.view.dv.source == 4001);
+ 	run(500);
+@@ -4753,7 +4761,7 @@
+ 	req(RREQ_ZONE_POS, 2);
+ 	run(30);
+ 	CHECK(dv.cfg.unit_id == 65519);
+-	req(RREQ_PTT, 1);
++	dv_ptt();
+ 	CHECK(sm.view.state == RS_TX && dv.downs == 2);
+ 	dv_tx_ended(NT_TX_COMPLETE_);
+ 	req(RREQ_PTT, 0);
+@@ -4902,8 +4910,17 @@
+ 	dv_quiet();
+ 	run(30);
+ 
+-	// PTT: the native session transmits; the board's FM transmitter is never keyed
+-	req(RREQ_PTT, 1);
++	// PTT: the talk permit first (Motorola ASTRO 25, three 910 Hz beeps), the channel still receiving and nothing keyed;
++	// the session keys once the beep and its own stream are over (the session's microphone stream comes next)
++	aud.feed = true;
++	req(RREQ_PTT, 1);
++	CHECK(sm.view.state != RS_TX && dv.downs == 0 && aud.started && beep_busy() && !hw.led[LED_RED]);
++	run(150);
++	CHECK(sm.view.state != RS_TX && dv.downs == 0 && beep_busy());
++	run(250);
++	aud.feed = false;
++	// the native session transmits; the board's FM transmitter is never keyed
++	CHECK(!beep_streaming() && !aud.started);
+ 	CHECK(sm.view.state == RS_TX && dv.downs == 1 && hw.tx_calls == 0 && hw.led[LED_RED]);
+ 	CHECK(sm.view.dv.state == RDV_TX && sm.view.dv.source == own_dmr_id && sm.view.dv.talkgroup == 100);
+ 	run(1000);
+@@ -4916,8 +4933,15 @@
+ 	run(20);
+ 	CHECK(sm.view.state == RS_IDLE && !hw.led[LED_RED] && sm.view.dv.state == RDV_IDLE);
+ 
++	// Let go during the talk permit: never keyed, nothing to release
++	req(RREQ_PTT, 1);
++	run(50);
++	req(RREQ_PTT, 0);
++	run(400);
++	CHECK(sm.view.state == RS_IDLE && dv.downs == 1 && dv.ups == 1 && sm.dv_permit_ms == 0);
++
+ 	// Time-out: the core ends the call (terminator), then shows the time-out until PTT is released
+-	req(RREQ_PTT, 1);
++	dv_ptt();
+ 	CHECK(sm.view.state == RS_TX && dv.downs == 2);
+ 	run(179000);
+ 	CHECK(dv.ups == 1 && sm.view.state == RS_TX);
+@@ -4930,21 +4954,20 @@
+ 	CHECK(sm.view.state == RS_IDLE && dv.ups == 2);
+ 
+ 	// A modem fault on air: off at once, shown until release
+-	req(RREQ_PTT, 1);
+-	run(200);
++	dv_ptt();
+ 	dv_tx_ended(NT_LATE_);
+ 	run(20);
+ 	CHECK(sm.view.state == RS_TX_DENIED && sm.view.tx_deny == TXDENY_NO_DMR && !hw.led[LED_RED]);
+ 	req(RREQ_PTT, 0);
+ 	CHECK(sm.view.state == RS_IDLE);
+ 	// The board refused (band, calibration, battery, the laboratory gate)
+-	req(RREQ_PTT, 1);
++	dv_ptt();
+ 	dv_tx_ended(NT_DENIED_);
+ 	run(20);
+ 	CHECK(sm.view.state == RS_TX_DENIED && sm.view.tx_deny == TXDENY_REJECTED);
+ 	req(RREQ_PTT, 0);
+ 	// Released before the session started: nothing went out, back to receive
+-	req(RREQ_PTT, 1);
++	dv_ptt();
+ 	dv.st.transmitting = false;
+ 	req(RREQ_PTT, 0);
+ 	run(20);
+@@ -4958,7 +4981,7 @@
+ 	CHECK(sm.view.state == RS_TX_DENIED && sm.view.tx_deny == TXDENY_BUSY && dv.downs == 5);
+ 	req(RREQ_PTT, 0);
+ 	sm.set.bcl = RADIO_BCL_WRONG_TONE;
+-	req(RREQ_PTT, 1);
++	dv_ptt();
+ 	CHECK(sm.view.state == RS_TX && dv.downs == 6);	// our own NAC's call: talk back
+ 	dv_tx_ended(NT_TX_COMPLETE_);
+ 	req(RREQ_PTT, 0);
+--- a/tests/host/radioFeaturesTest.c
++++ b/tests/host/radioFeaturesTest.c
+@@ -746,8 +746,8 @@
+ 	}
+ 	CHECK(beep_mix(blk));
+ 	CHECK(blk[0] == 1000 && blk[20] != 1000);
+-	// 50+40+50 ms = 1120 samples = 7 blocks; the eighth is quiet
+-	for (int i = 0; i < 6; i++) {
++	// The MOTOTRBO chirp: 4 x 40 ms = 1280 samples = 8 blocks; the ninth is quiet
++	for (int i = 0; i < 7; i++) {
+ 		CHECK(beep_mix(blk));
+ 	}
+ 	CHECK(!beep_mix(blk));
+--- a/tests/host/beepReel.c
++++ b/tests/host/beepReel.c
+@@ -106,6 +106,8 @@
+ 	{ NULL, "long:quick", NULL, false, false, 0 },
+ 	{ "Emergency heard", "emergency:3105678", "EMERGENCY", false, false, 0 },
+ 	{ NULL, "back", NULL, false, false, 500 },
++	{ "P25 / NXDN: permit before keying (Motorola ASTRO 25)", "p25:idle", "TX_PERMIT_DV", false, false, 0 },
++	{ NULL, "p25:tx", NULL, false, true, 600 },
+ };
+ #define STEPS	((int)(sizeof steps / sizeof steps[0]))
+ 

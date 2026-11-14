@@ -1,0 +1,173 @@
+--- a/core/radio/radio.h
++++ b/core/radio/radio.h
+@@ -182,6 +182,8 @@
+ typedef enum { RDV_IDLE, RDV_RX, RDV_RX_OTHER, RDV_TX } radio_dv_state_t;
+ typedef struct {
+ 	bool active;		// the channel's receiver runs
++	bool built;		// this build carries the channel's digital mode (radio_sm's dv_mode_built)
++	bool fault;		// its session faulted and the channel re-arms it
+ 	uint8_t state;		// radio_dv_state_t
+ 	uint16_t nac;		// NAC of the call (RX) or ours (TX)
+ 	uint16_t talkgroup;	// the call's talkgroup, or ours while transmitting
+--- a/core/radio/radio_sm.c
++++ b/core/radio/radio_sm.c
+@@ -857,6 +857,7 @@
+ 	sm->dv_running = radio_dv_select(&c);
+ 	memset(&sm->view.dv, 0, sizeof(sm->view.dv));
+ 	sm->view.dv.active = sm->dv_running;
++	sm->view.dv.built = dv_mode_built(ch->mode);
+ }
+ 
+ static void dv_end(radio_sm_t *sm)
+@@ -922,8 +923,11 @@
+ 	}
+ #if RADIO_SM_DV
+ 	if (codeplug_mode_digital_voice(ch->mode)) {
+-		if (!dv_mode_built(ch->mode) || !sm->dv_running) {
+-			return TXDENY_MODE;		// not in this build, or the channel's session didn't start
++		if (!dv_mode_built(ch->mode)) {
++			return TXDENY_MODE;		// the channel's mode is not built in
++		}
++		if (!sm->dv_running) {
++			return TXDENY_NO_DMR;	// the digital session is not up (starting or recovering): the modem
+ 		}
+ 		if (ch->mode == RADIO_MODE_P25_TRUNK && !CONFIG_P25_TRUNK_TX) {
+ 			return TXDENY_MODE;		// trunked transmit is a separate switch, off by default (receive only)
+@@ -985,7 +989,7 @@
+ 	radio_dv_status_t s;
+ 	radio_dv_status(&s, now_ms);
+ 	if (!radio_dv_ptt(true)) {
+-		deny(sm, TXDENY_MODE);
++		deny(sm, TXDENY_NO_DMR);
+ 		return;
+ 	}
+ 	sm->dv_tx_calls = s.tx_calls;
+@@ -1012,8 +1016,9 @@
+ 	radio_dv_status_t s;
+ 	radio_dv_view_t *v = &sm->view.dv;
+ 	radio_dv_status(&s, now_ms);
+-	if (s.active != v->active) {
++	if (s.active != v->active || s.fault != v->fault) {
+ 		v->active = s.active;
++		v->fault = s.fault;
+ 		changed(sm);
+ 	}
+ 	if (sm->view.ch.mode == RADIO_MODE_P25_TRUNK && (s.trunk_state != v->trunk || s.trunk_registered != v->trunk_registered)) {
+--- a/core/ui/ui_screens.c
++++ b/core/ui/ui_screens.c
+@@ -273,8 +273,11 @@
+ 	sbuf_t b;
+ 	sb_init(&b, buf, sizeof buf);
+ 	color_t c = ui_col.fg;
+-	if (!v->dv.active) {
++	if (!v->dv.built) {
+ 		sb_str(&b, TR("Digital: not in this build"));
++		c = ui_col.warn;
++	} else if (!v->dv.active) {
++		sb_str(&b, v->dv.fault ? TR("Digital: modem fault") : TR("Digital: starting"));
+ 		c = ui_col.warn;
+ 	} else if (v->ch.mode == RADIO_MODE_P25_TRUNK && v->dv.trunk == RDV_TRUNK_HUNT) {
+ 		sb_str(&b, TR("Searching for the site"));
+@@ -788,13 +791,13 @@
+ 	}
+ }
+ 
+-// The wordmark: "Radio" in the accent color, "Foundry" in the text color, centered; returns its height
++// The wordmark: "Open25" in the accent color, "-DM32" in the text color, centered; returns its height
+ static int draw_wordmark(const font_t *f, int y)
+ {
+-	int w1 = gfx_text_width(f, "Radio") + 1, w = w1 + gfx_text_width(f, "Foundry");
++	int w1 = gfx_text_width(f, "Open25") + 1, w = w1 + gfx_text_width(f, "-DM32");
+ 	int x = (gfx_width() - w) / 2;
+-	gfx_text(f, x, y, "Radio", gfx_bpp() == 1 ? ui_col.fg : AMBER);
+-	gfx_text(f, x + w1, y, "Foundry", ui_col.fg);
++	gfx_text(f, x, y, "Open25", gfx_bpp() == 1 ? ui_col.fg : AMBER);
++	gfx_text(f, x + w1, y, "-DM32", ui_col.fg);
+ 	return f->h;
+ }
+ 
+@@ -804,7 +807,7 @@
+ 	const ui_layout_t *L = &ui_layout;
+ 	gfx_clear(ui_col.bg);
+ 
+-	const char *word = "RadioFoundry";
++	const char *word = "Open25-DM32";
+ 	const font_t *wf = gfx_text_width(L->large, word) <= w - 4 ? L->large :
+ 		gfx_text_width(L->medium, word) <= w - 4 ? L->medium : L->small;
+ 	// The owner's lines (the CPS boot text): as large as fits, never dropped
+@@ -874,8 +877,8 @@
+ 		int sw = side_w, ww = gfx_text_width(wf, word);
+ 		int x0 = (w - sw - ww) / 2, row_h = 2 * side_r > wf->h ? 2 * side_r : wf->h;
+ 		draw_mark(x0 + (sw - 4) / 2, y + row_h / 2, side_r);
+-		gfx_text(wf, x0 + sw, y + (row_h - wf->h) / 2, "Radio", gfx_bpp() == 1 ? ui_col.fg : AMBER);
+-		gfx_text(wf, x0 + sw + gfx_text_width(wf, "Radio") + 1, y + (row_h - wf->h) / 2, "Foundry", ui_col.fg);
++		gfx_text(wf, x0 + sw, y + (row_h - wf->h) / 2, "Open25", gfx_bpp() == 1 ? ui_col.fg : AMBER);
++		gfx_text(wf, x0 + sw + gfx_text_width(wf, "Open25") + 1, y + (row_h - wf->h) / 2, "-DM32", ui_col.fg);
+ 		y += row_h;
+ 	} else
+ 		y += draw_wordmark(wf, y);
+--- a/core/ui/ui_menus.c
++++ b/core/ui/ui_menus.c
+@@ -4093,7 +4093,6 @@
+ // authors, the third-party code and fonts in this image and the codec. From AUTHORS and platform/<platform>/THIRD_PARTY,
+ // through the header make generates (tools/gen_about.py)
+ 
+-static const char *const about_authors[] = RFOUNDRY_ABOUT_AUTHORS;
+ static const char *const about_third[][2] = RFOUNDRY_ABOUT_THIRD_PARTY;
+ static uint16_t about_first;	// first line shown
+ static uint16_t about_max;	// the largest first line (from the last draw)
+@@ -4107,7 +4106,7 @@
+ 	// wider than the display and the release wrapped without its label. A release: its name, then the commit it was
+ 	// built from; any other build: the commit alone
+ 	sb_str(&b, TR("Firmware: "));
+-	sb_str(&b, "RadioFoundry\n");
++	sb_str(&b, "Open25-DM32\n");
+ 	if (RFOUNDRY_RELEASE[0] != '\0') {
+ 		sb_str(&b, TR("Release: "));
+ 		sb_str(&b, RFOUNDRY_RELEASE);
+@@ -4129,11 +4128,10 @@
+ 	sb_str(&b, TR("License: "));
+ 	sb_str(&b, "MIT, (c) 2026 The RadioFoundry Authors\n");
+ 	// one author per line, in AUTHORS order: a comma-joined list wraps mid-name on every display
+-	sb_str(&b, RFOUNDRY_ABOUT_AUTHOR_COUNT > 1 ? TR("Authors:") : TR("Author:"));
+-	for (unsigned i = 0; i < RFOUNDRY_ABOUT_AUTHOR_COUNT; i++) {
+-		sb_chr(&b, RFOUNDRY_ABOUT_AUTHOR_COUNT > 1 ? '\n' : ' ');
+-		sb_str(&b, about_authors[i]);
+-	}
++	sb_str(&b, TR("Author:"));
++	sb_chr(&b, ' ');
++	sb_str(&b, "lyra XE1POC");	// the derivative's author
++
+ 	for (unsigned i = 0; i < RFOUNDRY_ABOUT_THIRD_PARTY_COUNT; i++) {
+ 		sb_chr(&b, '\n');
+ 		sb_str(&b, about_third[i][0]);
+--- a/core/ui/lang/es.po
++++ b/core/ui/lang/es.po
+@@ -3144,6 +3144,12 @@
+ msgid "Digital: not in this build"
+ msgstr "Digital: no incluido"
+ 
++msgid "Digital: starting"
++msgstr "Digital: iniciando"
++
++msgid "Digital: modem fault"
++msgstr "Digital: fallo del módem"
++
+ #: core/ui/ui_screens.c
+ msgid "Searching for the site"
+ msgstr "Buscando el sitio"
+--- a/core/ui/lang/it.po
++++ b/core/ui/lang/it.po
+@@ -3144,6 +3144,12 @@
+ msgid "Digital: not in this build"
+ msgstr "Digitale: non incluso"
+ 
++msgid "Digital: starting"
++msgstr "Digitale: in avvio"
++
++msgid "Digital: modem fault"
++msgstr "Digitale: guasto del modem"
++
+ #: core/ui/ui_screens.c
+ msgid "Searching for the site"
+ msgstr "Ricerca del sito"

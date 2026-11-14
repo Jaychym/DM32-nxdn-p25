@@ -128,6 +128,29 @@ int main(void)
     native_lab_service(&sm,clock_us);assert(native_lab_voice_release(rx_sid));
     native_lab_service(&sm,clock_us);
     native_lab_channel_state(&cs);assert(live_press==presses && cs.reason==NT_DENIED);
+    /* Regression: a channel re-select while the old session winds down keeps
+     * the channel (radio_dv_select leaves and re-enters at once; the stopped
+     * session only awaits the worker release and holds nothing). */
+    native_channel c2={146520001,146520001,0};
+    native_lab_service(&sm,clock_us);native_lab_service(&sm,clock_us);
+    uint32_t old=rx_sid;assert(live->state==NT_RX);
+    assert(native_lab_channel(NULL));
+    assert(native_lab_channel(&c2));
+    assert(native_lab_voice_release(old));
+    native_lab_service(&sm,clock_us);native_lab_service(&sm,clock_us);
+    native_lab_channel_state(&cs);
+    assert(rx_sid && rx_sid!=old && live->state==NT_RX && live->config.frequency_hz==146520001 && cs.enabled && !cs.faulted);
+    /* Regression: a receive session that faults re-arms by itself; the modem
+     * fault is visible while it backs off (it used to leave the channel dead). */
+    uint32_t sick=rx_sid;
+    clock_us+=600000;nt_tick(live,clock_us);assert(live->state==NT_FAULT);
+    native_lab_service(&sm,clock_us);
+    assert(native_lab_voice_release(sick));
+    native_lab_service(&sm,clock_us);assert(rx_sid==sick);
+    native_lab_channel_state(&cs);assert(cs.faulted);
+    clock_us+=600000;native_lab_service(&sm,clock_us);native_lab_service(&sm,clock_us);
+    assert(rx_sid && rx_sid!=sick && live->state==NT_RX);
+    native_lab_channel_state(&cs);assert(cs.enabled && !cs.faulted);
     /* Leaving the channel hands the board back at once */
     assert(native_lab_channel_ptt(false));
     native_lab_service(&sm,clock_us);native_lab_service(&sm,clock_us);

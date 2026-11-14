@@ -1,33 +1,68 @@
-# Open25-DM32
+# DM32-nxdn-p25 — Open25-DM32 multimodo (FM · DMR · P25 · NXDN) para el Baofeng DM-32UV
 
-Open25-DM32 is an independent firmware research project to bring **APCO P25 Phase 1 digital voice** to the **Baofeng DM-32UV** using the radio's existing hardware. The first goal is reliable two-way conventional voice. The longer-term goal is a radio that can participate in an authorized Phase 1 trunked system, if the hardware and interoperability tests support it.
+Firmware abierto y multimodo para el **Baofeng DM-32UV**: FM, DMR, **APCO P25 fase 1** y **NXDN48** en canales convencionales, más recepción de troncal P25. Es una derivación de [Open25-DM32](https://github.com/tylerwatt12/Open25-DM32) (tylerwatt12), construida como serie de parches sobre [RadioFoundry](https://github.com/RadioFoundry/RadioFoundry). Esta rama la mantiene **lyra XE1POC**.
 
-[![Donate via GitHub Sponsors](https://img.shields.io/badge/Donate-GitHub%20Sponsors-EA4AAA?style=for-the-badge&logo=githubsponsors&logoColor=white)](https://github.com/sponsors/tylerwatt12?metadata_project=open25-dm32)
-[![Donate via Ko-fi](https://img.shields.io/badge/Donate-Ko--fi-FF6433?style=for-the-badge&logo=kofi&logoColor=white)](https://ko-fi.com/kd8zmm)
+> Firmware experimental. Úsalo bajo tu responsabilidad, solo en frecuencias en las que tengas licencia y con un respaldo de tu radio.
 
-## Where it stands
+## Estado (14 de noviembre de 2026)
 
-The DM-32UV has decoded live conventional P25 calls and played intelligible audio through its built-in speaker. A reference radio has also heard intelligible speech from the DM-32UV's microphone in short bench calls. Longer transmissions still show RF decode errors. The immediate work is to verify modem timing and measure the transmitted signal independently.
+| Función | Estado |
+|---|---|
+| FM y DMR | Funcionan (base RadioFoundry) |
+| P25 convencional, RX y TX | Verificado en la radio (voz IMBE en ambos sentidos) |
+| NXDN48, RX | Verificado en la radio (tramas, llamada y voz AMBE sin errores) |
+| NXDN48, TX | **Experimental**: transmite, pero todavía nadie lo decodifica (ojo cerrado; ver `docs/nxdn-modem.md`) |
+| Troncal P25 | Solo recepción; la TX troncal está desactivada |
+| APRS y posición GPS | Activados en esta versión; sin probar en el aire |
+| Tono de permiso estilo Motorola | P25/NXDN: TPT ASTRO 25 (3 bips de 910 Hz); DMR: chirp MOTOTRBO |
+| Tema «Rosa» | Tema claro rosa (Ajustes › Pantalla › Tema › Rosa) |
 
-This repository contains experimental source code, tests, and bench notes. Firmware downloads are unavailable. The development setup has been exercised on a specific radio and firmware revision. See the [progress log](PROGRESS.md) for test results and open problems.
+## Instalar
 
-## Roadmap
+1. Descarga `rfoundry_dm32.bin` de la última [release](../../releases), o usa directamente el **web flasher**: <https://donttellmeimcute.github.io/dm32-web-cps-flasher/> (Chrome o Edge de escritorio, Web Serial).
+2. Pon la radio en modo actualización: apagada, mantén **PTT + SK1** al encenderla (LED verde).
+3. El flasher hace un respaldo, toma el códec AMBE de tu propia radio (o del archivo de firmware de fábrica que elijas) y lo instala junto al firmware.
 
-| Milestone | What needs to work |
-| --- | --- |
-| 1. Stabilize conventional voice | Repeat clear receive and transmit calls using the built-in speaker and microphone. Check transmit buffer timing, deviation, frequency accuracy, and spectrum on a controlled bench with a reference radio and independent capture. |
-| 2. Build usable conventional channels | Add channel settings for frequencies, NAC, and group calls. Validate PTT, call setup and teardown, and recovery. Measure flash, RAM, and real-time headroom before deciding which analog FM and DMR features can coexist with P25. |
-| 3. Follow trunked calls in receive-only mode | Decode a Phase 1 control channel, resolve channel grants, tune to voice traffic, and return to the control channel. Compare results with an independent receiver. |
-| 4. Evaluate active trunking | Once conventional transmit is reliable, qualify an authorized lab with working control and traffic paths. Use it to test registration, affiliation, and grant-controlled group calls before considering roaming or supplementary services. |
-| 5. Qualify a release | Test extended calls, supported hardware revisions, settings migration, and recovery. Document supported features and confirm redistribution terms before distributing firmware. |
+**Sobre el AMBE:** el códec AMBE+2 (voz DMR y NXDN) es de DVSI y Baofeng. **No se distribuye aquí**: ni la release ni el repositorio lo contienen. Solo pasa entre tu radio, tus archivos y tu navegador. Sin él funcionan FM y P25 (IMBE libre); DMR y NXDN necesitan el códec de tu radio.
 
-The order and scope can change as measurements come in. Replay tests, hardware acceptance checks, and preservation of factory calibration run through every milestone.
+## Novedades de esta rama
 
-## Support development
+Parches de la serie (`integration/radiofoundry/patches/`):
 
-Support development through [Ko-fi](https://ko-fi.com/kd8zmm) or [GitHub Sponsors](https://github.com/sponsors/tylerwatt12?metadata_project=open25-dm32). The GitHub Sponsors link tags your sponsorship for Open25-DM32. Donations help cover development and testing expenses. Sponsorship is optional and carries no delivery commitments.
+| Parche | Qué hace |
+|---|---|
+| `0009-digital-voice-status-recovery-and-credits` | Re-selección de canal digital sin perder la sesión, recuperación automática tras fallos del módem, pantalla «Digital: iniciando / fallo del módem» honesta, créditos |
+| `0010-nxdn-fm-tx-ram` | Ruta de TX NXDN por la TX RAM del HR_C7000 (experimental) |
+| `0011-motorola-talk-permit` | Tono de permiso para hablar como Motorola; en P25/NXDN suena antes de dar portadora |
+| `0012-pink-theme` | El tema claro pasa a ser el tema «Rosa» |
+| `0013-tools-menu-built-features` | APRS y posición activados; Herramientas oculta lo que no está en la compilación (hotspot, red USB, repetidor de 1 frecuencia) |
 
-You can also help by reviewing the modem or P25 code, contributing reproducible test cases, or sharing measurements from an authorized bench setup. Open a [GitHub issue](https://github.com/tylerwatt12/Open25-DM32/issues) with the radio and firmware revision, test setup, and what you observed. Please keep radio IDs, calibration data, and private traffic out of public reports.
+Fuera de la serie: recepción NXDN corregida (filtros del FD6818 en la ruta plana, FSW en ambas polaridades, ganancia AF) en `integration/radiofoundry/nxdn/` y `src/nxdn/`.
+
+## Compilar
+
+Requiere Linux (o WSL) y el toolchain C-SKY que se construye localmente; ver [docs/build.md](docs/build.md). La imagen de la release se generó con:
+
+```sh
+python3 tools/build_radiofoundry.py --speed-codec --stack-check --with-local-stock
+python3 tools/rf_patch.py check        # "derivative tree matches the series"
+```
+
+`--speed-codec` es obligatorio (el códec IMBE por defecto es ~4× más lento que tiempo real). `--with-local-stock` toma el AMBE de tu propio firmware de fábrica en `research/originals` y genera además `rfoundry_dm32.codec.bin`; esa imagen es solo para uso local y no se publica (la release lleva únicamente `rfoundry_dm32.bin`, que no cambia con esa opción). Pruebas de host: `make -C build/radiofoundry-p25/tests/host run`, `tools/test_nxdn.py`, `test_p25t.py`, `test_voice.py`, `test_native_modem.py`, `test_receive_audio.py`.
+
+## Créditos y licencia
+
+- **Open25-DM32** original: tylerwatt12 (KD8ZMM). Puedes apoyar su trabajo en [GitHub Sponsors](https://github.com/sponsors/tylerwatt12?metadata_project=open25-dm32) o [Ko-fi](https://ko-fi.com/kd8zmm).
+- **RadioFoundry**: The RadioFoundry Authors (MIT; avisos conservados).
+- Derivación P25/NXDN, recepción NXDN, TPT Motorola, tema rosa y APRS: **lyra XE1POC**.
+
+El proyecto se distribuye bajo [GPL-3.0-or-later](LICENSE) salvo que un archivo indique otra cosa. Procedencia de cada fuente: [docs/licenses.md](docs/licenses.md).
+
+---
+
+## English summary
+
+Multi-mode open firmware (FM, DMR, P25 Phase 1, NXDN48, P25 trunking receive) for the Baofeng DM-32UV, derived from [Open25-DM32](https://github.com/tylerwatt12/Open25-DM32) on top of [RadioFoundry](https://github.com/RadioFoundry/RadioFoundry), maintained by lyra XE1POC. P25 voice works both ways and NXDN receive works on the radio; NXDN transmit is still experimental. Releases ship the image **without** the proprietary AMBE codec; the [web flasher](https://donttellmeimcute.github.io/dm32-web-cps-flasher/) takes the codec from your own radio or stock file inside the browser. GPL-3.0-or-later.
 
 ## Developer resources
 
@@ -42,5 +77,4 @@ You can also help by reviewing the modem or P25 code, contributing reproducible 
 - [Modem research and RF test criteria](docs/modem.md)
 - [Hardware validation and recovery](docs/hardware-tests.md)
 - [Source provenance and license notices](docs/licenses.md)
-
-Project code is distributed under [GPL-3.0-or-later](LICENSE) unless a file carries a different notice.
+- [Progress log of the original project](PROGRESS.md)
