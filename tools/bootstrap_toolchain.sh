@@ -5,7 +5,8 @@ cd "$(dirname "$0")/.."
 task_root=$(pwd)
 task_jobs=${JOBS:-8}
 task_prefix="$task_root/toolchain"
-python3 tools/sources.py fetch
+# SOURCES_ONLY=research/toolchain fetches just the compiler sources (CI); unset, every research input
+python3 tools/sources.py fetch ${SOURCES_ONLY:+--only "$SOURCES_ONLY"}
 mkdir -p build/binutils build/gcc logs
 if [ ! -d research/toolchain/binutils-2.45.1 ]; then
     tar -xf research/toolchain/downloads/binutils-2.45.1.tar.xz -C research/toolchain

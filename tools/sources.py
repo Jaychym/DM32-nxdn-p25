@@ -83,9 +83,13 @@ def verify_record(repo):
         raise ValueError('Dependency archive SHA-256 mismatch: ' + repo['path'])
 
 
-def fetch_or_verify(fetch):
+def fetch_or_verify(fetch, only=None):
     lock = json.loads(LOCK.read_text())
+    # only: a path prefix (research/toolchain): just those inputs, e.g. for CI, which must never fetch the stock firmware
+    wanted = (lambda p: p.startswith(only)) if only else (lambda p: True)
     for repo in lock['repositories']:
+        if not wanted(repo['path']):
+            continue
         path = ROOT / repo['path']
         if not path.exists() and fetch:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -96,6 +100,8 @@ def fetch_or_verify(fetch):
         verify_record(repo)
         print('verified', repo['path'])
     for f in lock['files']:
+        if not wanted(f['path']):
+            continue
         path = ROOT / f['path']
         if path.suffix.lower() == '.pdf':
             print('skipped reference PDF', f['path'])
@@ -112,7 +118,7 @@ def fetch_or_verify(fetch):
         if path.stat().st_size != f['bytes'] or sha_file(path) != f['sha256']:
             raise ValueError('Input hash mismatch: ' + f['path'])
         print('verified', f['path'])
-    if fetch:
+    if fetch and not only:
         source = ROOT / 'research/upstream/roger/python/C7000_read_progmem.py'
         tree = ast.parse(source.read_text())
         chunks = next(ast.literal_eval(n.value) for n in tree.body
@@ -135,8 +141,9 @@ def fetch_or_verify(fetch):
 if __name__ == '__main__':
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('command', choices=['record', 'fetch', 'verify'])
+    ap.add_argument('--only', help='fetch or verify only the inputs under this path prefix (research/toolchain)')
     args = ap.parse_args()
     try:
-        record() if args.command == 'record' else fetch_or_verify(args.command == 'fetch')
+        record() if args.command == 'record' else fetch_or_verify(args.command == 'fetch', args.only)
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
         raise SystemExit(str(exc))

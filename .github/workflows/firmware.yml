@@ -1,0 +1,89 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Builds the DM-32UV firmware image without the AMBE codec, as the web flasher installs it, and attaches it to the
+# release that started the run (rfoundry-dm32-<version>.bin, its rfoundry-release/1 manifest and SHA256SUMS).
+# A manual run (Actions > Firmware > Run workflow) builds the same and keeps it as a workflow artifact.
+#
+# Never fetches the stock firmware or any AMBE material: the toolchain bootstrap fetches only the compiler sources
+# (SOURCES_ONLY), the build has no --with-local-stock, and tools/release.py refuses an image that reaches the codec.
+name: Firmware
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version name (default: dev-<short commit>)"
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: firmware-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential bison flex texinfo zlib1g-dev \
+            libgmp-dev libmpfr-dev libmpc-dev clang python3
+
+      # The C-SKY compiler and newlib take 30-40 minutes to build; kept between runs
+      - name: Restore C-SKY toolchain
+        id: toolchain
+        uses: actions/cache@v4
+        with:
+          path: toolchain
+          key: csky-toolchain-${{ runner.os }}-${{ hashFiles('tools/bootstrap_toolchain.sh', 'tools/bootstrap_newlib.sh', 'sources.lock.json') }}
+
+      - name: Build C-SKY toolchain
+        if: steps.toolchain.outputs.cache-hit != 'true'
+        env:
+          SOURCES_ONLY: research/toolchain
+          JOBS: 4
+        run: |
+          sh tools/bootstrap_toolchain.sh
+          sh tools/bootstrap_newlib.sh
+
+      - name: Build firmware
+        run: python3 tools/build_radiofoundry.py --speed-codec --stack-check
+
+      - name: Package the image
+        id: package
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -eu
+          if [ -n "${TAG:-}" ]; then VERSION="${TAG#v}"; elif [ -n "${INPUT_VERSION:-}" ]; then VERSION="$INPUT_VERSION"; else VERSION="dev-${GITHUB_SHA::8}"; fi
+          TREE=build/radiofoundry-p25
+          BUILD=$TREE/build/dm32-p25-native
+          # The build's own CONFIG_*/CROSS overrides, so the manifest lists the features the image really has
+          CFG=$(python3 -c 'import json,sys; print(" ".join(a for a in json.load(open(sys.argv[1]))["command"] if a.startswith(("CONFIG_","CROSS="))))' "$BUILD/rfoundry_dm32.json")
+          mkdir -p dist
+          (cd "$TREE" && MAKEFLAGS="$CFG" python3 tools/release.py --board dm32 --version "$VERSION" --git "$GITHUB_SHA" \
+            --bin build/dm32-p25-native/rfoundry_dm32.bin --out "$GITHUB_WORKSPACE/dist")
+          ls -l dist
+          cat dist/SHA256SUMS
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Keep as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rfoundry-dm32-${{ steps.package.outputs.version }}
+          path: dist/*
+
+      - name: Attach to the release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
