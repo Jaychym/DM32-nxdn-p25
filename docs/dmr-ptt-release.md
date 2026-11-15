@@ -26,7 +26,7 @@ channel, ID, and timeout checks are retained. P25 trunking transmit remains disa
 - The complete derivative host suite passes, including UI layout: 4719 screens, zero layout problems.
 - Root make test, NXDN, P25 trunking, and receive-audio tests pass. Documentation links: 145 files, zero broken links.
 - Patch series matches the generated tree. Target build has zero compiler warnings and passes the stack audit:
-  the smallest calculated task margin is 136 bytes. FLASH 552768 bytes; static RAM 211440 of 211456 bytes.
+  the smallest calculated task margin is 136 bytes. FLASH approximately 553 kB; static RAM 211440 of 211456 bytes.
   Static RAM is close to its linker limit; the configured RTOS heap and task stacks are unchanged.
 
 Patch 0024 adds the exact supplied picture, quantized for the display, and the NXDN-P25-DM32 name. The boot text
@@ -64,3 +64,17 @@ the new VFO modes have not been checked on physical hardware in this task.
 
 ![P25 VFO in the simulator](vfo-p25.png)
 ![NXDN VFO in the simulator](vfo-nxdn.png)
+
+## Intermittent repeater access report
+
+The additional report says repeater TX sometimes fails and rebooting helps. This exact RF failure has **not**
+been reproduced or confirmed fixed. The Hotfix must not be described as a verified fix for every repeater issue.
+
+Additional tests pass on TS1 and TS2 without reinitializing the stack: repeated failed wake-ups followed by
+successful calls, a rejected call followed by a successful call, and an HR_C7000 aligned call aborted while
+waiting for repeater timing followed by fresh timing acquisition and TX. The extended call suite passes 7751
+checks; the normal and split HR_C7000 suites also pass, all with ASan/UBSan. These tests exercise recovery paths
+covered by the PTT/abort fix; no speculative RF timing or calibration change was added for the new report.
+
+Confirm repeated access, correct CC/TS and frequency pair, and actual RF bursts on the affected repeater before
+claiming that intermittent access is resolved. Record the displayed denial and modem diagnostics if it recurs.

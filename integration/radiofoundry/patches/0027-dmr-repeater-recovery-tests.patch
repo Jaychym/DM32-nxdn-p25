@@ -1,0 +1,110 @@
+--- a/tests/host/dmrCallTest.c
++++ b/tests/host/dmrCallTest.c
+@@ -982,6 +982,46 @@
+ 	dmr_call_ptt(false);
+ 	run_ms(20);
+ 	CHECK(V()->phase == DMR_CALL_PHASE_IDLE);
++}
++
++// Failed repeater wake-ups and a rejected call must recover on the next PTT without reinitializing the stack.
++static void test_rmo_recovery_without_reboot(void)
++{
++	for (uint8_t ts = 1; ts <= 2; ts++) {
++		dmr_call_config_t c = base_cfg();
++		c.rmo = true;
++		c.ts = ts;
++		setup(&c);
++		for (int attempt = 0; attempt < 2; attempt++) {
++			dmr_call_ptt(true);
++			run_ms(3000);
++			CHECK(V()->phase == DMR_CALL_PHASE_TX_DENIED && V()->tx_error == DMR_TX_ERR_NO_REPEATER);
++			dmr_call_ptt(false);
++			run_ms(20);
++			CHECK(V()->phase == DMR_CALL_PHASE_IDLE);
++		}
++		sim.wake_repeater_on_csbk = true;
++		for (int call = 0; call < 3; call++) {
++			dmr_call_ptt(true);
++			run_ms(700);
++			CHECK(V()->phase == DMR_CALL_PHASE_TX_VOICE && sim.last_ts == ts);
++			dmr_call_ptt(false);
++			run_ms(800);
++			CHECK(V()->phase == DMR_CALL_PHASE_IDLE && V()->tx_error == DMR_TX_OK);
++		}
++		sim.reject_next = true;
++		dmr_call_ptt(true);
++		run_ms(100);
++		CHECK(V()->phase == DMR_CALL_PHASE_TX_DENIED && V()->tx_error == DMR_TX_ERR_REJECTED);
++		dmr_call_ptt(false);
++		run_ms(30);
++		dmr_call_ptt(true);
++		run_ms(700);
++		CHECK(V()->phase == DMR_CALL_PHASE_TX_VOICE && sim.last_ts == ts);
++		dmr_call_ptt(false);
++		run_ms(800);
++		CHECK(V()->phase == DMR_CALL_PHASE_IDLE && V()->tx_error == DMR_TX_OK);
++	}
+ }
+ 
+ // ---------------------------------------------------------------------------------------------------------------
+@@ -2462,6 +2502,7 @@
+ 	test_tx_refused();
+ 	test_tx_release_bounded();
+ 	test_tx_modem_stalled();
++	test_rmo_recovery_without_reboot();
+ 	test_rmo_wakeup();
+ 	test_rmo_air_slot_alignment();
+ 	test_rx_call();
+--- a/tests/host/hrc7000DmrTest.c
++++ b/tests/host/hrc7000DmrTest.c
+@@ -561,6 +561,42 @@
+ 		tick(true);
+ 		CHECK(!rf_state && rf_on_calls == keyed && count_kind(DMR_EV_TX_DONE, NULL) == 0);
+ 		CHECK(hrc7000_dmr_tx_begin(&eng, DMR_TIMING_OWN, 1, DMR_ACCESS_IMPOLITE));
++	}
++}
++
++// Abort an aligned call waiting for repeater timing, then acquire fresh timing and send again without run/init.
++static void test_repeater_abort_recovery(void)
++{
++	for (int8_t ts = 1; ts <= 2; ts++) {
++		setup();
++		hrc7000_dmr_run(&eng);
++		dmr_config_t cfg = { .own_id = 4001, .cc = 1, .repeater = true };
++		hrc7000_dmr_configure(&eng, &cfg);
++		tick(false);
++		deframe(rti(1, 0, 1, 1, 0, 0));
++		count_kind(0xFF, NULL);
++		CHECK(hrc7000_dmr_tx_begin(&eng, DMR_TIMING_ALIGNED, ts, DMR_ACCESS_IMPOLITE));
++		dmr_tx_burst_t a = voice(0, 1);
++		CHECK(hrc7000_dmr_tx_queue(&eng, &a));
++		hrc7000_dmr_tx_abort(&eng);
++		CHECK(!hrc7000_dmr_is_transmitting(&eng) && !rf_state && eng.tc_agree == 0);
++		CHECK(REG(C7_LAYER2_CONTROL) == 0xC4 && count_kind(DMR_EV_TX_DONE, NULL) == 1);
++		for (uint8_t tc = 0; tc < 4; tc++) {
++			tick(false);
++			deframe(rti(1, 0, 1, 1, tc & 1u, tc & 1u));
++			count_kind(0xFF, NULL);
++		}
++		CHECK(eng.tc_agree >= 4);
++		CHECK(hrc7000_dmr_tx_begin(&eng, DMR_TIMING_ALIGNED, ts, DMR_ACCESS_IMPOLITE));
++		CHECK(hrc7000_dmr_tx_queue(&eng, &a));
++		tick(false);
++		for (int i = 0; i < 3 && rf_on_calls == 0; i++) {
++			tick(true);
++			if (REG(C7_LAYER2_TXRX_CTRL) == 0x80) hrc7000_dmr_isr_rftx(&eng);
++		}
++		CHECK(rf_on_calls == 1 && rf_state);
++		hrc7000_dmr_tx_abort(&eng);
++		CHECK(!rf_state && !hrc7000_dmr_is_transmitting(&eng));
+ 	}
+ }
+ 
+@@ -1349,6 +1385,7 @@
+ 	test_rx_resync();
+ 	test_cc_scan();
+ 	test_tx();
++	test_repeater_abort_recovery();
+ 	test_abort_without_slot();
+ 	test_tx_edges();
+ 	test_tx_sync_and_listen();

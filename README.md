@@ -36,7 +36,7 @@ El modo se guarda al reiniciar. P25 inicia con NAC 293, NXDN con RAN 1, ambos co
 configura un canal y cópialo al VFO. Se conserva el ID de la radio y siguen vigentes los límites de TX.
 
 Host regressions reproduce stuck release/timeout conditions before the fix and pass afterwards. **The reported
-radio has not been tested with this build.** See [validation and hardware checks](docs/dmr-ptt-release.md).
+radio has not been tested with this build. Intermittent repeater access is not confirmed resolved.** See [validation and hardware checks](docs/dmr-ptt-release.md).
 
 ![New boot screen (simulator)](docs/boot-screen.png)
 
