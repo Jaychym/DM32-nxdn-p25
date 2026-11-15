@@ -24,12 +24,16 @@ Firmware abierto y multimodo para el **Baofeng DM-32UV**: FM, DMR, **APCO P25 fa
 | AM de aviación (108-136 MHz) | El squelch abre con los niveles 1-9 (antes solo con 0). Probado en la radio |
 | Recepción ampliada | Solo RX: 174-260, 350-400 y 480-520 MHz, con menos sensibilidad fuera de los filtros. TX sigue en 136-174 / 400-480 |
 
-## DMR PTT release and boot screen update
+## Hotfix — DMR PTT, boot screen, and four-mode VFO
 
 The color boot screen now uses the supplied avatar and says **NXDN-P25-DM32**. The owner's two codeplug boot lines
 are preserved. DMR voice release has an absolute 1.5 s limit, including the terminator drain; RF slot notifications
 cannot keep it alive indefinitely. The HR_C7000 aborts immediately without waiting for another slot, and its PA
 timer is canceled on abort. The firmware version shown on the radio identifies this repository's build commit.
+
+El VFO ahora permite **FM → DMR → P25 → NXDN → FM**: abre el VFO y pulsa **\* → 4** (Modo).
+El modo se guarda al reiniciar. P25 inicia con NAC 293, NXDN con RAN 1, ambos con TG 1; para otro NAC/RAN o grupo,
+configura un canal y cópialo al VFO. Se conserva el ID de la radio y siguen vigentes los límites de TX.
 
 Host regressions reproduce stuck release/timeout conditions before the fix and pass afterwards. **The reported
 radio has not been tested with this build.** See [validation and hardware checks](docs/dmr-ptt-release.md).
@@ -68,6 +72,7 @@ Parches de la serie (`integration/radiofoundry/patches/`):
 | `0023-dm32-rx-only-bands` | Bandas solo RX 174-260, 350-400 y 480-520 MHz (VFO, canales, escaneo). La TX sigue limitada a 136-174 / 400-480. El aviso de bandas muestra rangos unidos («65-260 350-520») y el de TX denegada solo las bandas de TX |
 | `0024-boot-screen-picture` | Custom avatar and NXDN-P25-DM32 boot name; owner boot text preserved |
 | `0025-dmr-ptt-release-recovery` | Bounded DMR release and timeout; immediate HR_C7000 abort and PA timer cancellation |
+| `0026-conventional-digital-vfo` | FM/DMR/P25/NXDN VFO mode cycle, saved mode and NAC/RAN/group, and digital channel copy |
 
 Fuera de la serie: recepción NXDN corregida (filtros del FD6818 en la ruta plana, FSW en ambas polaridades, ganancia AF) en `integration/radiofoundry/nxdn/` y `src/nxdn/`.
 

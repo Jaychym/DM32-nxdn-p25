@@ -1,0 +1,504 @@
+--- a/core/radio/radio.h
++++ b/core/radio/radio.h
+@@ -9,6 +9,14 @@
+ #include <stdbool.h>
+ #include "codeplug/codeplug.h"
+ #include "config.h"
++
++// Conventional modes available to a VFO; trunking still needs a programmed channel.
++static inline bool radio_vfo_mode_built(int mode)
++{
++	return (mode == RADIO_MODE_FM && CONFIG_VFO_FM) || (mode == RADIO_MODE_DMR && CONFIG_VFO_DMR) ||
++		((CONFIG_VFO_FM || CONFIG_VFO_DMR) && ((mode == RADIO_MODE_P25 && CONFIG_P25 && CONFIG_P25_NATIVE) ||
++		(mode == RADIO_MODE_NXDN && CONFIG_NXDN)));
++}
+ 
+ typedef enum {
+ 	RS_IDLE,	// receiving, squelch closed
+--- a/core/radio/radio_sm.c
++++ b/core/radio/radio_sm.c
+@@ -703,7 +703,7 @@
+ 	if (in_vfo) {
+ 		return VFO_COPY_ALREADY;
+ 	}
+-	if (ch->mode == RADIO_MODE_DMR ? !CONFIG_VFO_DMR : !CONFIG_VFO_FM) {
++	if (!radio_vfo_mode_built(ch->mode)) {
+ 		return VFO_COPY_NO_MODE;
+ 	}
+ 	if (!board_in_band(ch->rx_hz, false) || (ch->tx_hz != 0 && !board_in_band(ch->tx_hz, false))) {
+@@ -728,6 +728,9 @@
+ 	v->mode = c->mode;
+ 	v->bw = c->bw;
+ 	v->power = sm->temp_power ? sm->view.power : c->power;
++	v->nac_rx = c->nac_rx;
++	v->nac_tx = c->nac_tx;
++	v->talkgroup = c->talkgroup;
+ 	if (c->mode == RADIO_MODE_DMR) {
+ #if CONFIG_VFO_DMR
+ 		uint8_t over = sm->one_shot ? 0 : sm->manual ? sm->manual_ts : sm->talk_ts;
+@@ -4514,6 +4517,8 @@
+ 	c->power = CODEPLUG_POWER_DEFAULT;
+ 	c->timeslot = 1;
+ 	c->color_code = 1;	// the settings' default too: the usual repeater color code
++	c->nac_rx = c->nac_tx = CODEPLUG_NAC_DEFAULT;
++	c->talkgroup = 1;
+ }
+ 
+ // One saved VFO, whichever settings fields hold it: VFO 0 the first ones (packed), VFO 1 page 1's
+@@ -4556,8 +4561,13 @@
+ 	sm->vfo_ch.rx_hz = v.rx_hz;
+ 	sm->vfo_ch.tx_hz = v.tx_hz != 0 ? v.tx_hz : v.rx_hz;
+ 	// The saved mode if this build has that VFO; an older record holds FM
+-	sm->vfo_ch.mode = v.mode == RADIO_MODE_DMR && CONFIG_VFO_DMR ? RADIO_MODE_DMR :
+-		v.mode == RADIO_MODE_FM && CONFIG_VFO_FM ? RADIO_MODE_FM : VFO_MODE_DEFAULT;
++	sm->vfo_ch.mode = radio_vfo_mode_built(v.mode) ? v.mode : VFO_MODE_DEFAULT;
++	if (codeplug_mode_digital_voice(sm->vfo_ch.mode)) {
++		uint16_t max = sm->vfo_ch.mode == RADIO_MODE_NXDN ? 63 : 0xFFF;
++		sm->vfo_ch.nac_tx = v.tx_tone <= max && (max == 63 || v.tx_tone < CODEPLUG_NAC_ANY) ? v.tx_tone : (max == 63 ? 1 : CODEPLUG_NAC_DEFAULT);
++		sm->vfo_ch.nac_rx = v.rx_tone <= max ? v.rx_tone : sm->vfo_ch.nac_tx;
++		sm->vfo_ch.talkgroup = (v.talk & 0xFFFFFFu) > 0 && (v.talk & 0xFFFFFFu) <= 65535 ? (uint16_t)v.talk : 1;
++	}
+ 	sm->vfo_ch.bw = v.bw == RADIO_BW_25K ? RADIO_BW_25K : RADIO_BW_12K5;
+ 	sm->vfo_ch.power = v.power < board.power_count ? v.power : CODEPLUG_POWER_DEFAULT;
+ 	sm->vfo_ch.color_code = v.cc <= 15 ? v.cc : 1;
+@@ -4573,6 +4583,13 @@
+ {
+ 	const channel_t *v = &sm->vfo_ch;
+ 	uint8_t power = v->power == CODEPLUG_POWER_DEFAULT ? SETTINGS_UNSET8 : v->power;
++	// Digital modes have no analog tones: reuse their saved values for NAC/RAN, without changing the settings record.
++	bool dv = codeplug_mode_digital_voice(v->mode);
++	subtone_t rx = dv ? (subtone_t){ TONE_NONE, v->nac_rx } : v->rx_tone;
++	subtone_t tx = dv ? (subtone_t){ TONE_NONE, v->nac_tx } : v->tx_tone;
++#if CONFIG_VFO_DMR || (CONFIG_P25 && CONFIG_P25_NATIVE) || CONFIG_NXDN
++	uint32_t talk = dv ? v->talkgroup : sm->vfo_talk_id | (sm->vfo_talk_private ? 0x80000000u : 0);
++#endif
+ #if CONFIG_DUAL_WATCH
+ 	if (idx != 0) {
+ 		if (sm->vfo_seeded) {
+@@ -4583,13 +4600,13 @@
+ 			st->vfo2_power = power;
+ 			st->vfo2_cc = v->color_code;
+ 			st->vfo2_ts = v->timeslot;
+-			st->vfo2_rx_tone_type = v->rx_tone.type;
+-			st->vfo2_rx_tone = v->rx_tone.value;
+-			st->vfo2_tx_tone_type = v->tx_tone.type;
+-			st->vfo2_tx_tone = v->tx_tone.value;
+-		}
+-#if CONFIG_VFO_DMR
+-		st->vfo2_talk = sm->vfo_talk_id | (sm->vfo_talk_private ? 0x80000000u : 0);
++			st->vfo2_rx_tone_type = rx.type;
++			st->vfo2_rx_tone = rx.value;
++			st->vfo2_tx_tone_type = tx.type;
++			st->vfo2_tx_tone = tx.value;
++		}
++#if CONFIG_VFO_DMR || (CONFIG_P25 && CONFIG_P25_NATIVE) || CONFIG_NXDN
++		st->vfo2_talk = talk;
+ #endif
+ 		return;
+ 	}
+@@ -4601,13 +4618,13 @@
+ 		settings_set_vfo_mode_bw(st, v->mode, v->bw);
+ 		st->vfo_power = power;
+ 		settings_set_vfo_cc_ts(st, v->color_code, v->timeslot);
+-		st->vfo_rx_tone_type = v->rx_tone.type;
+-		st->vfo_rx_tone = v->rx_tone.value;
+-		st->vfo_tx_tone_type = v->tx_tone.type;
+-		st->vfo_tx_tone = v->tx_tone.value;
+-	}
+-#if CONFIG_VFO_DMR
+-	settings_set_vfo_talk(st, sm->vfo_talk_id, sm->vfo_talk_private);
++		st->vfo_rx_tone_type = rx.type;
++		st->vfo_rx_tone = rx.value;
++		st->vfo_tx_tone_type = tx.type;
++		st->vfo_tx_tone = tx.value;
++	}
++#if CONFIG_VFO_DMR || (CONFIG_P25 && CONFIG_P25_NATIVE) || CONFIG_NXDN
++	settings_set_vfo_talk(st, talk & 0xFFFFFFu, (talk & 0x80000000u) != 0);
+ #endif
+ }
+ 
+@@ -5545,19 +5562,28 @@
+ 		dmr_reconfigure(sm);
+ 		break;
+ 	case RREQ_MODE:
+-		if (busy || (req->arg != RADIO_MODE_FM && req->arg != RADIO_MODE_DMR) || req->arg == sm->view.ch.mode ||
+-				(req->arg == RADIO_MODE_FM && !(sm->view.vfo ? CONFIG_VFO_FM : CONFIG_FM)) ||
+-				(req->arg == RADIO_MODE_DMR && (listen_band(sm->view.ch.rx_hz) ||
+-								(sm->view.vfo && !CONFIG_VFO_DMR)))) {
++		if (busy || req->arg == sm->view.ch.mode ||
++				(sm->view.vfo ? !radio_vfo_mode_built(req->arg) : (req->arg != RADIO_MODE_FM && req->arg != RADIO_MODE_DMR)) ||
++				(req->arg == RADIO_MODE_FM && !CONFIG_FM) ||
++				(req->arg != RADIO_MODE_FM && listen_band(sm->view.ch.rx_hz))) {
+ 			break;
+ 		}
+ 		sm->view.ch.mode = (uint8_t)req->arg;
++		if (codeplug_mode_digital_voice(sm->view.ch.mode)) {
++			sm->view.ch.nac_rx = sm->view.ch.nac_tx = req->arg == RADIO_MODE_NXDN ? 1 : CODEPLUG_NAC_DEFAULT;
++			sm->view.ch.talkgroup = 1;
++			sm->view.ch.bw = RADIO_BW_12K5;
++		}
+ 		if (sm->view.ch.mode == RADIO_MODE_DMR && sm->view.ch.timeslot != 2) {
+ 			sm->view.ch.timeslot = 1;
+ 		}
+ 		if (sm->view.vfo) {
+ 			sm->vfo_ch.mode = sm->view.ch.mode;	// the VFO's own mode, not a temporary change
+ 			sm->vfo_ch.timeslot = sm->view.ch.timeslot;
++			sm->vfo_ch.nac_rx = sm->view.ch.nac_rx;
++			sm->vfo_ch.nac_tx = sm->view.ch.nac_tx;
++			sm->vfo_ch.talkgroup = sm->view.ch.talkgroup;
++			sm->vfo_ch.bw = sm->view.ch.bw;
+ 		}
+ 		set_temporary(sm);
+ 		tune(sm, now_ms);	// the call stack starts or stops with the mode
+--- a/core/ui/ui_svc_radio.c
++++ b/core/ui/ui_svc_radio.c
+@@ -127,7 +127,7 @@
+ #if CONFIG_FM
+ bool ui_svc_mode(uint8_t mode)
+ {
+-	if (mode != RADIO_MODE_FM && mode != RADIO_MODE_DMR) {
++	if (mode != RADIO_MODE_FM && mode != RADIO_MODE_DMR && !radio_vfo_mode_built(mode)) {
+ 		return false;
+ 	}
+ 	radio_req_mode(mode);
+--- a/core/ui/ui_app.c
++++ b/core/ui/ui_app.c
+@@ -1339,13 +1339,18 @@
+ 		ui_st.quick_edit = true;	// the hint row says what Up / Down and the digits do
+ 		break;
+ 	case QT_MODE: {
+-		bool to_dmr = view->ch.mode != RADIO_MODE_DMR;	// the view may change at once (the host simulator)
+-		if (to_dmr && (view->am || view->bcast)) {
++		uint8_t mode = view->ch.mode;
++		for (int i = 0; i < 4; i++) {
++			mode = (uint8_t)((mode + 1) % 4);
++			if (radio_vfo_mode_built(mode)) break;
++		}
++		if (mode != RADIO_MODE_FM && (view->am || view->bcast)) {
+ 			ui_toast(view->am ? TR("AM only in the air band") : TR("FM only in the broadcast band"));
+ 			break;
+ 		}
+-		if (ui_svc_mode(to_dmr ? RADIO_MODE_DMR : RADIO_MODE_FM))
+-			ui_toast(to_dmr ? "VFO: DMR" : "VFO: FM");	// the VFO keeps its mode
++		const char *const names[] = { "VFO: FM", "VFO: DMR", "VFO: P25", "VFO: NXDN" };
++		if (ui_svc_mode(mode))
++			ui_toast(names[mode]);
+ 		else
+ 			quick_unavailable(kind);
+ 		break;
+--- a/core/ui/ui_screens.c
++++ b/core/ui/ui_screens.c
+@@ -3008,7 +3008,7 @@
+ 		sb_str(&b, mode_word(v));	// what it is, as every other tile
+ 		// Only in the VFO (a channel's tile 4 is QT_TO_VFO), in a build with both VFO kinds; it keeps the mode like
+ 		// its other settings
+-		return feat(UI_FEAT_MODE) && v->vfo && CONFIG_VFO_FM && CONFIG_VFO_DMR;
++		return feat(UI_FEAT_MODE) && v->vfo && (CONFIG_VFO_FM + CONFIG_VFO_DMR + (CONFIG_P25 && CONFIG_P25_NATIVE) + CONFIG_NXDN > 1);
+ 	case QT_TO_VFO:
+ 		sb_str(&b, TR("Copy"));
+ 		return CONFIG_VFO_FM || CONFIG_VFO_DMR;	// a channel the VFO can't hold is refused on the press, with the reason
+--- a/tests/host/radioCoreTest.c
++++ b/tests/host/radioCoreTest.c
+@@ -5031,6 +5031,88 @@
+ #endif
+ #endif
+ 
++#if RADIO_SM_DV
++static void test_vfo_conventional_modes(void)
++{
++	uint32_t old_id = own_dmr_id;
++	own_dmr_id = 4001;
++	setup_codeplug();
++	start();
++	memset(&dv, 0, sizeof(dv));
++	req(RREQ_VFO_SET, 155475000);
++	for (int mode = RADIO_MODE_P25; mode <= RADIO_MODE_NXDN; mode++) {
++		if (!radio_vfo_mode_built(mode)) continue;
++		req(RREQ_MODE, mode);
++		run(30);
++		CHECK(sm.view.vfo && sm.view.ch.mode == mode && sm.dv_running && dv.cfg.mode == mode);
++		CHECK(dv.cfg.nac_rx == (mode == RADIO_MODE_NXDN ? 1 : CODEPLUG_NAC_DEFAULT));
++		CHECK(dv.cfg.nac_tx == dv.cfg.nac_rx && dv.cfg.talkgroup == 1 && sm.view.ch.bw == RADIO_BW_12K5);
++		req(RREQ_VFO_STEP, 1);
++		run(30);
++		CHECK(dv.cfg.rx_hz == sm.view.ch.rx_hz && dv.cfg.tx_hz == sm.view.ch.tx_hz);
++		boot();
++		run(30);
++		CHECK(sm.view.vfo && sm.view.ch.mode == mode && sm.dv_running && dv.cfg.talkgroup == 1);
++		CHECK(dv.cfg.nac_tx == (mode == RADIO_MODE_NXDN ? 1 : CODEPLUG_NAC_DEFAULT));
++		sm.set.talk_permit = false;
++		int downs = dv.downs;
++		req(RREQ_PTT, 1);
++		CHECK(sm.view.state == RS_TX && dv.downs == downs + 1 && dv.cfg.unit_id == 4001);
++		req(RREQ_PTT, 0);
++		dv_tx_ended(NT_TX_COMPLETE_);
++		run(30);
++		CHECK(sm.view.state == RS_IDLE);
++		req(RREQ_MODE, RADIO_MODE_FM);
++		CHECK(!sm.dv_running && sm.view.ch.mode == RADIO_MODE_FM);
++	}
++	// A programmed digital channel copied into the VFO keeps its NAC/RAN and group across a reboot.
++	for (int mode = RADIO_MODE_P25; mode <= RADIO_MODE_NXDN; mode++) {
++		if (!radio_vfo_mode_built(mode)) continue;
++		add(3, "Digital", 155475000, mode, false, 1);
++		chans[3].nac_rx = mode == RADIO_MODE_NXDN ? 0 : CODEPLUG_NAC_ANY;
++		chans[3].nac_tx = mode == RADIO_MODE_NXDN ? 12 : 0x321;
++		chans[3].talkgroup = 123;
++		req(RREQ_VFO, 0);
++		req(RREQ_ZONE_POS, 2);
++		run(30);
++		CHECK(sm.view.ch.mode == mode && radio_vfo_copy_check(&sm.view.ch, false) == VFO_COPY_OK);
++		req(RREQ_VFO_COPY, 0);
++		run(30);
++		CHECK(sm.view.vfo && sm.view.ch.mode == mode && dv.cfg.talkgroup == 123);
++		boot();
++		run(30);
++		CHECK(sm.view.vfo && sm.view.ch.mode == mode && dv.cfg.talkgroup == 123);
++		CHECK(dv.cfg.nac_rx == (mode == RADIO_MODE_NXDN ? 0 : CODEPLUG_NAC_ANY));
++		CHECK(dv.cfg.nac_tx == (mode == RADIO_MODE_NXDN ? 12 : 0x321));
++		settings_t *st = settings_begin();
++		st->vfo_rx_tone = st->vfo_tx_tone = 0xFFFF;
++		settings_set_vfo_talk(st, 65536, false);
++		settings_end(now);
++		boot();
++		run(30);
++		CHECK(dv.cfg.talkgroup == 1 && dv.cfg.nac_rx == dv.cfg.nac_tx);
++		CHECK(dv.cfg.nac_tx == (mode == RADIO_MODE_NXDN ? 1 : CODEPLUG_NAC_DEFAULT));
++		req(RREQ_MODE, RADIO_MODE_FM);
++	}
++	CHECK(!radio_vfo_mode_built(RADIO_MODE_P25_TRUNK) && !radio_vfo_mode_built(-1) && !radio_vfo_mode_built(256));
++	req(RREQ_MODE, RADIO_MODE_P25_TRUNK);
++	CHECK(sm.view.ch.mode == RADIO_MODE_FM);
++#if CONFIG_AM_RX
++	if (board.caps & CAP_AM_RX) {
++		req(RREQ_VFO_SET, 118100000);
++		req(RREQ_MODE, RADIO_MODE_P25);
++		req(RREQ_MODE, RADIO_MODE_NXDN);
++		CHECK(sm.view.ch.mode == RADIO_MODE_FM);
++	}
++#endif
++	req(RREQ_VFO, 0);
++	settings_defaults(settings_begin());
++	settings_end(now);
++	setup_codeplug();
++	own_dmr_id = old_id;
++}
++#endif
++
+ #if RADIO_SM_DV && CONFIG_DMR && CONFIG_P25 && CONFIG_P25_NATIVE && CONFIG_NXDN
+ // Digital monitor on P25 and NXDN, as on DMR: a short press of MONITOR latches every NAC (RAN) and group for this
+ // channel; TX keeps the channel's NAC (RAN) and group. Another press, Back (RREQ_DMR_HEAR_ALL off) or another channel
+@@ -5106,6 +5188,9 @@
+ 
+ int main(void)
+ {
++#if RADIO_SM_DV
++	test_vfo_conventional_modes();
++#endif
+ #if RADIO_SM_DV && CONFIG_P25 && CONFIG_P25_NATIVE
+ 	test_p25_channel();
+ #endif
+--- a/tests/host/uiFlowTest.c
++++ b/tests/host/uiFlowTest.c
+@@ -550,7 +550,15 @@
+ 	{ "S Copy to VFO key", "", "copykey", "vfo=1 screen=home toast=Copied_to_VFO", 1, false },
+ 	{ "S Copy to VFO key, long press", "", "long:copykey", "vfo=1 toast=Copied_to_VFO", 1, false },
+ 	{ "S Copy to VFO key in the VFO", "ok 4 up ok", "copykey", "vfo=1 toast=Already_in_VFO", 1, false },
++#if CONFIG_P25 && CONFIG_P25_NATIVE && CONFIG_NXDN
++	{ "S Copy to VFO: tile 4 cycles to P25", "copykey", "quick 4", "toast=VFO:_P25 mode=p25 vfo=1", 2, false },
++	{ "S VFO P25 mode", "vfokey quick 4", "4", "mode=p25 toast=VFO:_P25 vfo=1 temporary=0", 1, false },
++	{ "S VFO NXDN mode", "vfokey quick 4 4", "4", "mode=nxdn toast=VFO:_NXDN vfo=1 temporary=0", 1, false },
++	{ "S VFO all four modes", "vfokey quick 4 4 4", "4", "mode=fm toast=VFO:_FM vfo=1 temporary=0", 1, false },
++	{ "S VFO P25 retained across channels", "vfokey quick 4 4 back vfokey", "vfokey", "mode=p25 vfo=1", 1, false },
++#else
+ 	{ "S Copy to VFO: tile 4 in the VFO is Mode", "copykey", "quick 4", "toast=VFO:_FM mode=fm vfo=1", 2, false },
++#endif
+ 	{ "S VFO/MR key: channel to VFO and back", "", "vfokey vfokey", "vfo=0 toast=Back_to_channels", 2, false },
+ 	{ "S VFO/MR key: into the VFO", "", "vfokey", "vfo=1", 1, false },
+ 	// The VFO's step: Auto follows the width (12.5 kHz narrow, 25 kHz wide); one set in Settings > Talk stays
+@@ -566,7 +574,11 @@
+ 	{ "S the group's row as it was", "", "ok 7", "screen=settings shows=Talk_&_listen", 2, false },
+ 	// Quick settings in the FM VFO: tile 8 is Width, as on a channel
+ 	{ "Q FM VFO: Width on 8", "vfokey", "quick 8", "toast=Bandwidth", 2, false },
++#if CONFIG_P25 && CONFIG_P25_NATIVE && CONFIG_NXDN
++	{ "S VFO mode back to FM", "ok 4 up ok quick 4 back", "quick 4 4 4", "toast=VFO:_FM mode=fm temporary=0", 4, false },
++#else
+ 	{ "S VFO mode back to FM", "ok 4 up ok quick 4 back", "quick 4", "toast=VFO:_FM mode=fm temporary=0", 2, false },
++#endif
+ 	{ "S VFO DMR: color code 7", "ok 4 up ok quick 4 back", "quick 3 7 ok", "cc=7 temporary=0", 4, false },
+ 	{ "S VFO DMR: timeslot 2", "ok 4 up ok quick 4 back", "quick 2 back", "ts=2 temporary=0", 3, false },
+ 	{ "S VFO DMR: talk to a typed TG", "ok 4 up ok quick 4 back", "quick 8 down ok 3 1 0 0 ok", "talk=3100 temporary=0",
+--- a/tests/host/sim/ui_sim.c
++++ b/tests/host/sim/ui_sim.c
+@@ -897,6 +897,7 @@
+ static uint32_t vfo_rx_hz = 146520000, vfo_tx_hz = 146520000;
+ static subtone_t vfo_rx_tone, vfo_tx_tone;
+ static uint32_t vfo_talk;
++static uint16_t vfo_nac_rx, vfo_nac_tx, vfo_tg;
+ static bool vfo_talk_private;
+ // The other VFO (dual watch gives each channel its own), swapped with the ones above by sim_vfo_use
+ typedef struct {
+@@ -904,12 +905,13 @@
+ 	uint32_t rx_hz, tx_hz, talk;
+ 	subtone_t rx_tone, tx_tone;
+ 	bool talk_private;
++	uint16_t nac_rx, nac_tx, tg;
+ } sim_vfo_t;
+ static sim_vfo_t vfo_other;
+ static void sim_vfo_get(sim_vfo_t *o)
+ {
+ 	*o = (sim_vfo_t){ vfo_mode, vfo_cc, vfo_ts, vfo_bw, vfo_rx_hz, vfo_tx_hz, vfo_talk, vfo_rx_tone, vfo_tx_tone,
+-			  vfo_talk_private };
++			  vfo_talk_private, vfo_nac_rx, vfo_nac_tx, vfo_tg };
+ }
+ static void sim_vfo_use(uint8_t idx)
+ {
+@@ -927,6 +929,9 @@
+ 	}
+ 	sim_vfo_t t = vfo_other;
+ 	sim_vfo_get(&vfo_other);
++	vfo_nac_rx = t.nac_rx;
++	vfo_nac_tx = t.nac_tx;
++	vfo_tg = t.tg;
+ 	vfo_mode = t.mode;
+ 	vfo_cc = t.cc;
+ 	vfo_ts = t.ts;
+@@ -1046,6 +1051,11 @@
+ 		view.ch.bw = vfo_bw;
+ 		view.ch.power = CODEPLUG_POWER_DEFAULT;
+ 		view.ch.mode = vfo_mode;
++		view.ch.nac_rx = vfo_nac_rx;
++		view.ch.nac_tx = vfo_nac_tx;
++		view.ch.talkgroup = vfo_tg;
++		view.dv.built = view.dv.active = codeplug_mode_digital_voice(vfo_mode) && radio_vfo_mode_built(vfo_mode);
++		view.dv.state = RDV_IDLE;
+ 		view.ch.color_code = vfo_cc;
+ 		view.ch.timeslot = vfo_ts;
+ 		view.dmr.active = vfo_mode == RADIO_MODE_DMR;
+@@ -1109,7 +1119,7 @@
+ {
+ 	if (v->vfo)
+ 		return VFO_COPY_ALREADY;
+-	if (v->ch.mode == RADIO_MODE_DMR ? !CONFIG_VFO_DMR : !CONFIG_VFO_FM)
++	if (!radio_vfo_mode_built(v->ch.mode))
+ 		return VFO_COPY_NO_MODE;
+ 	if (v->ch.rx_hz < 136000000 || v->ch.rx_hz > 480000000 || (v->ch.rx_hz > 174000000 && v->ch.rx_hz < 400000000))
+ 		return VFO_COPY_OUT_OF_BAND;
+@@ -1123,6 +1133,9 @@
+ 	vfo_tx_hz = v->ch.tx_hz ? v->ch.tx_hz : v->ch.rx_hz;
+ 	vfo_bw = v->ch.bw;
+ 	vfo_mode = v->ch.mode;
++	vfo_nac_rx = v->ch.nac_rx;
++	vfo_nac_tx = v->ch.nac_tx;
++	vfo_tg = v->ch.talkgroup;
+ 	if (v->ch.mode == RADIO_MODE_DMR) {
+ 		vfo_cc = v->ch.color_code;
+ 		vfo_ts = v->ch.timeslot;
+@@ -1484,6 +1497,16 @@
+ {
+ 	retune();
+ 	view.ch.mode = mode;
++	if (codeplug_mode_digital_voice(mode)) {
++		view.ch.nac_rx = view.ch.nac_tx = mode == RADIO_MODE_NXDN ? 1 : CODEPLUG_NAC_DEFAULT;
++		view.ch.talkgroup = 1;
++		view.ch.bw = vfo_bw = RADIO_BW_12K5;
++	}
++	vfo_nac_rx = view.ch.nac_rx;
++	vfo_nac_tx = view.ch.nac_tx;
++	vfo_tg = view.ch.talkgroup;
++	view.dv.built = view.dv.active = codeplug_mode_digital_voice(mode) && radio_vfo_mode_built(mode);
++	view.dv.state = RDV_IDLE;
+ 	view.dmr.active = mode == RADIO_MODE_DMR;
+ 	if (view.vfo) {
+ 		vfo_mode = mode;
+@@ -1946,6 +1969,8 @@
+ 	ui_layout_init();
+ 	memset(&view, 0, sizeof view);
+ 	memset(&sim_rec, 0, sizeof sim_rec);
++	vfo_nac_rx = vfo_nac_tx = CODEPLUG_NAC_DEFAULT;
++	vfo_tg = 1;
+ 	vfo_mode = RADIO_MODE_FM;	// a fresh VFO
+ 	vfo_cc = vfo_ts = 1;
+ 	vfo_bw = RADIO_BW_25K;
+@@ -1956,7 +1981,7 @@
+ 	vfo_talk = 0;
+ 	vfo_talk_private = false;
+ 	vfo_other = (sim_vfo_t){ RADIO_MODE_FM, 1, 1, RADIO_BW_25K, 146520000, 146520000, 0, { TONE_NONE, 0 },
+-				 { TONE_NONE, 0 }, false };
++				 { TONE_NONE, 0 }, false, CODEPLUG_NAC_DEFAULT, CODEPLUG_NAC_DEFAULT, 1 };
+ 	view.vfo_step_hz = 12500;
+ 	view.tot_s = 180;
+ 	view.rssi_dbm = -95;
+@@ -2160,7 +2185,7 @@
+ 	else if (strcmp(key, "vfo") == 0) snprintf(got, sizeof got, "%u", view.vfo);
+ 	else if (strcmp(key, "freq") == 0) snprintf(got, sizeof got, "%u", (unsigned)view.ch.rx_hz);
+ 	else if (strcmp(key, "txfreq") == 0) snprintf(got, sizeof got, "%u", (unsigned)view.ch.tx_hz);
+-	else if (strcmp(key, "mode") == 0) snprintf(got, sizeof got, "%s", view.ch.mode == RADIO_MODE_DMR ? "dmr" : "fm");
++	else if (strcmp(key, "mode") == 0) snprintf(got, sizeof got, "%s", view.ch.mode == RADIO_MODE_DMR ? "dmr" : view.ch.mode == RADIO_MODE_P25 ? "p25" : view.ch.mode == RADIO_MODE_NXDN ? "nxdn" : "fm");
+ 	else if (strcmp(key, "tx") == 0) snprintf(got, sizeof got, "%u", (unsigned)sim_rec.tx_count);
+ 	else if (strcmp(key, "txid") == 0) snprintf(got, sizeof got, "%u", (unsigned)sim_rec.tx_id);
+ 	else if (strcmp(key, "txpriv") == 0) snprintf(got, sizeof got, "%u", sim_rec.tx_private);
+--- a/tests/host/uiSim.c
++++ b/tests/host/uiSim.c
+@@ -49,6 +49,10 @@
+ 	{ "home_nxdn_busy", "nxdn:other" },
+ 	{ "home_temporary", "down quick 1 2 up back" },
+ 	{ "home_vfo", "ok 4 up ok" },
++#if CONFIG_P25 && CONFIG_P25_NATIVE && CONFIG_NXDN
++	{ "home_vfo_p25", "vfokey quick 4 4 back" },
++	{ "home_vfo_nxdn", "vfokey quick 4 4 4 back" },
++#endif
+ 	{ "home_vfo_entry", "ok 4 up ok 4 4 6" },
+ 	{ "home_vfo_dmr", "ok 4 up ok quick 4 back" },
+ 	{ "home_large_text", "ok 7 2 down down down down down ok long:back" },
+--- a/docs/spec/settings-store.md
++++ b/docs/spec/settings-store.md
+@@ -327,3 +327,10 @@
+ | `cpsTest.c` `test_foreign` | a foreign region: reads answered, `X 1` and codeplug edits refused, flash unchanged; after a claim, CPS writes work |
+ | `tests/hil/test_cps.py` `test_storage_region` | on the radio: the region state matches the view, reads inside the window work and outside it are refused (skips with instructions when foreign) |
+ | `tests/hil/test_cps.py` `test_settings_survive_restart` | opt-in `--allow-reboot`: the channel position survives a restart |
++
++### Conventional digital VFO modes
++
++The VFO mode value also accepts P25 (2) and NXDN (3) when built in. In these modes, the saved RX and TX tone values
++hold the receive and transmit NAC/RAN, and the saved talk target holds the 16-bit talkgroup. Tone types are NONE.
++The settings record size and version are unchanged; existing FM/DMR records retain their interpretation.
++Both VFOs use this representation. An older build without these modes falls back to its default VFO mode.
+--- a/docs/spec/radio-features.md
++++ b/docs/spec/radio-features.md
+@@ -538,3 +538,11 @@
+ watch, the battery saver, the 1750 Hz burst and the roger beep on air; TX inhibit and the TOT warning on the radio's
+ state; VOX only in silence (the `mic_level` hook is unverified); whether PCM beeps play in FM mode is still open
+ (`beep.no_stream` / `beep.blocks` answer that).
++
++### Conventional digital VFO operation
++
++The mode request accepts P25 and NXDN in a VFO when built in, alongside FM and DMR. The quick-settings Mode tile
++cycles those four modes and skips unsupported ones. Trunking is excluded. Entering P25 selects NAC 0x293 and TG 1;
++entering NXDN selects RAN 1 and TG 1. Both use the existing digital channel RX/TX paths and their safety checks.
++Copy to VFO preserves a conventional digital channel's NAC/RAN and group; saving and restoring both VFOs uses the
++mode-dependent representation in [Settings store](settings-store.md#conventional-digital-vfo-modes).
+--- a/docs/user/07-channels-zones-vfo.md
++++ b/docs/user/07-channels-zones-vfo.md
+@@ -195,7 +195,7 @@
+ 
+ ## The VFO
+ 
+-The VFO is an FM VFO or, on a radio with DMR, a DMR VFO. It keeps its mode like its frequency. Everything you change in
++The VFO supports FM, DMR, P25, and NXDN when those modes are built in. It keeps its mode like its frequency. Everything you change in
+ the VFO (mode, color code, timeslot, talk target) is kept, also when you go to a channel and come back, and after a
+ restart.
+ 
+@@ -283,7 +283,11 @@
+ 
+ ### DMR in the VFO
+ 
+-**\***, **4** in the VFO switches it between FM and DMR on the same frequency ("VFO: DMR"). In DMR the quick settings are the
++**\***, **4** in the VFO cycles FM, DMR, P25, NXDN, then FM on the same frequency, skipping modes absent from the build.
++P25 starts with NAC 293 (hex), NXDN with RAN 1; both use talkgroup 1 and the radio's own ID. To use another NAC/RAN
++or group, configure a channel and copy it to the VFO; those values are kept after restart. NXDN transmit requires
++an ID in its 16-bit range. P25 trunking still requires a programmed channel and its transmit remains disabled.
++In DMR the quick settings are the
+ DMR ones:
+ 
+ | Key | Tile | What it does in the DMR VFO |

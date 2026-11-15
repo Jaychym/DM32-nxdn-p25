@@ -26,7 +26,7 @@ channel, ID, and timeout checks are retained. P25 trunking transmit remains disa
 - The complete derivative host suite passes, including UI layout: 4719 screens, zero layout problems.
 - Root make test, NXDN, P25 trunking, and receive-audio tests pass. Documentation links: 145 files, zero broken links.
 - Patch series matches the generated tree. Target build has zero compiler warnings and passes the stack audit:
-  the smallest calculated task margin is 136 bytes. FLASH 552436 bytes; static RAM 211440 of 211456 bytes.
+  the smallest calculated task margin is 136 bytes. FLASH 552768 bytes; static RAM 211440 of 211456 bytes.
   Static RAM is close to its linker limit; the configured RTOS heap and task stacks are unchanged.
 
 Patch 0024 adds the exact supplied picture, quantized for the display, and the NXDN-P25-DM32 name. The boot text
@@ -47,3 +47,20 @@ the status view alone cannot establish that.
 
 Public release assets contain only the codec-free image, manifest, and SHA256SUMS. AMBE stays in the user's own
 radio or stock file and is handled locally by the web flasher.
+
+## Four-mode VFO in this Hotfix
+
+Quick settings > Mode cycles FM, DMR, P25, NXDN, then FM. The mode survives a reboot. P25 starts with NAC 0x293,
+NXDN with RAN 1, and both with TG 1. A programmed conventional digital channel can be copied to the VFO to keep
+another NAC/RAN and group; both are saved without enlarging the settings record. The radio's own ID is used.
+NXDN still rejects transmit IDs outside its valid range. Trunking is excluded from the cycle.
+
+The new host checks cover P25 and NXDN selection, frequency stepping, RX/TX routing with ID 4001, PTT release,
+restart, copied custom NAC/RAN/group, corrupt saved values, and rejection of invalid modes. The radio-core suites
+pass 2260 checks for the multimode build and 2190 for NXDN without P25, also with ASan/UBSan. The FM/DMR-only VFO
+tests still pass. UI flows cover the four-mode cycle and returning from channels. The multimode layout check
+covers 4771 screens with zero problems; the gallery includes both new VFO views. This remains host validation;
+the new VFO modes have not been checked on physical hardware in this task.
+
+![P25 VFO in the simulator](vfo-p25.png)
+![NXDN VFO in the simulator](vfo-nxdn.png)
