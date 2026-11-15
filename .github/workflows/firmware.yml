@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Builds the DM-32UV firmware image without the AMBE codec, as the web flasher installs it, and attaches it to the
 # release that started the run (rfoundry-dm32-<version>.bin, its rfoundry-release/1 manifest and SHA256SUMS).
-# A manual run (Actions > Firmware > Run workflow) builds the same and keeps it as a workflow artifact.
+# A manual run (Actions > Firmware > Run workflow) builds the same; with a version it also publishes it: the release
+# v<version> on the commit built, made if it doesn't exist yet, gets the files. Without one it stays an artifact.
 #
 # Never fetches the stock firmware or any AMBE material: the toolchain bootstrap fetches only the compiler sources
 # (SOURCES_ONLY), the build has no --with-local-stock, and tools/release.py refuses an image that reaches the codec.
@@ -13,7 +14,10 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version name (default: dev-<short commit>)"
+        description: "Version to publish as release v<version> (e.g. 2026.11.15-dv-monitor); blank: artifact only"
+        required: false
+      title:
+        description: "Release title, for a new release (default: Open25-DM32 <version>)"
         required: false
 
 permissions:
@@ -82,8 +86,17 @@ jobs:
           path: dist/*
 
       - name: Attach to the release
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' || github.event.inputs.version != ''
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+          TAG: ${{ github.event.release.tag_name || format('v{0}', github.event.inputs.version) }}
+          TITLE: ${{ github.event.inputs.title }}
+          VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          set -eu
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest \
+              --title "${TITLE:-Open25-DM32 $VERSION}" \
+              --notes "Imagen sin códec AMBE para el Baofeng DM-32UV, compilada por la acción Firmware desde ${GITHUB_SHA::8}. Instálala con el web flasher: https://donttellmeimcute.github.io/dm32-web-cps-flasher/ (toma el códec de tu propia radio). SHA-256 en SHA256SUMS."
+          fi
+          gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
