@@ -1,23 +1,24 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Builds the DM-32UV firmware image without the AMBE codec, as the web flasher installs it, and attaches it to the
-# release that started the run (rfoundry-dm32-<version>.bin, its rfoundry-release/1 manifest and SHA256SUMS).
-# A manual run (Actions > Firmware > Run workflow) builds the same; with a version it also publishes it: the release
-# v<version> on the commit built, made if it doesn't exist yet, gets the files. Without one it stays an artifact.
+# Every commit to main builds the DM-32UV firmware image without the AMBE codec, as the web flasher installs it, and
+# publishes it as a new release: v<YYYY.MM.DD>-<short commit>, with rfoundry-dm32-<version>.bin, its
+# rfoundry-release/1 manifest and SHA256SUMS. The web flasher (dm32-web-cps-flasher, its Sync firmware workflow) picks
+# up the latest release and installs it from then on.
+# A manual run (Actions > Firmware > Run workflow) does the same, with an optional version name of your own.
 #
 # Never fetches the stock firmware or any AMBE material: the toolchain bootstrap fetches only the compiler sources
 # (SOURCES_ONLY), the build has no --with-local-stock, and tools/release.py refuses an image that reaches the codec.
 name: Firmware
 
 on:
-  release:
-    types: [published]
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to publish as release v<version> (e.g. 2026.11.15-dv-monitor); blank: artifact only"
+        description: "Version name (default: YYYY.MM.DD-<short commit>); the release is v<version>"
         required: false
       title:
-        description: "Release title, for a new release (default: Open25-DM32 <version>)"
+        description: "Release title (default: Open25-DM32 <version>)"
         required: false
 
 permissions:
@@ -40,7 +41,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends build-essential bison flex texinfo zlib1g-dev \
             libgmp-dev libmpfr-dev libmpc-dev clang python3
 
-      # The C-SKY compiler and newlib take 30-40 minutes to build; kept between runs
+      # The C-SKY compiler and newlib are built once and kept between runs
       - name: Restore C-SKY toolchain
         id: toolchain
         uses: actions/cache@v4
@@ -64,10 +65,9 @@ jobs:
         id: package
         env:
           INPUT_VERSION: ${{ github.event.inputs.version }}
-          TAG: ${{ github.event.release.tag_name }}
         run: |
           set -eu
-          if [ -n "${TAG:-}" ]; then VERSION="${TAG#v}"; elif [ -n "${INPUT_VERSION:-}" ]; then VERSION="$INPUT_VERSION"; else VERSION="dev-${GITHUB_SHA::8}"; fi
+          VERSION="${INPUT_VERSION:-$(date -u +%Y.%m.%d)-${GITHUB_SHA::8}}"
           TREE=build/radiofoundry-p25
           BUILD=$TREE/build/dm32-p25-native
           # The build's own CONFIG_*/CROSS overrides, so the manifest lists the features the image really has
@@ -85,18 +85,40 @@ jobs:
           name: rfoundry-dm32-${{ steps.package.outputs.version }}
           path: dist/*
 
-      - name: Attach to the release
-        if: github.event_name == 'release' || github.event.inputs.version != ''
+      - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name || format('v{0}', github.event.inputs.version) }}
-          TITLE: ${{ github.event.inputs.title }}
           VERSION: ${{ steps.package.outputs.version }}
+          TITLE: ${{ github.event.inputs.title }}
         run: |
           set -eu
-          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest \
-              --title "${TITLE:-Open25-DM32 $VERSION}" \
-              --notes "Imagen sin códec AMBE para el Baofeng DM-32UV, compilada por la acción Firmware desde ${GITHUB_SHA::8}. Instálala con el web flasher: https://donttellmeimcute.github.io/dm32-web-cps-flasher/ (toma el códec de tu propia radio). SHA-256 en SHA256SUMS."
+          TAG="v$VERSION"
+          {
+            git log -1 --format='%B' "$GITHUB_SHA"
+            echo
+            echo "---"
+            echo "Imagen sin códec AMBE para el Baofeng DM-32UV, compilada desde ${GITHUB_SHA::8}. El web flasher la instala sola"
+            echo "en unos minutos: https://donttellmeimcute.github.io/dm32-web-cps-flasher/ (toma el códec de tu propia radio)."
+            echo
+            echo '```'
+            cat dist/SHA256SUMS
+            echo '```'
+          } > notes.md
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest \
+              --title "${TITLE:-Open25-DM32 $VERSION}" --notes-file notes.md
           fi
-          gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+
+      # Optional: with a token that may run workflows in dm32-web-cps-flasher (secret FLASHER_TOKEN), the flasher
+      # updates right away; without it, its Sync firmware workflow finds the release on its next scheduled check
+      - name: Tell the web flasher
+        env:
+          GH_TOKEN: ${{ secrets.FLASHER_TOKEN }}
+        run: |
+          if [ -n "$GH_TOKEN" ]; then
+            gh workflow run sync-firmware.yml --repo donttellmeimcute/dm32-web-cps-flasher
+          else
+            echo "No FLASHER_TOKEN: the flasher picks the release up on its next scheduled check"
+          fi
