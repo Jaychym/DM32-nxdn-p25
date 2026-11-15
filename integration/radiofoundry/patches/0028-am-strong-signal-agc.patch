@@ -1,0 +1,916 @@
+--- a/boards/dm1801pro/radio_dm1801pro.c
++++ b/boards/dm1801pro/radio_dm1801pro.c
+@@ -68,7 +68,6 @@
+ static radio_bw_t rx_bw = RADIO_BW_12K5;
+ static subtone_t rx_tone;
+ static bool have_rx;
+-static bool rx_am_on;		// the FD6818 plays its AM demodulator (rx_am, the air band)
+ static bool asleep;		// rx_sleep(true): the receiver is off until rx_sleep(false) or the next rx()
+ static bool transmitting;
+ static uint32_t tx_hz;		// TX frequency (FM: also the TX tone deviation, with tx_wide; DMR: the burst TX path)
+@@ -289,7 +288,6 @@
+ 		hrc7000_fm_idle(&modem);
+ 		mode = RADIO_MODE_FM;
+ 	}
+-	rx_am_on = false;	// both mode tables write the FM AF word
+ 	have_rx = false;	// the next rx() retunes everything
+ }
+ 
+@@ -308,7 +306,12 @@
+ 		fd6818_set_state(&fd, FD6818_STATE_RX);
+ 		rx_path(hz, true);
+ 	} else {
++#if CONFIG_AM_RX
++		fd6818_set_bandwidth(&fd, am ? FD6818_BW_AM : fm_bw_reg(bw));
++#else
++		(void)am;
+ 		fd6818_set_bandwidth(&fd, fm_bw_reg(bw));
++#endif
+ 		fd6818_set_state(&fd, FD6818_STATE_RX);
+ 		rx_path(hz, true);
+ 		hrc_dac_b_power(false);
+@@ -318,10 +321,9 @@
+ 		// HR_C7000's detector has no input (hardware-dm32.md 8.4)
+ 		fd6818_set_rx_tone(&fd, fd_tone(tone != NULL ? tone->type : TONE_NONE), tone != NULL ? tone->value : 0);
+ 		hrc7000_set_subtone(&modem, false, HRC7000_TONE_NONE, 0);	// the modem's tone bits off (left on by a TX)
+-		if (am != rx_am_on) {
+-			fd6818_set_am(&fd, am);
+-			rx_am_on = am;
+-		}
++#if CONFIG_AM_RX
++		fd6818_set_am(&fd, am);	// every AM tune: full gain again for the new channel; FM: AM off
++#endif
+ 	}
+ 	rx_hz = hz;
+ 	rx_bw = bw;
+@@ -339,8 +341,8 @@
+ }
+ 
+ #if CONFIG_AM_RX
+-// Air band AM (docs/spec/airband-and-broadcast.md 3.3): FM receive with the FD6818's AF output on its AM demodulator,
+-// played straight to the speaker as in FM receive; no sub-audio. 108-136 MHz comes in on the VHF receive path
++// Air band AM (docs/spec/airband-and-broadcast.md 3.3): FM receive with the FD6818's AM set-up (fd6818_set_am), played
++// straight to the speaker as in FM receive; no sub-audio. 108-136 MHz comes in on the VHF receive path
+ static bool rx_am(uint32_t hz, radio_bw_t bw)
+ {
+ 	return rx_tune(hz, bw, NULL, true);
+@@ -351,7 +353,7 @@
+ static void retune(void)
+ {
+ 	subtone_t t = rx_tone;
+-	(void)rx_tune(rx_hz, rx_bw, &t, rx_am_on);
++	(void)rx_tune(rx_hz, rx_bw, &t, fd6818_am_on(&fd));
+ }
+ 
+ // 5.4 "Enter TX": RX path off, frequency, the RF state sequence, 0x50, the TX path, then the PA ramp. The radio's
+@@ -493,6 +495,9 @@
+ 	st->rssi_dbm = (int16_t)(fd6818_rssi_dbm(r67) + fd6818_rssi_cal_db(rssi_cal, sizeof(rssi_cal) / sizeof(rssi_cal[0]),
+ 									    rx_hz));
+ 	st->noise = fd6818_noise(r65);	// the chip's floor lifted above the core's squelch levels (fd6818.h)
++#if CONFIG_AM_RX
++	(void)fd6818_am_status(&fd, r65, r67, &st->rssi_dbm, &st->noise);	// AM: its own level and squelch value
++#endif
+ 	st->carrier = false;
+ 	st->tone_ok = mode != RADIO_MODE_FM || fd6818_rx_tone_ok(&fd, fd_tone(rx_tone.type));
+ }
+--- a/boards/dm32/radio_dm32.c
++++ b/boards/dm32/radio_dm32.c
+@@ -53,7 +53,6 @@
+ static uint16_t last_rssi_raw, last_noise_raw;
+ static bool pcm_on;		// a beep or DMR voice plays through the codec
+ static bool rx_audio;		// the squelch is open (the radio's audio hook)
+-static bool rx_am_on;		// the FD6818 plays its AM demodulator (rx_am, the air band)
+ static bool asleep;		// the receiver is powered down between listen windows (rx_sleep)
+ static bool aprs_listen;	// APRS takes the HR_C7000's FM audio (aprs_listen_route)
+ static bool afsk_tx;		// APRS tones play through the prompt FIFO into the modulator (afsk_tx_route)
+@@ -279,7 +278,6 @@
+ 		hrc7000_fm_idle(&modem);
+ 		mode = RADIO_MODE_FM;
+ 	}
+-	rx_am_on = false;	// both mode tables write the FM AF word
+ 	have_rx = false;	// the next rx() retunes everything
+ }
+ 
+@@ -297,7 +295,12 @@
+ 		fd6818_set_bandwidth(&fd, FD6818_BW_DMR);
+ 		fd6818_set_state(&fd, FD6818_STATE_RX);
+ 	} else {
++#if CONFIG_AM_RX
++		fd6818_set_bandwidth(&fd, am ? FD6818_BW_AM : fm_bw_reg(bw));
++#else
++		(void)am;
+ 		fd6818_set_bandwidth(&fd, fm_bw_reg(bw));
++#endif
+ 		fd6818_set_state(&fd, FD6818_STATE_RX);
+ 		hrc_dac_b_power(false);
+ 		hrc7000_fm_rx(&modem, bw == RADIO_BW_25K);
+@@ -305,10 +308,9 @@
+ 		// The FD6818 detects the tone on its own demodulated audio: the C7000's detector gets no audio while the
+ 		// FD6818 plays FM to the speaker (hardware-dm32.md 8.4)
+ 		fd6818_set_rx_tone(&fd, fd_tone(tone != NULL ? tone->type : TONE_NONE), tone != NULL ? tone->value : 0);
+-		if (am != rx_am_on) {
+-			fd6818_set_am(&fd, am);
+-			rx_am_on = am;
+-		}
++#if CONFIG_AM_RX
++		fd6818_set_am(&fd, am);	// every AM tune: full gain again for the new channel; FM: AM off
++#endif
+ 	}
+ 	rx_hz = hz;
+ 	rx_bw = bw;
+@@ -325,9 +327,9 @@
+ }
+ 
+ #if CONFIG_AM_RX
+-// Air band AM (docs/spec/airband-and-broadcast.md 3.3, hardware-dm32.md 8.7): FM receive with the FD6818's AF output on
+-// its AM demodulator. The speaker plays that output straight, as in FM receive (speaker_source); no sub-audio. The
+-// 108-136 MHz signal comes in through the VHF LNA
++// Air band AM (docs/spec/airband-and-broadcast.md 3.3, hardware-dm32.md 8.7): FM receive with the FD6818's AM set-up
++// (its narrowest filter, the AF output on the AM demodulator, the gain loop). The speaker plays that output straight,
++// as in FM receive (speaker_source); no sub-audio. The 108-136 MHz signal comes in through the VHF LNA
+ static bool rx_am(uint32_t hz, radio_bw_t bw)
+ {
+ 	return rx_tune(hz, bw, NULL, true);
+@@ -338,7 +340,7 @@
+ static void retune(void)
+ {
+ 	subtone_t t = rx_tone;
+-	rx_tune(rx_hz, rx_bw, &t, rx_am_on);
++	rx_tune(rx_hz, rx_bw, &t, fd6818_am_on(&fd));
+ }
+ 
+ static bool tx(uint32_t hz, radio_bw_t bw, uint8_t power, const subtone_t *tone)
+@@ -449,20 +451,17 @@
+ }
+ #endif
+ 
+-// The air band reads about 20 dB lower here than on the radio the core's AM squelch levels were set from
+-// (radio_am.h): empty channels -98 to -101 dBm against -76 to -89 on the same sweep (RadioFoundry #157), so a
+-// station had to reach level 1's -82 dBm and none did: every level but 0 stayed shut. Lifted by this, level 5 opens
+-// about 8 dB over this radio's floor, as the core intends. AM only: FM squelches on the noise reading
+-#define AM_RSSI_DB	20
+-
+ static void status(radio_status_t *st)
+ {
+ 	uint16_t r67 = fd6818_read(&fd, FD_REG_RSSI);
+ 	uint16_t r65 = fd6818_read(&fd, FD_REG_NOISE);
+ 	last_rssi_raw = fd6818_rssi_raw(r67);
+ 	last_noise_raw = r65 & 0xFFu;
+-	st->rssi_dbm = (int16_t)(fd6818_rssi_dbm(r67) + (rx_am_on ? AM_RSSI_DB : 0));
++	st->rssi_dbm = fd6818_rssi_dbm(r67);
+ 	st->noise = fd6818_noise(r65);	// the chip's floor lifted above the core's squelch levels (fd6818.h)
++#if CONFIG_AM_RX
++	(void)fd6818_am_status(&fd, r65, r67, &st->rssi_dbm, &st->noise);	// AM: its own level and squelch value
++#endif
+ 	st->carrier = false;
+ 	st->tone_ok = mode != RADIO_MODE_FM || fd6818_rx_tone_ok(&fd, fd_tone(rx_tone.type));
+ }
+--- a/core/radio/radio_am.c
++++ b/core/radio/radio_am.c
+@@ -25,15 +25,6 @@
+ 	return radio_am_capable() && radio_am_band(hz);
+ }
+ 
+-uint8_t radio_am_noise(int16_t rssi_dbm)
+-{
+-	int32_t n = RADIO_AM_SQL_REF_DBM - (int32_t)rssi_dbm;
+-	if (n < 0) {
+-		return 0;
+-	}
+-	return n > 255 ? 255 : (uint8_t)n;
+-}
+-
+ uint32_t radio_am_step(uint32_t hz, int dir, uint32_t step_hz)
+ {
+ 	if (step_hz != RADIO_AM_STEP_833) {
+--- a/core/radio/radio_am.h
++++ b/core/radio/radio_am.h
+@@ -21,13 +21,6 @@
+ #define RADIO_AM_STEP_25K	25000u
+ #define RADIO_AM_STEP_833	8333u
+ 
+-// AM squelch: there is no useful noise reading in AM, so the squelch works on the signal strength. The RSSI is turned
+-// into the FM noise scale (radio_sm_squelch_open_below, 1 dB units, larger = quieter channel) so the same squelch
+-// levels and hysteresis apply: level 1 opens above -82 dBm, level 5 (the default) above -70 dBm, level 9 above
+-// -58 dBm. Set from a radio's readings on empty air band channels (-76 to -86 dBm): the RSSI the boards report in AM
+-// isn't calibrated, so level 5 sits about 8 dB above that floor
+-#define RADIO_AM_SQL_REF_DBM	(-18)
+-
+ // hz is in the air band
+ bool radio_am_band(uint32_t hz);
+ // This radio receives AM (CAP_AM_RX and board.radio->rx_am)
+@@ -36,8 +29,6 @@
+ bool radio_am_channel(const channel_t *ch);
+ // Transmitting on hz is refused because it is in the air band of a radio that receives AM there
+ bool radio_am_tx_refused(uint32_t hz);
+-// The squelch's noise-scale value for an RSSI in AM (0 = strongest .. 255)
+-uint8_t radio_am_noise(int16_t rssi_dbm);
+ // One VFO step from hz in dir with step_hz. The 8.33 kHz step moves on the exact 25/3 kHz grid (rounded to the Hz,
+ // snapping an off-grid frequency to the nearest grid point first); other steps add step_hz
+ uint32_t radio_am_step(uint32_t hz, int dir, uint32_t step_hz);
+--- a/core/radio/radio_sm.c
++++ b/core/radio/radio_sm.c
+@@ -6061,8 +6061,7 @@
+ 	board.radio->status(&st);
+ #if CONFIG_AM_RX
+ 	if (sm->view.am && own_rx) {
+-		st.noise = radio_am_noise(st.rssi_dbm);	// AM: the squelch (and scan) work on the signal strength
+-		st.tone_ok = true;
++		st.tone_ok = true;	// no sub-audio in AM; the board gives the AM squelch value (hal_radio.h rx_am)
+ 	}
+ #endif
+ #if RADIO_SM_DV
+--- a/docs/build-config.md
++++ b/docs/build-config.md
+@@ -131,7 +131,7 @@
+ | `CONFIG_SFR` | = DMR (n where the modem can't) | single frequency repeater: MMDVM SFR (the hotspot, duplex with RX = TX) and Standalone SFR (the repeater and user roles of a channel, `docs/spec/sfr.md`) |
+ | `CONFIG_SFR_CWID` | = SFR | the standalone SFR repeater's periodic CW ID: the callsign from the radio name in Morse, in FM on the channel (`sfr.md` 4). Off: the setting isn't offered |
+ | `CONFIG_SFR_DUALPATH_RX` | = SFR | the SFR user receive mode "Dual-path RX": a voice frame whose FEC failed is taken from the other copy of the call. Off: the mode isn't offered |
+-| `CONFIG_AM_RX` | = `CONFIG_FM` | air band AM receive: an FM channel or the VFO in 108-137 MHz is received in AM on a board with `CAP_AM_RX` and `rx_am`, transmit there refused, AM squelch on RSSI, 8.33 kHz steps (`docs/spec/airband-and-broadcast.md` 3); needs FM. Off on boards whose receiver has no AM (`BOARD_UNSUPPORTED`) |
++| `CONFIG_AM_RX` | = `CONFIG_FM` | air band AM receive: an FM channel or the VFO in 108-137 MHz is received in AM on a board with `CAP_AM_RX` and `rx_am`, transmit there refused, the board's AM squelch value, 8.33 kHz steps (`docs/spec/airband-and-broadcast.md` 3); needs FM. Off on boards whose receiver has no AM (`BOARD_UNSUPPORTED`) |
+ | `CONFIG_BCAST_FM` | y | broadcast FM receive: an FM channel or the VFO in the range of a second receiver chip (`hal_bcast.h`) plays on it, transmit there refused, the FM broadcast step setting (`core/radio/radio_bcast.c`, the board's tuner glue; `docs/spec/airband-and-broadcast.md` 4). Off on boards without one |
+ | `CONFIG_USB` | y (n on a radio without a USB data connector) | USB device (CDC serial) |
+ | `CONFIG_HOSTLINK` | = USB (y on a radio whose host port is a UART) | the host link (`core/hostlink`) on the board's host port: USB CDC, or the programming cable's UART on radios without USB |
+--- a/docs/spec/airband-and-broadcast.md
++++ b/docs/spec/airband-and-broadcast.md
+@@ -51,7 +51,7 @@
+ | When | `CONFIG_AM_RX`, the board has `CAP_AM_RX` and `board.radio->rx_am`, and the channel's or the VFO's RX frequency is in [108, 137) MHz, whatever its stored mode (3.1) |
+ | Tuning | `tune()` calls `rx_am(hz, bw)` instead of `rx()`; if the board refuses, FM as before. `view.am` says AM is on |
+ | Transmit | refused with `TXDENY_AM` whenever `view.am`, and for any TX frequency in the air band on an AM radio (split channels, DMR channels, the VFO, the data service, the hotspot's frequencies) |
+-| Squelch | on the RSSI: `radio_am_noise()` maps dBm onto the FM noise scale (-18 dBm = 0, 1 dB per step), so the levels and hysteresis are the FM ones: level 1 opens above -82 dBm, 5 above -70, 9 above -58. The boards' AM RSSI isn't calibrated: empty air band channels read -76 to -86 dBm on a radio (2026-10-22), so level 5 sits about 8 dB above that. `view.noise` holds that value in AM. Scan uses the same value |
++| Squelch | in AM the board's `status()` gives `noise` on the FM noise scale (larger = weaker) from the reading that tells a carrier from an empty channel in AM, so the levels and hysteresis are the FM ones (3.3). `view.noise` holds that value in AM. Scan uses the same value |
+ | Sub-audio | ignored in AM (`tone_needed()` is false, the tone counts as heard) |
+ | Steps | `radio_req_vfo_step_size()` (RREQ_VFO_STEP_SIZE, stored in `settings_t.vfo_step_hz`; 0 is auto, the default: 25 kHz at width 25K or in AM, else `RADIO_VFO_STEP_HZ`, recomputed on every view change, with `view.vfo_step_auto` set; Settings › Talk › VFO step); 8333 means the exact 8.33 kHz grid (n x 25/3 kHz, `radio_am_step()` snaps and steps without drift); 25 kHz is a plain step |
+ | Band table | the board lists the air band as an RX-only band ({108000000, 136000000, false} after the VHF TX band) |
+@@ -61,10 +61,33 @@
+ 
+ ### 3.3 Board contract (hal_radio.h)
+ 
+-`rx_am(hz, bw)` tunes and receives AM; the board leaves AM at the next `rx()` or `set_mode()`. `status()` gives an
+-RSSI in dBm (noise isn't used in AM) and `tone_ok = true`. `tx()` is never called while AM is on. NULL = no AM.
+-On an FD6818 `rx_am` is `rx` plus the AF output type AM (`fd6818_set_am`, 0x47 = 0x0740; inferred, section 2);
+-`rx()` and `set_mode()` write FM back.
++`rx_am(hz, bw)` tunes and receives AM; the board leaves AM at the next `rx()` or `set_mode()`. `tx()` is never called
++while AM is on. NULL = no AM. In AM `status()` gives:
++
++- `noise` on the squelch's scale (larger = weaker; the core opens below 64 at level 1 down to 40 at level 9), from
++  whichever reading of its receiver tells a carrier from an empty channel in AM. Only the board knows its receiver's
++  readings, their scale and the gain it runs at, so the board makes the value.
++- `rssi_dbm`, the signal level with any gain the receiver took off added back.
++- `tone_ok`: anything (the core takes it as true).
++
++On an FD6818 (`fd6818_set_am`, `fd6818_am_status`, `fd6818_am_noise`):
++
++| Part | AM | FM |
++|---|---|---|
++| 0x43 receive filter | `FD6818_BW_AM` = 0x0048, the narrowest (about 1.7 kHz) | 0x3028 / 0x4008 or the board's |
++| 0x47 AF output | 0x6740, type 7 (AM) | 0x0140, type 1 (FM) |
++| 0x13 receiver gain | a gain loop: 0x03FF (full gain) at each tune, then stepped through a 42-entry table to keep a signal's 0x67 reading near 142 (down at once when 10 dB or more over, by the excess less 8 dB; up one step after 30 readings 6 dB or more under) | the board's FM word, written back when AM ends |
++| 0x4A | 0x5450 | its value before AM, written back |
++| Squelch value | 0x65 bits 7:0 (noise_sq, 1 dB/step) + an offset that puts level 1 at the chip's own noise_sq_th_in, 0x4F bits 6:0 as the board's tables set it (`fd6818_am_noise_offset`: 64 - th_in; 17 with 0x4F = 0x302F); each level 3 dB lower | 0x65 bits 7:0 + 25 |
++
++The gain loop runs at the core's status poll (`RADIO_POLL_MS`). These are the air band settings an FD6818 radio's own
++firmware uses (its hardware page has them); the loop's tick there isn't known. `rx()` and `set_mode()` end AM.
++
++Why the squelch stays on noise_sq: the chip's own squelch (programming guide, squelch section) needs both RSSI 0x67 over
++0x78 and noise_sq under 0x4F. In AM the gain loop holds 0x67 near its target whether or not a signal is there, so only
++noise_sq tells them apart: on the bench it read 59 to 72 on empty channels and fell as a carrier rose (about 61, 53,
++45 and 31 for carriers 5 dB apart, 14 to 19 for a strong one). Level 1 opens where the chip's own squelch does
++(under 0x4F's noise_sq_th_in).
+ 
+ ## 4. Broadcast FM
+ 
+--- a/docs/spec/hardware-dm32.md
++++ b/docs/spec/hardware-dm32.md
+@@ -852,17 +852,47 @@
+ |---|---|---|
+ | A1 | Is 0x47 AF type 7 the FD6818's AM output? | 11: a second receiver on ATIS for reference; RadioFoundry with `rx_am`, compare audio |
+ | A2 | Which speaker source (0x2F level) carries FD6818 AF? | answered: 0x2F = 1 (measured, FM receive) |
+-| A3 | AM filter bandwidth (0x43) and AGC (0x13, 0x09 table) for AM | 11: listen to a strong and a weak station; BK4819-class chips may need AGC changes for AM (unverified) |
+-| A4 | RSSI offset in AM (the squelch's dBm) | 11: signal generator at -100 dBm, read `rssi` on the debug link |
++| A3 | AM filter bandwidth (0x43) and AGC (0x13) for AM | the radio's own set-up (below) gives them; 11 checks a strong and a weak station with it. Open: what 0x4A and the fields of 0x13 are, and the gain loop's tick |
++| A4 | The 0x67 reading in AM on an empty channel and on a carrier, with the AM set-up (the squelch's scale) | 11: signal generator at -100 and -60 dBm, read 0x67, 0x13 and `rssi` on the debug link |
+ | B1 | Is the RDA5807M really at PTA25 / PTA26, and does it answer at 0x11? | 11: chip ID 0x58xx over the debug link probe |
+ | B2 | Its reference clock (32.768 kHz crystal or a clock signal; 0x02 CLK_MODE, RCLK_DIRECT) | 11: tune a known station with each setting |
+ | B3 | Pull-up on SDA (or the pin's own pull) | 11: the chip ID read fails without one |
+ | B4 | Where its audio goes (into the amplifier directly, through 0x2F, or into the codec) and whether its supply is switched by a GPIO | 11: listen with each speaker path set |
+ | B5 | Antenna for broadcast (the main antenna through the VHF path, or the headset cable) | 11: compare stations with and without a headset |
+ 
+-What RadioFoundry does (unverified until bring-up): `rx_am` in `boards/dm32/radio_dm32.c` is the FM receive path (VHF LNA, speaker
+-source to the FD6818, A2) with the AF output word 0x47 = 0x0740 (AF type 7, A1); `rx()` writes 0x0140 back. The AGC
+-and filter are the FM ones (A3). The RDA5807M runs through the shared HR_C7000 glue (`platform/hrc7000/bcast_hrc.c`)
++#### The radio's own air band set-up
++
++From the radio's firmware (code read, not measured):
++
++| Item | Value |
++|---|---|
++| When | the RX frequency is in 108.000 to 136.000 MHz (exclusive). AM is chosen by the frequency alone; no channel field |
++| 0x43 | 0x0048: receive filter 14:12 = 0 (about 1.7 kHz), weak-signal bandwidth 0, narrow |
++| 0x47 | 0x6740 (AF type 7), written at the set-up and again when the audio is unmuted |
++| 0x13 | 0x03FF, then a gain loop rewrites it (below) |
++| 0x4A | 0x5450, written only here and never restored |
++| Not written | 0x04 (the AM demodulator enable bit: AM is 0x47 type 7 alone), 0x7E, 0x2B, 0x48, sub-audio |
++| Leaving AM | 0x13 = 0x037E, then the FM or DMR set-up |
++| Gain loop | each tick: the 0x67 reading (bits 8:0) averaged with the one before; dB = (average - 142) / 2. 10 dB or more: down at once to the table entry about (dB - 8) below the current one. Under -6 dB and 30 ticks since the last change: up one entry. Any change, or -6 dB and over, starts the 30 ticks again. The table holds 42 0x13 words from 0x000 (-93 dB) to 0x03FF (0 dB). The RSSI isn't corrected for the gain |
++| Squelch | 0x78 = n << 8 \| (n - 1) on the raw 0x67 scale, n from the factory page's air band rows (11.2: 0x80 level 9, 0x85 level 1, at five points over 108-136 MHz), interpolated by level and frequency. One radio's rows: 61 (level 9) and 71 (level 1), about 30-40 below its FM rows |
++
++On the bench (radio on a dummy load, an AM carrier from the SDR bench, a desk with a raised noise floor):
++
++| Reading | Empty channel | Carrier |
++|---|---|---|
++| 0x67 at full gain (0x13 = 0x03FF) | 133-158 over the band, higher than the factory rows by 60-90 | the gain loop takes 0x13 down and holds 0x67 near 142-150 |
++| 0x65 bits 7:0 (noise_sq) | 59-72 at every frequency | falls as the carrier rises: about 61, 53, 45 and 31 for carriers 5 dB apart (the weakest barely over the floor); 14-19 for a strong one |
++| 0x0C bit 1 (the chip's squelch, 0x78 = 0x6968, 0x4F = 0x302F) | 0 | 1 once noise_sq is under 47 |
++
++So with the gain loop the RSSI half of the chip's squelch always passes (0x67 is over any factory row), and noise_sq
++decides; the factory rows can't be compared with 0x67 as it reads here.
++
++What RadioFoundry does: `rx_am` in `boards/dm32/radio_dm32.c` is the FM receive path (VHF LNA, speaker source to the
++FD6818, A2) with that set-up: 0x43 = 0x0048, 0x47 = 0x6740, 0x13 = 0x03FF and its gain loop at every status poll, 0x4A
++= 0x5450, each AM tune (`fd6818_set_am`, `fd6818_am_status`). Leaving AM writes 0x13 = 0x037E, 0x47 = 0x0140 and 0x4A as
++it read before. The squelch works on noise_sq plus 17 (`fd6818_am_noise`): level 1 opens under 47, as the chip's own
++squelch does, and each level is 3 dB tighter; the factory rows are not read. The RSSI shown adds the gain the loop took
++off back. The RDA5807M runs through the shared HR_C7000 glue (`platform/hrc7000/bcast_hrc.c`)
+ on PTA25 / PTA26 with no enable pin; its audio path turns the amplifier on and leaves the speaker source alone (B4).
+ The air band is an RX-only band of 108-136 MHz and the broadcast range 65-108 MHz in `boards/dm32/board.c`.
+ 
+--- a/drivers/rf/fd6818/fd6818.c
++++ b/drivers/rf/fd6818/fd6818.c
+@@ -128,6 +128,13 @@
+ 	dev->freq_10hz = 0;
+ 	dev->bw_reg = 0;
+ 	dev->state = 0;
++#if CONFIG_AM_RX
++	dev->am = false;
++	dev->am_noise_off = 0;
++	dev->r13 = 0;
++	dev->r4a = 0;
++	fd6818_agc_reset(&dev->agc);
++#endif
+ }
+ 
+ void fd6818_write(fd6818_t *dev, uint8_t reg, uint16_t val)
+@@ -168,6 +175,9 @@
+ void fd6818_set_mode(fd6818_t *dev, fd6818_mode_t mode)
+ {
+ 	const fd6818_variant_t *v = dev->variant;
++#if CONFIG_AM_RX
++	fd6818_set_am(dev, false);	// 0x4A: the mode tables don't write it
++#endif
+ 	if (mode == FD6818_MODE_DMR) {
+ 		if (v->dmr != NULL) {
+ 			write_table(dev, v->dmr, v->dmr_n);
+@@ -279,10 +289,129 @@
+ 	return type == FD6818_TONE_NONE || fd6818_tone_found(fd6818_read(dev, FD6818_REG_CSS_STATUS), type);
+ }
+ 
++#if CONFIG_AM_RX
++static bool last_in(const regval_t *t, uint16_t n, uint8_t reg, uint16_t *val)
++{
++	for (uint16_t i = n; i > 0; i--) {
++		if (t[i - 1].reg == reg) {
++			*val = t[i - 1].val;
++			return true;
++		}
++	}
++	return false;
++}
++
++// What FM receive has in reg: the FM table's last write, else post-init's, else init's
++static bool fm_value(const fd6818_variant_t *v, uint8_t reg, uint16_t *val)
++{
++	return last_in(v->fm, v->fm_n, reg, val) || last_in(v->post_init, v->post_init_n, reg, val) ||
++		last_in(v->init, v->init_n, reg, val);
++}
++
+ void fd6818_set_am(fd6818_t *dev, bool am)
+ {
+-	fd6818_write(dev, FD6818_REG_AF, am ? FD6818_AF_AM : FD6818_AF_FM);
+-}
++	if (am) {
++		if (!dev->am) {
++			// FM's 0x13 and 0x4A differ by board: the last value the variant's tables write, or the chip's own
++			if (!fm_value(dev->variant, FD6818_REG_GAIN, &dev->r13)) {
++				dev->r13 = fd6818_read(dev, FD6818_REG_GAIN);
++			}
++			if (!fm_value(dev->variant, FD6818_REG_AM_4A, &dev->r4a)) {
++				dev->r4a = fd6818_read(dev, FD6818_REG_AM_4A);
++			}
++			// The squelch's level 1 at the chip's own noise threshold, as this board sets it
++			uint16_t r4f;
++			if (!fm_value(dev->variant, FD6818_REG_SQ_NOISE, &r4f)) {
++				r4f = fd6818_read(dev, FD6818_REG_SQ_NOISE);
++			}
++			dev->am_noise_off = fd6818_am_noise_offset(r4f);
++		}
++		fd6818_write(dev, FD6818_REG_AF, FD6818_AF_AM);
++		fd6818_write(dev, FD6818_REG_GAIN, FD6818_GAIN_AM_FULL);
++		fd6818_write(dev, FD6818_REG_AM_4A, FD6818_AM_4A);
++		fd6818_agc_reset(&dev->agc);
++	} else if (dev->am) {
++		fd6818_write(dev, FD6818_REG_GAIN, dev->r13);
++		fd6818_write(dev, FD6818_REG_AF, FD6818_AF_FM);
++		fd6818_write(dev, FD6818_REG_AM_4A, dev->r4a);
++	}
++	dev->am = am;
++}
++
++bool fd6818_am_status(fd6818_t *dev, uint16_t r65, uint16_t r67, int16_t *rssi_dbm, uint8_t *noise)
++{
++	if (!dev->am) {
++		return false;
++	}
++	// The reading and the gain it was taken at, before the loop's step changes the gain
++	*rssi_dbm = (int16_t)(*rssi_dbm + fd6818_agc_atten_db(&dev->agc));
++	*noise = fd6818_am_noise(r65, dev->am_noise_off);
++	if (fd6818_agc_step(&dev->agc, r67)) {
++		fd6818_write(dev, FD6818_REG_GAIN, fd6818_agc_word(&dev->agc));
++	}
++	return true;
++}
++
++// The gain loop's 0x13 words, lowest gain first, with the gain each gives against the last (full gain, 0x3FF)
++static const struct {
++	uint16_t word;
++	int8_t db;
++} agc_table[] = {
++	{ 0x000, -93 }, { 0x008, -91 }, { 0x010, -88 }, { 0x001, -87 }, { 0x009, -85 }, { 0x011, -82 }, { 0x002, -81 },
++	{ 0x00A, -79 }, { 0x012, -76 }, { 0x003, -75 }, { 0x00B, -73 }, { 0x013, -70 }, { 0x004, -69 }, { 0x00C, -67 },
++	{ 0x00D, -64 }, { 0x01C, -61 }, { 0x01D, -58 }, { 0x01E, -55 }, { 0x01F, -52 }, { 0x03E, -50 }, { 0x03F, -47 },
++	{ 0x05E, -45 }, { 0x05F, -42 }, { 0x07E, -40 }, { 0x07F, -37 }, { 0x09F, -34 }, { 0x0BF, -32 }, { 0x0DF, -30 },
++	{ 0x0FF, -28 }, { 0x1DF, -26 }, { 0x1FF, -24 }, { 0x2BF, -23 }, { 0x2DF, -21 }, { 0x2FF, -19 }, { 0x35E, -17 },
++	{ 0x35F, -14 }, { 0x37E, -12 }, { 0x37F, -9 }, { 0x38F, -6 }, { 0x3BF, -4 }, { 0x3DF, -2 }, { 0x3FF, 0 },
++};
++#define AGC_TOP		(uint8_t)(sizeof(agc_table) / sizeof(agc_table[0]) - 1u)
++#define AGC_NO_PREV	0xFFFFu
++#define AGC_CUT_FROM	10	// dB over the target that takes the gain down
++#define AGC_CUT_SPARE	8	// dB of that excess left in
++#define AGC_RAISE_BELOW	(-6)	// dB under the target that raises the gain
++
++void fd6818_agc_reset(fd6818_agc_t *a)
++{
++	a->idx = AGC_TOP;
++	a->hold = 0;
++	a->prev = AGC_NO_PREV;
++}
++
++bool fd6818_agc_step(fd6818_agc_t *a, uint16_t r67)
++{
++	uint16_t raw = r67 & 0x1FFu;
++	uint16_t avg = a->prev == AGC_NO_PREV ? raw : (uint16_t)((raw + a->prev) / 2u);
++	a->prev = raw;
++	int32_t db = ((int32_t)avg - (int32_t)FD6818_AGC_TARGET) / 2;	// the reading is in 0.5 dB steps
++	uint8_t idx = a->idx;
++	if (db >= AGC_CUT_FROM) {
++		int32_t want = agc_table[idx].db - (db - AGC_CUT_SPARE);
++		while (idx > 0 && agc_table[idx].db > want) {
++			idx--;
++		}
++	} else if (db < AGC_RAISE_BELOW && a->hold == 0 && idx < AGC_TOP) {
++		idx++;
++	}
++	bool changed = idx != a->idx;
++	a->idx = idx;
++	if (changed || db >= AGC_RAISE_BELOW) {
++		a->hold = FD6818_AGC_HOLD;
++	} else if (a->hold > 0) {
++		a->hold--;
++	}
++	return changed;
++}
++
++uint16_t fd6818_agc_word(const fd6818_agc_t *a)
++{
++	return agc_table[a->idx].word;
++}
++
++uint8_t fd6818_agc_atten_db(const fd6818_agc_t *a)
++{
++	return (uint8_t)-agc_table[a->idx].db;
++}
++#endif	// CONFIG_AM_RX
+ 
+ void fd6818_rx_sleep(fd6818_t *dev, bool sleep, fd6818_mode_t mode)
+ {
+--- a/drivers/rf/fd6818/fd6818.h
++++ b/drivers/rf/fd6818/fd6818.h
+@@ -12,6 +12,7 @@
+ #include <stdint.h>
+ #include <stdbool.h>
+ #include "rf/rfbus/rfbus.h"
++#include "config.h"
+ 
+ 
+ typedef rfbus_regval_t fd6818_regval_t;
+@@ -48,12 +49,26 @@
+ 
+ extern const fd6818_variant_t fd6818_variant_default;
+ 
++// The AM receiver's gain loop (fd6818_am_status): an index into the 0x13 gain table, the hold before the gain goes up
++// again, and the last 0x67 reading
++typedef struct {
++	uint8_t idx;
++	uint8_t hold;
++	uint16_t prev;
++} fd6818_agc_t;
++
+ typedef struct {
+ 	rfbus_t *bus;
+ 	const fd6818_variant_t *variant;
+ 	uint32_t freq_10hz;	// last frequency written, 10 Hz units (0 = none)
+ 	uint16_t bw_reg;	// last 0x43 value
+ 	uint16_t state;		// last 0x30 value
++#if CONFIG_AM_RX
++	bool am;		// the AM set-up is on (fd6818_set_am)
++	uint8_t am_noise_off;	// fd6818_am_noise's offset, from the variant's 0x4F
++	uint16_t r13, r4a;	// 0x13 and 0x4A as they were before AM, written back when AM ends
++	fd6818_agc_t agc;
++#endif
+ } fd6818_t;
+ 
+ // Registers with a known meaning
+@@ -62,6 +77,7 @@
+ #define FD6818_REG_CSS_STATUS	0x0C	// b10 CTCSS, b14 DCS normal, b15 DCS inverted detected
+ #define FD6818_REG_BAND_A	0x1A
+ #define FD6818_REG_STATE	0x30
++#define FD6818_REG_GAIN		0x13	// receiver gain: FM and DMR the variant's word; in AM the gain loop's table (fd6818_am_status)
+ #define FD6818_REG_POWER	0x37	// block enables: 0x1F0F receive, 0x1D11 / 0x1D00 receiver asleep (FM / DMR)
+ #define FD6818_REG_FREQ_LO	0x38	// 10 Hz units, low 16 bits
+ #define FD6818_REG_FREQ_HI	0x39
+@@ -69,6 +85,8 @@
+ #define FD6818_REG_BANDWIDTH	0x43
+ #define FD6818_REG_AF		0x47	// AF output: 0x6042 = muted in FM, FD6818_AF_FM / FD6818_AF_AM below
+ #define FD6818_REG_VOLUME	0x48
++#define FD6818_REG_AM_4A	0x4A	// FD6818_AM_4A in AM, else the variant's init word (if any); meaning not known
++#define FD6818_REG_SQ_NOISE	0x4F	// squelch noise thresholds: noise_sq_th_out 14:8, noise_sq_th_in 6:0 (guide, squelch)
+ #define FD6818_REG_SUBAUDIO	0x51
+ #define FD6818_REG_CSS_THRESH	0x52
+ #define FD6818_REG_NOISE	0x65
+@@ -84,13 +102,18 @@
+ #define FD6818_BW_FM_25K	0x3028u
+ #define FD6818_BW_FM_12K5	0x4008u
+ #define FD6818_BW_DMR		0x4048u
+-
+-// 0x47 AF output words. Bits 11:8 pick the demodulator whose audio the output carries; the register is laid out as on
+-// the BK4819 class of chips (docs/spec/airband-and-broadcast.md 3.3), where type 1 is FM and type 7 is AM. FD6818_AF_FM
+-// is the word the FM and DMR tables write (checked on the radio); FD6818_AF_AM is the same word with the AM type
+-// (inferred, the air band bring-up confirms it)
++// AM: the narrowest receive filter (firlpf_bw 14:12 = 0, about 1.7 kHz; weak-signal bandwidth 0; narrow, bit 5 = 0)
++#define FD6818_BW_AM		0x0048u
++
++// 0x47 AF output words. Bits 11:8 pick the demodulator whose audio the output carries, as on the BK4819 class of chips
++// (docs/spec/airband-and-broadcast.md 3.3): type 1 is FM, type 7 is AM. FD6818_AF_FM is the word the FM and DMR tables
++// write (checked on the radio). FD6818_AF_AM is the radio's own air band word (hardware-dm32.md 8.7)
+ #define FD6818_AF_FM		0x0140u
+-#define FD6818_AF_AM		0x0740u
++#define FD6818_AF_AM		0x6740u
++// The rest of the radio's own AM set-up (hardware-dm32.md 8.7): 0x13 at full gain (the top of the gain loop's table)
++// and 0x4A
++#define FD6818_GAIN_AM_FULL	0x03FFu
++#define FD6818_AM_4A		0x5450u
+ 
+ typedef enum { FD6818_MODE_FM, FD6818_MODE_DMR } fd6818_mode_t;
+ typedef enum { FD6818_TONE_NONE, FD6818_TONE_CTCSS, FD6818_TONE_DCS, FD6818_TONE_DCS_INV } fd6818_tone_t;
+@@ -123,11 +146,13 @@
+ // sits inside that range and every level opens on noise. The offset lifts the floor above 64 and keeps a strong
+ // carrier at 33
+ #define FD6818_NOISE_OFFSET	25u
+-static inline uint8_t fd6818_noise(uint16_t r65)
++// Reg 0x65 bits 7:0 plus offset, capped at 255 (FM and AM differ only in the offset)
++static inline uint8_t fd6818_noise_plus(uint16_t r65, uint8_t offset)
+ {
+-	uint16_t n = (uint16_t)((r65 & 0xFFu) + FD6818_NOISE_OFFSET);
++	uint16_t n = (uint16_t)((r65 & 0xFFu) + offset);
+ 	return n > 255u ? 255u : (uint8_t)n;
+ }
++static inline uint8_t fd6818_noise(uint16_t r65) { return fd6818_noise_plus(r65, FD6818_NOISE_OFFSET); }
+ 
+ // --- Register access (one frame each, inside the critical section) ---
+ 
+@@ -155,9 +180,53 @@
+ // also turns the chip's sub-audio transmitter on, so a radio that makes its tones elsewhere sets NONE before TX
+ void fd6818_set_rx_tone(fd6818_t *dev, fd6818_tone_t type, uint16_t value);
+ bool fd6818_rx_tone_ok(fd6818_t *dev, fd6818_tone_t type);
+-// The receiver's audio output: the AM demodulator (true, the air band) or FM. Only the AF word changes: tune and set the
+-// FM bandwidth and RX state as for FM receive. fd6818_set_mode writes FM again
++#if CONFIG_AM_RX
++// The air band AM set-up (true) or back to FM (false), the radio's own sequence (hardware-dm32.md 8.7). On: 0x47 to
++// the AM output, 0x13 to full gain, 0x4A to its AM word and the gain loop reset. The caller tunes as for FM receive
++// with FD6818_BW_AM in 0x43, calls this on every FM-mode tune (am false outside the air band), and fd6818_am_status on
++// each status reading. Off (from AM): 0x47 to the FM word, 0x13 and 0x4A to what they were before AM; outside AM it
++// writes nothing. fd6818_set_mode ends AM first
+ void fd6818_set_am(fd6818_t *dev, bool am);
++// In AM, one status reading (0x65, 0x67): rssi_dbm gets the gain the loop took off added back, noise the AM squelch
++// value (fd6818_am_noise), and the gain loop takes its step (writing 0x13 when the gain changes). Outside AM it changes
++// nothing and returns false
++bool fd6818_am_status(fd6818_t *dev, uint16_t r65, uint16_t r67, int16_t *rssi_dbm, uint8_t *noise);
++#endif
++static inline bool fd6818_am_on(const fd6818_t *dev)
++{
++#if CONFIG_AM_RX
++	return dev->am;
++#else
++	(void)dev;
++	return false;
++#endif
++}
++
++// --- AM gain loop and squelch (pure) ---
++
++// The gain loop keeps a signal's 0x67 reading near FD6818_AGC_TARGET: a reading (averaged with the one before) 10 dB or
++// more above it takes the gain down at once by the excess less 8 dB; one 6 dB or more below it raises the gain one step,
++// once the gain has held for FD6818_AGC_HOLD readings. An empty channel reads up to about 8 dB over the target at full
++// gain, so a noisy desk or a strong noise burst can take a few dB off; the squelch doesn't use 0x67 (fd6818_am_noise)
++#define FD6818_AGC_TARGET	142u
++#define FD6818_AGC_HOLD		30u
++void fd6818_agc_reset(fd6818_agc_t *a);
++bool fd6818_agc_step(fd6818_agc_t *a, uint16_t r67);	// true: the 0x13 word changed
++uint16_t fd6818_agc_word(const fd6818_agc_t *a);	// 0x13
++uint8_t fd6818_agc_atten_db(const fd6818_agc_t *a);	// gain taken off, dB (0 = full gain)
++// The core's squelch value in AM (radio_status_t.noise): the chip's noise indicator, as in FM, with its own offset. The
++// chip's squelch is two thresholds (programming guide, squelch section): RSSI 0x67 over 0x78 and noise_sq (0x65 bits
++// 7:0, 1 dB/step) under noise_sq_th_in (0x4F bits 6:0). In AM the gain loop holds 0x67 near its target with or without
++// a signal, so the RSSI half passes on noise and only noise_sq tells a carrier from an empty channel (59-72 without a
++// signal on the bench, lower as a carrier rises). The offset puts the core's level 1 (opens below
++// FD6818_SQL_OPEN_L1) at the chip's own noise_sq_th_in, as the board's tables set 0x4F; each level is 3 dB more
++#define FD6818_SQL_OPEN_L1	64u	// the core's level 1 (radio_sm.h RADIO_SQL_OPEN_L1)
++static inline uint8_t fd6818_am_noise_offset(uint16_t r4f)
++{
++	uint8_t th = (uint8_t)(r4f & 0x7Fu);
++	return th < FD6818_SQL_OPEN_L1 ? (uint8_t)(FD6818_SQL_OPEN_L1 - th) : 0u;
++}
++static inline uint8_t fd6818_am_noise(uint16_t r65, uint8_t offset) { return fd6818_noise_plus(r65, offset); }
+ // Receiver power saving (8.8, the radio's own sequence): sleep = idle, then 0x37 to its low-power word (FM 0x1D11,
+ // DMR 0x1D00); wake = 0x37 back to the receive word (0x1F1F, then 0x1F0F) with the state still idle: the caller
+ // retunes and sets the RX state next (fd6818_set_freq, fd6818_set_state)
+--- a/hal/hal_radio.h
++++ b/hal/hal_radio.h
+@@ -64,9 +64,10 @@
+ 	// last rx() settings
+ 	void (*rx_sleep)(bool sleep);
+ 	// Optional (CAP_AM_RX): tune and receive AM (the air band) instead of FM. Receive only: the core never calls tx()
+-	// while AM is on. The board leaves AM at the next rx() or set_mode(). No sub-audio in AM; status() reports
+-	// tone_ok = true and an RSSI the core's AM squelch uses (noise isn't meaningful in AM). False: out of band or the
+-	// board can't. NULL = no AM on this radio
++	// while AM is on. The board leaves AM at the next rx() or set_mode(). No sub-audio in AM (the core takes
++	// tone_ok as true). In AM status() reports noise on the squelch's scale (larger = weaker) from whichever of its
++	// receiver's readings tells a carrier from an empty channel in AM, with its own scale and receiver gain taken into
++	// account. False: out of band or the board can't. NULL = no AM on this radio
+ 	bool (*rx_am)(uint32_t hz, radio_bw_t bw);
+ 	// Optional: the microphone gain of FM and DMR transmissions, db relative to the board's own levels (the Mic gain
+ 	// setting, -10..+10; core/radio/mic_gain.h). The board only stores it and applies it at the next transmission
+--- a/tests/host/fd6818Test.c
++++ b/tests/host/fd6818Test.c
+@@ -300,15 +300,175 @@
+ 	fd6818_t dev;
+ 	reset_chip();
+ 	fd6818_attach(&dev, bus());
++	// Outside AM, "off" writes nothing
++	fd6818_set_am(&dev, false);
++	CHECK(chip.n == 0);
++	// On: the AM output, full gain, 0x4A's AM word (hardware-dm32.md 8.7). 0x4A isn't in the default tables: its value
++	// before AM is read from the chip
++	chip.regs[FD6818_REG_AM_4A] = 0x1234;
+ 	fd6818_set_am(&dev, true);
+-	CHECK(chip.n == 1 && chip.log[0].reg == FD6818_REG_AF && chip.log[0].val == 0x0740);
+-	CHECK((FD6818_AF_AM & ~0x0F00u) == (FD6818_AF_FM & ~0x0F00u));
++	CHECK(chip.n == 3);
++	CHECK(chip.log[0].reg == FD6818_REG_AF && chip.log[0].val == 0x6740);
++	CHECK(chip.log[1].reg == FD6818_REG_GAIN && chip.log[1].val == 0x03FF);
++	CHECK(chip.log[2].reg == FD6818_REG_AM_4A && chip.log[2].val == 0x5450);
++	CHECK((FD6818_AF_AM & 0x0F00u) == 0x0700u && (FD6818_AF_FM & 0x0F00u) == 0x0100u);
++	CHECK(FD6818_BW_AM == 0x0048u);
++	// Again (a new AM channel): the same writes, 0x4A's saved value kept
++	fd6818_set_am(&dev, true);
++	CHECK(chip.n == 6 && chip.log[5].val == 0x5450);
++	// Off: FM's AF word, the FM table's 0x13, 0x4A as it was
+ 	fd6818_set_am(&dev, false);
+-	CHECK(chip.n == 2 && chip.log[1].val == 0x0140);
++	int i = find_last(FD6818_REG_GAIN);
++	CHECK(i >= 0 && chip.log[i].val == 0x037E);
++	i = find_last(FD6818_REG_AF);
++	CHECK(i >= 0 && chip.log[i].val == 0x0140);
++	i = find_last(FD6818_REG_AM_4A);
++	CHECK(i >= 0 && chip.log[i].val == 0x1234);
++	// A mode change from AM ends AM first: 0x4A comes back although the mode tables don't write it
++	fd6818_set_am(&dev, true);
++	chip.n = 0;
+ 	fd6818_set_mode(&dev, FD6818_MODE_FM);
+-	int i = find_last(FD6818_REG_AF);
++	i = find_last(FD6818_REG_AM_4A);
++	CHECK(i >= 0 && chip.log[i].val == 0x1234 && !dev.am);
++	i = find_last(FD6818_REG_AF);
+ 	CHECK(i >= 0 && chip.log[i].val == FD6818_AF_FM);
+-	CHECK(chip.protocol_errors == 0);
++	// Outside AM a status reading changes nothing and the gain loop doesn't run
++	chip.n = 0;
++	int16_t rssi = -90;
++	uint8_t noise = 77;
++	CHECK(!fd6818_am_status(&dev, 0x0010, 400, &rssi, &noise));
++	CHECK(chip.n == 0 && rssi == -90 && noise == 77);
++	CHECK(chip.protocol_errors == 0);
++
++	// In AM: the squelch value is noise_sq plus the offset from the default tables' 0x4F = 0x302F (noise_sq_th_in 47):
++	// level 1 (opens below 64) at 47. A strong reading cuts the gain (0x13 written) after the reading is taken
++	fd6818_set_am(&dev, true);
++	CHECK(dev.am_noise_off == 17);
++	chip.n = 0;
++	rssi = -60;
++	CHECK(fd6818_am_status(&dev, 0x4B00u | 46u, 222, &rssi, &noise));
++	CHECK(noise == 63 && rssi == -60);
++	CHECK(chip.n == 1 && chip.log[0].reg == FD6818_REG_GAIN && chip.log[0].val == 0x0BF);
++	// The next reading's RSSI gets the 32 dB the loop took off added back
++	rssi = -92;
++	CHECK(fd6818_am_status(&dev, 70, 150, &rssi, &noise));
++	CHECK(rssi == -60 && noise == 87);
++	fd6818_set_am(&dev, false);
++
++	// A variant whose tables set 0x13 and 0x4A (the DM-1801 Pro's init: 0x03DF, 0x5430) gets those back, no read
++	reset_chip();
++	fd6818_attach_variant(&dev, bus(), &fd6818_variant_dm1801pro);
++	chip.regs[FD6818_REG_GAIN] = 0x1111;
++	chip.regs[FD6818_REG_AM_4A] = 0x2222;
++	fd6818_set_am(&dev, true);
++	CHECK(dev.am_noise_off == 24);	// its 0x4F = 0x2A28: noise_sq_th_in 40 is its level 1
++	fd6818_set_am(&dev, false);
++	i = find_last(FD6818_REG_GAIN);
++	CHECK(i >= 0 && chip.log[i].val == 0x03DF);
++	i = find_last(FD6818_REG_AM_4A);
++	CHECK(i >= 0 && chip.log[i].val == 0x5430);
++	CHECK(chip.protocol_errors == 0);
++}
++
++// The AM gain loop: full gain on noise, down at once on a strong signal, up one step at a time after the hold
++static void test_am_agc(void)
++{
++	fd6818_agc_t a;
++	fd6818_agc_reset(&a);
++	CHECK(fd6818_agc_word(&a) == 0x03FF && fd6818_agc_atten_db(&a) == 0);
++	// Noise and weak signals (under 142 + 20): nothing changes
++	for (int k = 0; k < 100; k++) {
++		CHECK(!fd6818_agc_step(&a, 60));
++		CHECK(!fd6818_agc_step(&a, 160));
++	}
++	CHECK(fd6818_agc_word(&a) == 0x03FF);
++	// 0x67 = 222: 40 dB over the target, the gain goes down by 32 dB: -32 dB is 0x0BF
++	fd6818_agc_reset(&a);
++	CHECK(fd6818_agc_step(&a, 222));
++	CHECK(fd6818_agc_word(&a) == 0x0BF && fd6818_agc_atten_db(&a) == 32);
++	// The reading is averaged with the one before: 222 then 142 is 182, 20 dB over, 12 dB down from -32: -45 dB (0x05E)
++	CHECK(fd6818_agc_step(&a, 142));
++	CHECK(fd6818_agc_word(&a) == 0x05E && fd6818_agc_atten_db(&a) == 45);
++	// At the target: holds
++	for (int k = 0; k < 50; k++) {
++		CHECK(!fd6818_agc_step(&a, 142));
++	}
++	// The signal goes: 0x67 = 100 is 21 dB under. The gain waits out the hold (30 readings), then rises one step each
++	// hold and a reading
++	int steps = 0, first = -1;
++	for (int k = 0; k < 200; k++) {
++		if (fd6818_agc_step(&a, 100)) {
++			steps++;
++			if (first < 0) {
++				first = k;
++			}
++		}
++	}
++	CHECK(first == 30);
++	CHECK(steps == 6 && fd6818_agc_atten_db(&a) == 30);
++	// The top of the table: never above full gain, never below the lowest entry
++	fd6818_agc_reset(&a);
++	for (int k = 0; k < 5; k++) {
++		(void)fd6818_agc_step(&a, 511);
++	}
++	CHECK(fd6818_agc_atten_db(&a) == 93 && fd6818_agc_word(&a) == 0x000);
++	// The bits above 8:0 aren't part of the reading
++	fd6818_agc_reset(&a);
++	CHECK(!fd6818_agc_step(&a, 0xFE00u | 142u));
++}
++
++static void test_am_strong_signal(void)
++{
++	fd6818_t dev;
++	reset_chip();
++	fd6818_attach(&dev, bus());
++	chip.regs[FD6818_REG_AM_4A] = 0x1234;
++	fd6818_set_am(&dev, true);
++	// From weak to overhead and back: the reading follows the gain actually used.
++	const uint16_t full_gain_raw[] = { 100, 160, 222, 300, 400, 500, 400, 300, 222, 160, 100 };
++	for (unsigned i = 0; i < sizeof(full_gain_raw) / sizeof(full_gain_raw[0]); i++) {
++		for (int tick = 0; tick < 40; tick++) {
++			int atten = fd6818_agc_atten_db(&dev.agc);
++			int raw = (int)full_gain_raw[i] - 2 * atten;
++			if (raw < 0) raw = 0;
++			int16_t rssi = fd6818_rssi_dbm((uint16_t)raw);
++			int expected = rssi + atten;
++			uint8_t noise = 255;
++			chip.n = 0;
++			CHECK(fd6818_am_status(&dev, 16, (uint16_t)raw, &rssi, &noise));
++			CHECK(noise == 33 && noise < 40); // stays open even at squelch 9 while gain changes
++			CHECK(rssi == expected);
++			CHECK(fd6818_agc_atten_db(&dev.agc) <= 93);
++			CHECK(chip.n <= 1 && (chip.n == 0 || chip.log[0].reg == FD6818_REG_GAIN));
++		}
++	}
++	fd6818_set_am(&dev, false);
++	CHECK(chip.regs[FD6818_REG_GAIN] == 0x037E && chip.regs[FD6818_REG_AM_4A] == 0x1234);
++	chip.n = 0;
++	int16_t rssi = -35;
++	uint8_t noise = 50;
++	CHECK(!fd6818_am_status(&dev, 16, 400, &rssi, &noise));
++	CHECK(chip.n == 0 && rssi == -35 && noise == 50);
++	fd6818_set_am(&dev, true);
++	CHECK(fd6818_agc_atten_db(&dev.agc) == 0); // a new channel starts at full sensitivity
++	fd6818_set_mode(&dev, FD6818_MODE_DMR);
++	CHECK(!fd6818_am_on(&dev) && chip.regs[FD6818_REG_GAIN] == 0x037E);
++	CHECK(chip.regs[FD6818_REG_AM_4A] == 0x1234 && chip.protocol_errors == 0);
++}
++
++// The AM squelch scale: noise_sq (0x65 bits 7:0) plus an offset that puts level 1 (opens below 64) at the chip's own
++// noise threshold (0x4F bits 6:0). The DM-32's empty-channel floor (59 and up) stays shut at every level; the high
++// byte (rssi_rel) is ignored
++static void test_am_noise(void)
++{
++	uint8_t off = fd6818_am_noise_offset(0x302F);
++	CHECK(off == 17 && fd6818_am_noise_offset(0x2A28) == 24);
++	CHECK(fd6818_am_noise_offset(0x7F7F) == 0 && fd6818_am_noise_offset(0x0000) == 64);
++	CHECK(fd6818_am_noise(46, off) < 64 && fd6818_am_noise(47, off) == 64);
++	CHECK(fd6818_am_noise(59, off) > 64 + 3);	// above level 1 and its hysteresis
++	CHECK(fd6818_am_noise(23, off) == 40);	// level 9 opens below 40: at 22
++	CHECK(fd6818_am_noise(0x4B00u | 31u, off) == 48);
++	CHECK(fd6818_am_noise(0xFFu, off) == 255 && fd6818_am_noise(240, off) == 255);
+ }
+ 
+ // RX sub-audio set-up in the radio's own order, and the 0x0C detect bits
+@@ -486,6 +646,9 @@
+ 	test_rx_tones();
+ 	test_rx_sleep();
+ 	test_am();
++	test_am_agc();
++	test_am_strong_signal();
++	test_am_noise();
+ 	if (failures) {
+ 		printf("fd6818Test: %d failures\n", failures);
+ 		return 1;
+--- a/tests/host/radioListenBandsTest.c
++++ b/tests/host/radioListenBandsTest.c
+@@ -110,7 +110,7 @@
+ static void r_tx_off(void) {}
+ static void r_status(radio_status_t *st)
+ {
+-	st->noise = 120;	// the FM squelch never opens here: AM must use the RSSI
++	st->noise = 120;	// the FM squelch never opens here: AM uses the signal level (below)
+ 	st->rssi_dbm = -130;
+ 	st->carrier = false;
+ 	st->tone_ok = false;	// a board in AM may report anything: the core ignores sub-audio there
+@@ -120,6 +120,12 @@
+ 			st->noise = 20;	// an FM receiver hears it too
+ 			st->tone_ok = true;
+ 		}
++	}
++	if (hw.am) {
++		// AM: noise from the signal level (hal_radio.h rx_am), on this board -18 dBm = 0 and 1 dB per step, so
++		// level 5 (opens below 52) opens above -70 dBm
++		int32_t n = -18 - (int32_t)st->rssi_dbm;
++		st->noise = n < 0 ? 0 : n > 255 ? 255 : (uint8_t)n;
+ 	}
+ }
+ static void r_audio(bool on) { hw.audio = on; }
+@@ -300,20 +306,6 @@
+ 	CHECK(radio_am_channel(&ch));
+ 	ch.mode = RADIO_MODE_DMR;
+ 	CHECK(!radio_am_channel(&ch));
+-	// The squelch scale: -18 dBm and stronger is 0, every dB weaker adds one
+-	CHECK(radio_am_noise(-10) == 0 && radio_am_noise(-18) == 0 && radio_am_noise(-70) == 52);
+-	CHECK(radio_am_noise(-400) == 255);
+-	// Level 5 opens above -70 dBm: noise 52 < 52 is false, 51 (-69 dBm) opens
+-	CHECK(radio_am_noise(-69) < radio_sm_squelch_open_below(5) && !(radio_am_noise(-70) < radio_sm_squelch_open_below(5)));
+-	// The DM-32UV's air band as its board reports it (boards/dm32/radio_dm32.c AM_RSSI_DB): raw floor -98 to -101 dBm,
+-	// lifted 20 dB. The default level stays shut on the floor and opens 9 dB over it; level 3 opens 3 dB over it.
+-	// Unlifted, a station 10 dB over the floor didn't open even level 1
+-	enum { DM32_AM_RSSI_DB = 20 };
+-	for (int raw = -101; raw <= -98; raw++)
+-		CHECK(!(radio_am_noise(raw + DM32_AM_RSSI_DB) < radio_sm_squelch_open_below(RADIO_SQUELCH_DEFAULT)));
+-	CHECK(radio_am_noise(-89 + DM32_AM_RSSI_DB) < radio_sm_squelch_open_below(RADIO_SQUELCH_DEFAULT));
+-	CHECK(radio_am_noise(-95 + DM32_AM_RSSI_DB) < radio_sm_squelch_open_below(3));
+-	CHECK(!(radio_am_noise(-88) < radio_sm_squelch_open_below(1)));
+ 	// 8.33 kHz: the exact 25/3 kHz grid, snapping first; other steps add
+ 	CHECK(radio_am_step(118000000, 1, RADIO_AM_STEP_833) == 118008333);
+ 	CHECK(radio_am_step(118008333, 1, RADIO_AM_STEP_833) == 118016667);
+@@ -359,13 +351,13 @@
+ 	CHECK(hw.am_calls >= 1);
+ 	CHECK(sm.view.ch.mode == RADIO_MODE_FM);	// the channel itself stays as stored
+ 
+-	// Squelch on the signal strength: noise stays 120 (closed for FM), a -50 dBm signal opens
++	// Squelch on the signal strength, as the board reports it in AM: a -50 dBm signal opens
+ 	CHECK(sm.view.state == RS_IDLE && !hw.audio);
+ 	hw.sig_hz = 118100000;
+ 	hw.sig_rssi = -50;
+ 	run(100);
+ 	CHECK(sm.view.state == RS_RX && hw.audio);
+-	CHECK(sm.view.noise == 32);	// the AM squelch value: -18 - (-50)
++	CHECK(sm.view.noise == 32);	// the board's AM squelch value: -18 - (-50)
+ 	hw.sig_rssi = -76;	// below level 5's -70 dBm (with its hysteresis)
+ 	run(100);
+ 	CHECK(sm.view.state == RS_IDLE && !hw.audio);
