@@ -338,8 +338,9 @@ def main():
         "CONFIG_P25_TRUNK_TX=" + ("y" if native and args.trunk_tx and not args.no_trunk else "n"),
         "CONFIG_P25_PHASE2=" + ("y" if native and not args.no_trunk and not args.no_phase2 else "n"),
         "CONFIG_SFR=n", "CONFIG_HOTSPOT=n", "CONFIG_ZONE_SHARE=n", "CONFIG_APRS_IGATE=n", "CONFIG_GPS_SKY=n",  # APRS (and with it Tools > Position) on, its iGate and sky plot off for RAM: requested 14-nov
-        f"RFOUNDRY_VERSION=dfbaf20c-p25-{identity}", f"RFOUNDRY_GIT_TIME={git(UP, 'show', '-s', '--format=%ct', 'HEAD')}",
-        "RFOUNDRY_GIT_DIRTY=1",
+        f"RFOUNDRY_VERSION={git(ROOT, 'rev-parse', '--short=8', 'HEAD')}-p25-{identity}",
+        f"RFOUNDRY_GIT_TIME={git(ROOT, 'show', '-s', '--format=%ct', 'HEAD')}",
+        "RFOUNDRY_GIT_DIRTY=" + str(int(bool(git(ROOT, 'status', '--porcelain', '--untracked-files=no')))),
         "CONFIG_FIRSTBOOT="+("y" if args.first_boot else "n"),
         "CONFIG_P25_BENCH="+("n" if args.lean else "y"),
         "CONFIG_CPU_PROFILE="+("y" if args.cpu_profile else "n"),

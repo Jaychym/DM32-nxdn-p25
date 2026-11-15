@@ -1,0 +1,292 @@
+--- a/core/dmr/call/dmr_call.c
++++ b/core/dmr/call/dmr_call.c
+@@ -1204,7 +1204,7 @@
+ 			s.modem->tx_end();
+ 			source_end();
+ 			s.tx = TX_END;
+-			s.deadline = now + (inflight + DMR_CALL_TX_TERMINATORS) * VOICE_PERIOD_MS + DMR_CALL_TX_DONE_GUARD_MS;
++			// Keep the release deadline: queuing the terminator must not extend it.
+ 			s.dirty = true;
+ 			return;
+ 		}
+@@ -1447,7 +1447,10 @@
+ 	case TX_WAKE_LISTEN:
+ 		break;		// a short press still wakes the repeater, as other radios do; tx_poll ends it once up
+ 	case TX_ON:
+-		s.stop_req = true;	// at the next superframe boundary
++		if (!s.stop_req) {
++			s.stop_req = true;	// at the next superframe boundary
++			s.deadline = s.now + DMR_CALL_TX_STALL_MS;
++		}
+ 		break;
+ 	default:
+ 		break;
+@@ -1522,12 +1525,14 @@
+ 	case TX_ON:
+ 		// PTT release and the time-out end the call at a superframe boundary, which only a modem that sends bursts
+ 		// reaches: one without slot timing would hold us here, keyed, for good
+-		if (elapsed(now, s.tx_progress_ms, true, DMR_CALL_TX_STALL_MS)) {
++		// RF slot events can continue while the queue is stuck: release has its own absolute limit.
++		if ((s.stop_req && !before(now, s.deadline)) || elapsed(now, s.tx_progress_ms, true, DMR_CALL_TX_STALL_MS)) {
+ 			tx_deny(DMR_TX_ERR_STALLED);
+ 			break;
+ 		}
+ 		if (s.cfg.tot_s && !s.stop_req && (uint32_t)(now - s.tx_start_ms) >= (uint32_t)s.cfg.tot_s * 1000u) {
+ 			s.stop_req = true;
++			s.deadline = now + DMR_CALL_TX_STALL_MS;
+ 			s.tot_hit = true;
+ 		}
+ 		tx_fill(now);
+--- a/drivers/modem/hrc7000/hrc7000_dmr.c
++++ b/drivers/modem/hrc7000/hrc7000_dmr.c
+@@ -439,9 +439,7 @@
+ // TC_LOCK_WAIT_TICKS, as stock does not key on a repeater without the lock either
+ static void lock_tick(hrc7000_dmr_t *e)
+ {
+-	if (e->tx_abort_req) {
+-		tx_finish(e);
+-	} else if (tc_locked(e)) {
++	if (tc_locked(e)) {
+ 		e->st.txb_lock_wait = e->tx_wait;
+ 		e->st.txb_tc_agree = e->tc_agree;
+ 		e->st.txb_deframe_ms = e->st.rx_deframe_ms;
+@@ -459,10 +457,6 @@
+ 
+ static void tx_tick(hrc7000_dmr_t *e)
+ {
+-	if (e->tx_abort_req) {
+-		tx_finish(e);
+-		return;
+-	}
+ 	switch (e->tx_state) {
+ 	case TXS_ARMING:
+ 		// Own timing: the first slot is ours. Aligned to an SFR or a direct-mode station (no CACH): the slot whose
+@@ -957,7 +951,6 @@
+ 		e->tx_ts = ts;
+ 		e->tx_access = (uint8_t)access;
+ 		e->tx_end_req = false;
+-		e->tx_abort_req = false;
+ 		e->tx_any = false;
+ 		e->tx_listen = false;
+ 		e->listen_voice = false;
+@@ -1057,7 +1050,7 @@
+ {
+ 	lock(e);
+ 	if (e->tx_state != TXS_IDLE) {
+-		e->tx_abort_req = true;
++		tx_finish(e);	// abort also works when no more slot interrupts arrive
+ 	}
+ 	unlock(e);
+ }
+--- a/drivers/modem/hrc7000/hrc7000_dmr.h
++++ b/drivers/modem/hrc7000/hrc7000_dmr.h
+@@ -165,7 +165,7 @@
+ 	uint8_t tx_chip_slot;	// aligned timing without CACH: the chip slot we send in (LAYER2_STATUS b31)
+ 	bool tx_bs;		// aligned timing through a repeater: our slot from the TC estimate
+ 	bool tx_our_next;	// the coming slot (the one being decided) is ours
+-	bool tx_end_req, tx_abort_req;
++	bool tx_end_req;
+ 	uint8_t tx_wait;
+ 	uint32_t tx_last_arm;	// tick of the last burst armed
+ 	bool tx_any;
+--- a/platform/hrc7000/dmr_glue.c
++++ b/platform/hrc7000/dmr_glue.c
+@@ -88,6 +88,7 @@
+ static void rf(void *ctx, bool tx)
+ {
+ 	(void)ctx;
++	if (!tx) hrc_timer_stop(TIMER_PA);
+ 	brd->rf_switch(tx);
+ }
+ 
+@@ -112,7 +113,7 @@
+ {
+ 	hrc_timer_ack(TIMER_PA);
+ 	hrc_timer_stop(TIMER_PA);
+-	if (active) {
++	if (active && hrc7000_dmr_is_transmitting(&eng)) {
+ 		brd->pa_on();
+ 	}
+ }
+@@ -257,7 +258,11 @@
+ static void tx_listen(void) { hrc7000_dmr_tx_listen(&eng); }
+ static int8_t tx_fill(const dmr_tx_burst_t *b) { return hrc7000_dmr_tx_fill(&eng, b); }
+ static void tx_end(void) { hrc7000_dmr_tx_end(&eng); }
+-static void tx_abort(void) { hrc7000_dmr_tx_abort(&eng); }
++static void tx_abort(void)
++{
++	hrc_timer_stop(TIMER_PA);
++	hrc7000_dmr_tx_abort(&eng);
++}
+ static void set_embedded_lc(const uint8_t lc[9]) { hrc7000_dmr_set_embedded_lc(&eng, lc); }
+ static void set_cc_filter(int8_t cc) { hrc7000_dmr_set_cc_filter(&eng, cc); }
+ static bool is_transmitting(void) { return hrc7000_dmr_is_transmitting(&eng); }
+--- a/tests/host/dmrCallTest.c
++++ b/tests/host/dmrCallTest.c
+@@ -707,6 +707,51 @@
+ 	dmr_call_ptt(false);
+ 	run_ms(600);
+ 	CHECK(V()->phase == DMR_CALL_PHASE_IDLE && V()->tx_error == DMR_TX_OK && sim.tx_ends == 1);
++}
++
++// A faulty modem can keep reporting RF slots without consuming the queued superframe.
++// Those events refresh the stall timer; release and TOT still need an absolute end.
++static void test_tx_release_bounded(void)
++{
++	for (int wrap = 0; wrap < 2; wrap++) {
++		for (int tot = 0; tot < 2; tot++) {
++			dmr_call_config_t c = base_cfg();
++			c.tot_s = tot ? 1 : 0;
++			setup(&c);
++			if (wrap) now = UINT32_MAX - 1200u;
++			dmr_call_ptt(true);
++			run_ms(200);
++			CHECK(V()->phase == DMR_CALL_PHASE_TX_VOICE);
++			sim.stalled = true;
++			if (!tot) dmr_call_ptt(false);
++			for (unsigned t = 0; t < 2500; t += 10) {
++				sim_event(DMR_EV_TX_SLOT_STARTED, 1);
++				run_ms(10);
++			}
++			CHECK(V()->phase == (tot ? DMR_CALL_PHASE_TX_DENIED : DMR_CALL_PHASE_IDLE));
++			CHECK(sim.tx_aborts == 1 && !sim.tx_active && src.ends == 1);
++			dmr_call_ptt(false);
++			run_ms(20);
++			CHECK(V()->phase == DMR_CALL_PHASE_IDLE);
++			sim.stalled = false;
++			dmr_call_ptt(true);
++			run_ms(500);
++			dmr_call_ptt(false);
++			run_ms(800);
++			CHECK(V()->phase == DMR_CALL_PHASE_IDLE && V()->tx_error == DMR_TX_OK);
++		}
++	}
++	// Every point in a superframe must retain the normal terminator, without aborting.
++	for (unsigned offset = 0; offset < 360; offset += 10) {
++		dmr_call_config_t c = base_cfg();
++		setup(&c);
++		dmr_call_ptt(true);
++		run_ms(500 + offset);
++		dmr_call_ptt(false);
++		run_ms(1500);
++		CHECK(V()->phase == DMR_CALL_PHASE_IDLE && sim.tx_ends == 1 && sim.tx_aborts == 0);
++		CHECK(sim.air_count > 0 && sim.air[sim.air_count - 1].kind == DMR_BURST_TERMINATOR_LC);
++	}
+ }
+ 
+ static bool permit_busy_flag;
+@@ -2415,6 +2460,7 @@
+ 	test_tx_permit_hold();
+ 	test_tx_timeout_and_starve();
+ 	test_tx_refused();
++	test_tx_release_bounded();
+ 	test_tx_modem_stalled();
+ 	test_rmo_wakeup();
+ 	test_rmo_air_slot_alignment();
+--- a/tests/host/hrc7000DmrTest.c
++++ b/tests/host/hrc7000DmrTest.c
+@@ -531,6 +531,36 @@
+ 		uint32_t t = eng.tick;
+ 		tick(false);
+ 		CHECK(eng.tick == t);
++	}
++}
++
++// Abort must shut RF off and release the engine without another slot or watchdog poll.
++static void test_abort_without_slot(void)
++{
++	for (int stage = 0; stage < 4; stage++) {
++		setup();
++		hrc7000_dmr_run(&eng);
++		CHECK(hrc7000_dmr_tx_begin(&eng, DMR_TIMING_OWN, 1, DMR_ACCESS_IMPOLITE));
++		dmr_tx_burst_t a = voice(0, 1);
++		CHECK(hrc7000_dmr_tx_queue(&eng, &a));
++		if (stage >= 1) tick(true);
++		if (stage >= 2) hrc7000_dmr_isr_rftx(&eng);
++		if (stage == 3) {
++			hrc7000_dmr_tx_end(&eng);
++			tick(true);
++			tick(true);
++		}
++		hrc7000_dmr_tx_abort(&eng);
++		CHECK(!hrc7000_dmr_is_transmitting(&eng) && !rf_state);
++		CHECK(hrc7000_dmr_tx_queue_space(&eng) == HRC7000_DMR_TXQ_DEPTH - 1u);
++		CHECK(REG(C7_LAYER2_TXRX_CTRL) == 0x40 && REG(C7_LAYER2_SLOTON) == 0x05);
++		CHECK(count_kind(DMR_EV_TX_DONE, NULL) == 1 && lock_depth == 0);
++		int keyed = rf_on_calls;
++		hrc7000_dmr_tx_abort(&eng);
++		hrc7000_dmr_isr_rftx(&eng);
++		tick(true);
++		CHECK(!rf_state && rf_on_calls == keyed && count_kind(DMR_EV_TX_DONE, NULL) == 0);
++		CHECK(hrc7000_dmr_tx_begin(&eng, DMR_TIMING_OWN, 1, DMR_ACCESS_IMPOLITE));
+ 	}
+ }
+ 
+@@ -1319,6 +1349,7 @@
+ 	test_rx_resync();
+ 	test_cc_scan();
+ 	test_tx();
++	test_abort_without_slot();
+ 	test_tx_edges();
+ 	test_tx_sync_and_listen();
+ 	test_tx_aligned();
+--- a/tests/hil/test_dmr_tx.py
++++ b/tests/hil/test_dmr_tx.py
+@@ -250,6 +250,25 @@
+     if int(d["dmr.own_id"]) == 0:
+         skip("state", "the radio has no DMR ID (dmr.own_id=0)")
+     return freq, cc, pos, d
++
++
++@pytest.mark.feature("dmr_voice")
++@pytest.mark.radio_tx
++@pytest.mark.parametrize("offset", [0.03, 0.17, 0.35])
++def test_dmr_ptt_release_returns_to_receive(radio, pytestconfig, offset):
++    """Opt-in RF: release at different superframe points, then start another call."""
++    _dmr_tx_setup(radio, pytestconfig)
++    for _ in range(2):
++        try:
++            radio.link.ptt(True, 4000)
++            radio.wait_for(lambda v: v.get("dmr.phase") == "tx_voice", timeout=3,
++                           sections=("dmr",), what="DMR voice transmitting")
++            time.sleep(offset)
++        finally:
++            radio.link.ptt(False)
++        radio.wait_for(lambda v: v.get("state") != "tx" and v.get("dmr.phase") not in
++                       ("tx_voice", "tx_ending"), timeout=1.7, interval=0.05,
++                       sections=("core", "dmr"), what="DMR released within 1.5 s plus link delay")
+ 
+ 
+ def _over(radio, sdr_bench, freq, cc, seconds, tag):
+--- a/docs/spec/dmr-modem.md
++++ b/docs/spec/dmr-modem.md
+@@ -206,6 +206,8 @@
+    data in alternating superframes); F carries null embedded or privacy data. If the encoder has no frame ready,
+    send AMBE silence (B9 E8 81 52 61 73 00 2A 6B per 20 ms frame).
+ 6. **End**: PTT release takes effect at the next superframe boundary; send the terminator with LC on our slot.
++   Release and TX timeout each start an absolute 1500 ms deadline, including the terminator drain. RF slot events
++   cannot extend it. A stuck queue is aborted even when the modem keeps reporting RF activity.
+ 7. **Hang**: after transmitting, hold the slot on our TS (capture timeout) so the reply is heard on it.
+ 8. **TX timeout timer** (user setting) forces the end.
+ 
+@@ -337,7 +339,7 @@
+ | `tx_begin(timing)` | start a transmission: own timing (DMO), aligned to the received signal on the next slot carrying a given TS (RMO, SFR user), or as soon as possible; with the access policy for this transmission |
+ | `tx_queue_burst` | one burst: type (voice header, voice A-F with 27-byte AMBE, terminator, PI header, CSBK, data header / block, idle, raw DT), payload, "host supplied CRC" flag, embedded LC for B-E (voice), sync family override (SFR outbound) |
+ | `tx_end` | no more bursts: finish the queued ones (a voice call ends at the superframe boundary with its terminator, which the stack has queued), then `tx_done` |
+-| `tx_abort` | stop at the next slot (emergency, timeout) |
++| `tx_abort` | stop (emergency, timeout); the HR_C7000 stops immediately, without another slot interrupt |
+ | `set_embedded_lc` | the LC (or talker alias / GPS embedded LC) the modem spreads over B-E from the next superframe |
+ | `set_cc_filter(cc or any)` | color code deframing |
+ | `is_transmitting` | slot-state based (6.1 point 5) |
+--- a/docs/user/09-dmr.md
++++ b/docs/user/09-dmr.md
+@@ -41,6 +41,9 @@
+    list, and uses talkgroup 9 only when it has no list either.
+ 
+ Home shows the result after "PTT→".
++
++Releasing **PTT** finishes the current voice superframe and returns to receive. If the modem fails to finish,
++the radio aborts the transmission within 1.5 seconds of release. The next press can start a new call.
+ 
+ ## Choosing a talk target
+ 

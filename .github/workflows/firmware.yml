@@ -18,7 +18,7 @@ on:
         description: "Version name (default: YYYY.MM.DD-<short commit>); the release is v<version>"
         required: false
       title:
-        description: "Release title (default: Open25-DM32 <version>)"
+        description: "Release title (default: NXDN-P25-DM32 <version>)"
         required: false
 
 permissions:
@@ -108,7 +108,7 @@ jobs:
             gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
           else
             gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest \
-              --title "${TITLE:-Open25-DM32 $VERSION}" --notes-file notes.md
+              --title "${TITLE:-NXDN-P25-DM32 $VERSION}" --notes-file notes.md
           fi
 
       # Optional: with a token that may run workflows in dm32-web-cps-flasher (secret FLASHER_TOKEN), the flasher
