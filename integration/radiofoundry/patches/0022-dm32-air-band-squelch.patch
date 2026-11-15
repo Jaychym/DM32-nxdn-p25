@@ -1,0 +1,41 @@
+--- a/boards/dm32/radio_dm32.c
++++ b/boards/dm32/radio_dm32.c
+@@ -449,13 +449,19 @@
+ }
+ #endif
+ 
++// The air band reads about 20 dB lower here than on the radio the core's AM squelch levels were set from
++// (radio_am.h): empty channels -98 to -101 dBm against -76 to -89 on the same sweep (RadioFoundry #157), so a
++// station had to reach level 1's -82 dBm and none did: every level but 0 stayed shut. Lifted by this, level 5 opens
++// about 8 dB over this radio's floor, as the core intends. AM only: FM squelches on the noise reading
++#define AM_RSSI_DB	20
++
+ static void status(radio_status_t *st)
+ {
+ 	uint16_t r67 = fd6818_read(&fd, FD_REG_RSSI);
+ 	uint16_t r65 = fd6818_read(&fd, FD_REG_NOISE);
+ 	last_rssi_raw = fd6818_rssi_raw(r67);
+ 	last_noise_raw = r65 & 0xFFu;
+-	st->rssi_dbm = fd6818_rssi_dbm(r67);
++	st->rssi_dbm = (int16_t)(fd6818_rssi_dbm(r67) + (rx_am_on ? AM_RSSI_DB : 0));
+ 	st->noise = fd6818_noise(r65);	// the chip's floor lifted above the core's squelch levels (fd6818.h)
+ 	st->carrier = false;
+ 	st->tone_ok = mode != RADIO_MODE_FM || fd6818_rx_tone_ok(&fd, fd_tone(rx_tone.type));
+--- a/tests/host/radioListenBandsTest.c
++++ b/tests/host/radioListenBandsTest.c
+@@ -305,6 +305,15 @@
+ 	CHECK(radio_am_noise(-400) == 255);
+ 	// Level 5 opens above -70 dBm: noise 52 < 52 is false, 51 (-69 dBm) opens
+ 	CHECK(radio_am_noise(-69) < radio_sm_squelch_open_below(5) && !(radio_am_noise(-70) < radio_sm_squelch_open_below(5)));
++	// The DM-32UV's air band as its board reports it (boards/dm32/radio_dm32.c AM_RSSI_DB): raw floor -98 to -101 dBm,
++	// lifted 20 dB. The default level stays shut on the floor and opens 9 dB over it; level 3 opens 3 dB over it.
++	// Unlifted, a station 10 dB over the floor didn't open even level 1
++	enum { DM32_AM_RSSI_DB = 20 };
++	for (int raw = -101; raw <= -98; raw++)
++		CHECK(!(radio_am_noise(raw + DM32_AM_RSSI_DB) < radio_sm_squelch_open_below(RADIO_SQUELCH_DEFAULT)));
++	CHECK(radio_am_noise(-89 + DM32_AM_RSSI_DB) < radio_sm_squelch_open_below(RADIO_SQUELCH_DEFAULT));
++	CHECK(radio_am_noise(-95 + DM32_AM_RSSI_DB) < radio_sm_squelch_open_below(3));
++	CHECK(!(radio_am_noise(-88) < radio_sm_squelch_open_below(1)));
+ 	// 8.33 kHz: the exact 25/3 kHz grid, snapping first; other steps add
+ 	CHECK(radio_am_step(118000000, 1, RADIO_AM_STEP_833) == 118008333);
+ 	CHECK(radio_am_step(118008333, 1, RADIO_AM_STEP_833) == 118016667);

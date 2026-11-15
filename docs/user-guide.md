@@ -18,7 +18,9 @@ before you install it:
 | NXDN | `NXDN` | NXDN48 conventional (6.25 kHz): a RAN and a group |
 | P25 trunk | `P25T` | One P25 Phase 1 trunked system. The channel's frequency is the system's control channel; the radio moves to the voice channels by itself |
 
-The radio covers VHF and UHF. 800 MHz trunked systems are out of its band.
+The radio transmits on 136-174 and 400-480 MHz. It also receives, never transmits, on 65-108 MHz (broadcast FM),
+108-136 MHz (air band, AM) and 174-260, 350-400 and 480-520 MHz, with less sensitivity outside the front-end filters.
+800 MHz trunked systems are out of its range.
 
 ## Setting up channels
 

@@ -8,7 +8,7 @@ Firmware abierto y multimodo para el **Baofeng DM-32UV**: FM, DMR, **APCO P25 fa
 
 > Firmware experimental. Úsalo bajo tu responsabilidad, solo en frecuencias en las que tengas licencia y con un respaldo de tu radio.
 
-## Estado (14 de noviembre de 2026)
+## Estado (15 de noviembre de 2026)
 
 | Función | Estado |
 |---|---|
@@ -21,6 +21,8 @@ Firmware abierto y multimodo para el **Baofeng DM-32UV**: FM, DMR, **APCO P25 fa
 | APRS y posición GPS | Activados en esta versión; sin probar en el aire |
 | Tono de permiso estilo Motorola | P25/NXDN: TPT ASTRO 25 (3 bips de 910 Hz); DMR: chirp MOTOTRBO |
 | Tema «Rosa» | Tema claro rosa (Ajustes › Pantalla › Tema › Rosa) |
+| AM de aviación (108-136 MHz) | El squelch abre con los niveles 1-9 (antes solo con 0). Probado en la radio |
+| Recepción ampliada | Solo RX: 174-260, 350-400 y 480-520 MHz, con menos sensibilidad fuera de los filtros. TX sigue en 136-174 / 400-480 |
 
 ## Instalar
 
@@ -50,6 +52,8 @@ Parches de la serie (`integration/radiofoundry/patches/`):
 | `0019-nxdn-rx-any-ran-and-p25-f7f` | «Cualquier RAN» por canal en la radio: en la fila RAN de un canal NXDN, OK sin escribir alterna RX entre su RAN y todos (RX RAN 0) sin tocar el RAN TX; inicio muestra `RAN n/any`. En P25, escribir F7E o F7F pone RX «cualquiera» y conserva el NAC TX. El editor web y el CSV aceptan `any` en RX RAN; F7F en RX NAC se guarda como F7E |
 | `0020-p25-nxdn-digital-monitor` | Monitor digital como en DMR para P25 y NXDN: una pulsación corta de SK1 (tecla monitor) oye todos los NAC/RAN y grupos del canal sin editarlo; `DMon` en la pantalla. Otra pulsación, Atrás o cambiar de canal lo quita. La TX sigue con el NAC/RAN y grupo del canal. En troncal P25: todos los grupos |
 | `0021-dmr-ras-monitor-and-stock-air-band` | Repetidores DMR con RAS: con el monitor digital (SK1) una supertrama de voz en orden sin LC verificable se reproduce como llamada de grupo desconocida (TG/ID 0). La conversión del codeplug original conserva los canales de banda aérea (también sin frecuencia TX), como solo RX |
+| `0022-dm32-air-band-squelch` | AM de aviación: el DM-32 lee la banda aérea unos 20 dB más baja que la radio con la que se ajustó el squelch AM de RadioFoundry, así que ningún nivel salvo 0 abría. La radio suma 20 dB a su RSSI en AM; el nivel 5 abre unos 8 dB sobre el ruido |
+| `0023-dm32-rx-only-bands` | Bandas solo RX 174-260, 350-400 y 480-520 MHz (VFO, canales, escaneo). La TX sigue limitada a 136-174 / 400-480. El aviso de bandas muestra rangos unidos («65-260 350-520») y el de TX denegada solo las bandas de TX |
 
 Fuera de la serie: recepción NXDN corregida (filtros del FD6818 en la ruta plana, FSW en ambas polaridades, ganancia AF) en `integration/radiofoundry/nxdn/` y `src/nxdn/`.
 
