@@ -91,8 +91,9 @@ typedef struct {
     uint32_t voice_source;          /* always cfg.unit_id */
 } p25t_su_out;
 
+/* SYSTEM: the system denied the call; NO_SITE: PTT while not on the configured system's control channel */
 enum { P25T_SU_DENY_NONE, P25T_SU_DENY_SYSTEM, P25T_SU_DENY_NO_RESPONSE, P25T_SU_DENY_NOT_REGISTERED,
-       P25T_SU_DENY_NO_TX, P25T_SU_DENY_QUEUE_TIMEOUT, P25T_SU_DENY_BAND };
+       P25T_SU_DENY_NO_TX, P25T_SU_DENY_QUEUE_TIMEOUT, P25T_SU_DENY_BAND, P25T_SU_DENY_NO_SITE };
 
 typedef struct {
     p25t_su_cfg cfg;
@@ -111,6 +112,8 @@ typedef struct {
     bool registered, affiliated;
     uint32_t reg_sent_ms, aff_sent_ms, reg_refused_ms;
     bool reg_refused;
+    bool call_after_reg;            /* PTT while not registered: the registration goes first, the call request on its
+                                       acceptance */
     /* the call followed or made */
     uint16_t call_group;
     uint32_t call_source;

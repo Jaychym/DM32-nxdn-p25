@@ -12,12 +12,12 @@ Firmware abierto y multimodo para el **Baofeng DM-32UV**: FM, DMR, **APCO P25 fa
 
 | Función | Estado |
 |---|---|
-| FM y DMR | Corregida una carrera de audio que silenciaba el primer PTT DMR al salir de P25; 100 transiciones pasan en host. Falta confirmación en la radio; otros fallos de acceso al hotspot de #3 siguen abiertos |
+| FM y DMR | Primer PTT DMR sin voz tras P25/NXDN: el micrófono queda en el códec en toda TX (orden de RadioFoundry 9e1f7209, confirmado en un DM-32UV) y se reafirma en cada ráfaga. Falta confirmación en esta radio; otros fallos de acceso al hotspot de #3 siguen abiertos |
 | Mensajes DMR de texto libre | Hasta 140 caracteres desde Contactos; revisión antes de enviar. Compilado y probado en simulador, pendiente de probar en el aire |
 | P25 convencional, RX y TX | Verificado en la radio (voz IMBE en ambos sentidos) |
 | NXDN48, RX | Verificado en la radio (tramas, llamada y voz AMBE sin errores) |
 | NXDN48, TX | El receptor del firmware y dsd-fme decodifican la TX del DM-32 (RAN 1, TG 1, voz), capturada con un Pluto+. Hay reportes de radios Icom, un repetidor Kenwood y hotspots MMDVM que no la decodifican; pendiente medir la desviación. Solo NXDN48 (Icom «VN», 6,25 kHz), no NXDN96 |
-| Troncal P25 | Modo P25 Trunk en canal y VFO, fase 1, VHF/UHF. WACN/System ID editables en la radio. RX por defecto; TX experimental con permiso explícito por canal y sistema/ID completos. Sin validar en un sistema real |
+| Troncal P25 | Modo P25 Trunk en canal y VFO, fase 1, VHF/UHF. WACN/System ID editables en la radio. RX por defecto; TX experimental con permiso explícito por canal y sistema/ID completos. Sin registro, el PTT registra y luego pide canal; la pantalla dice si el sistema rechazó o no respondió. Sin validar en un sistema real |
 | AES-256 P25/DMR | Cuatro claves configurables en el CPS web para voz convencional; pruebas de protocolo y persistencia. Interoperabilidad con otras radios pendiente; véanse los [límites](docs/aes256.md) |
 | Tono de fin de llamada DMR | Interruptor independiente en Ajustes › Sonidos; habilitado por defecto |
 | APRS y posición GPS | Activados en esta versión; sin probar en el aire |
@@ -99,6 +99,8 @@ Parches de la serie (`integration/radiofoundry/patches/`):
 | `0038-dmr-call-end-tone-setting` | Ajuste independiente del tono local al terminar una llamada DMR (#13) |
 | `0039-p25-trunk-radio-mode-and-tx` | Modo P25 Trunk en radio/VFO, WACN/System ID, TX explícita y conservación de campos en CPS/CSV/VFO |
 | `0040-dmr-privacy-header-test-layout` | Corrige la trama de prueba DMR PI para colocar FID, ID de clave, MI y destino en sus posiciones de protocolo |
+| `0041-dm32-mic-route-before-tx` | DMR: `transmitting` se marca antes de rutear el micrófono (RadioFoundry 9e1f7209), y cada ráfaga DMR/P25 reafirma micrófono→códec. Corrige el primer PTT DMR sin voz tras P25/NXDN |
+| `0042-p25-trunk-system-deny-reasons` | Troncal P25: «El sistema rechazó», «El sistema no respondió» o «Buscando el sitio» en vez de «El módem rechazó el envío» |
 | `0035-editor-writes-digital-channel-fields` | Editor web: un cambio solo de NAC/RAN, grupo, «Hear All», WACN o System ID ya se escribe en la radio (antes se descartaba como «ya tiene este codeplug»). Mismo arreglo que el 0031 de kgasso en el PR #7 |
 
 Fuera de la serie: recepción NXDN corregida (filtros del FD6818 en la ruta plana, FSW en ambas polaridades, ganancia AF) en `integration/radiofoundry/nxdn/` y `src/nxdn/`.

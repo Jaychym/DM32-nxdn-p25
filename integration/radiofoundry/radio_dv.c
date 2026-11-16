@@ -147,10 +147,14 @@ uint8_t radio_dv_tx_deny(uint8_t nt_reason)
         return TXDENY_REJECTED;    /* the board refused: band, calibration, battery, gate */
     case NT_LEASE:
     case NT_DEADLINE:
-    case RADIO_DV_TRUNK_NO_ANSWER:     /* the trunked system did not answer, or queued us too long */
         return TXDENY_TIMEOUT;
-    case RADIO_DV_TRUNK_REFUSED:       /* the system denied the call, or we are not registered on it */
-        return TXDENY_REJECTED;
+    /* Trunking: the system's answer, never shown as the modem's */
+    case RADIO_DV_TRUNK_NO_ANSWER:     /* the trunked system did not answer, or queued us too long */
+        return TXDENY_TRUNK_NO_ANSWER;
+    case RADIO_DV_TRUNK_REFUSED:       /* the system denied the call or our registration */
+        return TXDENY_TRUNK_REFUSED;
+    case RADIO_DV_TRUNK_NO_SITE:       /* not on the configured system's control channel */
+        return TXDENY_TRUNK_NO_SITE;
     case RADIO_DV_TRUNK_NO_TX:         /* trunked transmit is off in this build or for this channel */
         return TXDENY_MODE;
     default:

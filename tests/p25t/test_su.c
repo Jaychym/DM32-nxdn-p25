@@ -528,12 +528,17 @@ static void no_answer(void)
     run_ms(P25T_SU_RESPONSE_MS * (P25T_SU_TRIES + 2) + 2000);
     assert(r->su.isps_sent == P25T_SU_TRIES && S.n_isps == P25T_SU_TRIES && !r->su.registered);
     for (unsigned i = 1; i < S.n_isps; i++) assert(S.isps[i].tick - S.isps[i - 1].tick >= P25T_SU_RESPONSE_MS * 24u);
-    /* PTT without registration is refused before anything is sent */
+    /* PTT while not registered registers at once, past the automatic attempts' gap; unanswered, it gives up after
+     * its tries and no call request goes out */
+    unsigned sent = r->su.isps_sent;
     ptt(r, true);
-    assert(r->su.deny == P25T_SU_DENY_NOT_REGISTERED && r->su.state == P25T_SU_CC);
+    assert(r->su.state == P25T_SU_REQUEST && r->su.deny == P25T_SU_DENY_NONE);
+    RUN_UNTIL(r->su.deny == P25T_SU_DENY_NO_RESPONSE, P25T_SU_RESPONSE_MS * (P25T_SU_TRIES + 2) + 2000);
+    assert(r->su.isps_sent == sent + P25T_SU_TRIES && r->su.state == P25T_SU_CC);
+    for (unsigned i = sent; i < S.n_isps; i++) assert(S.isps[i].opcode == P25T_ISP_U_REG_REQ);
     ptt(r, false);
     run_ms(P25T_SU_AUTO_GAP_MS);
-    assert(r->su.isps_sent > P25T_SU_TRIES && r->su.isps_sent <= 2 * P25T_SU_TRIES);
+    assert(r->su.isps_sent > sent + P25T_SU_TRIES && r->su.isps_sent <= sent + 2 * P25T_SU_TRIES);
 
     /* registered, then the site stops answering: a call request gives up after its tries */
     site_cfg c2 = base_cfg();
@@ -560,8 +565,12 @@ static void refused_and_other_systems(void)
     RUN_UNTIL(r->su.reg_refused, 10000);
     run_ms(P25T_SU_REG_RETRY_MS - 2000);
     assert(r->su.isps_sent == 1 && !r->su.registered);
+    /* PTT asks once more at once: refused again, the call request never goes out */
     ptt(r, true);
-    assert(r->su.deny == P25T_SU_DENY_NOT_REGISTERED);
+    assert(r->su.state == P25T_SU_REQUEST);
+    RUN_UNTIL(r->su.deny == P25T_SU_DENY_NOT_REGISTERED, 3000);
+    assert(r->su.state == P25T_SU_CC && r->su.isps_sent == 2 && S.n_isps == 2 &&
+           S.isps[1].opcode == P25T_ISP_U_REG_REQ);
     ptt(r, false);
 
     /* another system on the configured frequency (another WACN, another System ID): never a transmission */
@@ -572,7 +581,7 @@ static void refused_and_other_systems(void)
     run_ms(20000);
     assert(r->su.state == P25T_SU_HUNT && r->su.isps_sent == 0 && r->isp_frames == 0 && S.n_isps == 0);
     ptt(r, true);
-    assert(r->su.deny == P25T_SU_DENY_SYSTEM && !transmitting(r));
+    assert(r->su.deny == P25T_SU_DENY_NO_SITE && !transmitting(r));
     ptt(r, false);
     o = base_cfg();
     o.sysid = 0x3A6;
@@ -611,6 +620,48 @@ static void refused_and_other_systems(void)
         p25t_su_init(&su, &bad[i], 0, 1, &out);
         assert(!su.cfg.tx_enabled);
     }
+}
+
+static void ptt_registers_first(void)
+{
+    /* refused at first, then the administrator adds the unit: PTT registers without waiting out the refusal hold, and
+     * the call request follows the acceptance */
+    site_cfg c = base_cfg();
+    c.allowed[0] = 1002;
+    c.allowed[1] = 0;
+    world(&c, 1, true);
+    radio *r = &R[0];
+    RUN_UNTIL(r->su.reg_refused, 10000);
+    S.cfg.allowed[1] = 1001;
+    run_ms(500);
+    unsigned isps = S.n_isps;
+    ptt(r, true);
+    assert(r->su.state == P25T_SU_REQUEST && r->su.call_after_reg);
+    uint32_t talk = RUN_UNTIL(r->su.state == P25T_SU_VOICE_TX, 4000);
+    assert(r->su.registered && !r->su.call_after_reg && S.n_isps == isps + 2);
+    assert(S.isps[isps].opcode == P25T_ISP_U_REG_REQ && S.isps[isps + 1].opcode == P25T_ISP_GRP_V_REQ &&
+           S.isps[isps + 1].group == GROUP);
+    run_ms(500);
+    ptt(r, false);
+    RUN_UNTIL(r->su.state == P25T_SU_CC, 4000);
+    assert(S.calls[S.n_calls - 1].unit && S.calls[S.n_calls - 1].source == 1001);
+
+    /* released while registering: the acceptance arrives, no call request follows */
+    world(&c, 1, true);
+    r = &R[0];
+    RUN_UNTIL(r->su.reg_refused, 10000);
+    S.cfg.allowed[1] = 1001;
+    run_ms(500);
+    isps = S.n_isps;
+    ptt(r, true);
+    RUN_UNTIL(S.n_isps == isps + 1, 2000);
+    ptt(r, false);
+    RUN_UNTIL(r->su.registered, 2000);
+    run_ms(2000);
+    for (unsigned i = isps; i < S.n_isps; i++) assert(S.isps[i].opcode != P25T_ISP_GRP_V_REQ);
+    assert(!transmitting(r) && r->su.state == P25T_SU_CC);
+    check_isps_are_ours();
+    fprintf(stderr, "PTT while not registered: registered, then granted %u ms after PTT\n", talk);
 }
 
 static void contention(void)
@@ -769,6 +820,7 @@ int main(void)
     queued_acknowledged_denied();
     no_answer();
     refused_and_other_systems();
+    ptt_registers_first();
     contention();
     lost_and_leave();
     tdma_calls();

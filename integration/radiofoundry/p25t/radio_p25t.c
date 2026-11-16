@@ -83,7 +83,9 @@ static uint8_t deny_reason(uint8_t deny)
     case P25T_SU_DENY_NO_TX: return RADIO_DV_TRUNK_NO_TX;
     case P25T_SU_DENY_NO_RESPONSE:
     case P25T_SU_DENY_QUEUE_TIMEOUT: return RADIO_DV_TRUNK_NO_ANSWER;
-    default: return RADIO_DV_TRUNK_REFUSED;   /* the system refused, or we are not on it yet */
+    case P25T_SU_DENY_NO_SITE:
+    case P25T_SU_DENY_BAND: return RADIO_DV_TRUNK_NO_SITE;   /* not on the system, or its inbound frequency unknown */
+    default: return RADIO_DV_TRUNK_REFUSED;   /* the system denied the call or the registration */
     }
 }
 

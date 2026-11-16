@@ -63,6 +63,26 @@ static void queue_isp(p25t_su *su, const p25t_isp *m)
     su->microslots = NOT_STARTED;
 }
 
+static void request_registration(p25t_su *su)
+{
+    p25t_isp r = { .opcode = P25T_ISP_U_REG_REQ };
+    r.u.reg.wacn = su->cfg.wacn;
+    r.u.reg.sysid = su->cfg.sysid;
+    r.u.reg.source = su->cfg.unit_id;
+    queue_isp(su, &r);
+    su->reg_sent_ms = su->now;
+}
+
+static void request_call(p25t_su *su)
+{
+    p25t_isp r = { .opcode = P25T_ISP_GRP_V_REQ };
+    r.u.voice.svc = 0x04;          /* priority 4, no emergency */
+    r.u.voice.group = su->cfg.talkgroup;
+    r.u.voice.source = su->cfg.unit_id;
+    queue_isp(su, &r);
+    su->calls_made++;
+}
+
 static void isp_done(p25t_su *su)
 {
     su->isp_pending = false;
@@ -119,6 +139,7 @@ static void deny(p25t_su *su, uint8_t why, uint8_t reason, p25t_su_out *out)
 {
     su->deny = why;
     su->deny_reason = reason;
+    su->call_after_reg = false;
     isp_done(su);
     if (su->state == P25T_SU_REQUEST || su->state == P25T_SU_QUEUED) set_state(su, P25T_SU_CC);
     (void)out;
@@ -195,6 +216,12 @@ void p25t_su_tsbk(p25t_su *su, uint16_t nac, const uint8_t tsbk[P25T_TSBK_BYTES]
         su->reg_refused = !su->registered;
         su->reg_refused_ms = su->now;
         if (su->registered) su->aff_sent_ms = su->now - P25T_SU_AUTO_GAP_MS;   /* affiliate next */
+        if (su->call_after_reg && su->state == P25T_SU_REQUEST) {
+            /* PTT is still down: its call request follows the registration */
+            su->call_after_reg = false;
+            if (su->registered) request_call(su);
+            else deny(su, P25T_SU_DENY_NOT_REGISTERED, m.u.reg.response, out);
+        }
         break;
     case P25T_OSP_GRP_AFF_RSP:
         if (m.u.aff.target != me) break;
@@ -287,6 +314,7 @@ void p25t_su_ptt(p25t_su *su, bool down, p25t_su_out *out)
     clear(out);
     su->ptt = down;
     if (!down) {
+        su->call_after_reg = false;
         if (su->state == P25T_SU_REQUEST || su->state == P25T_SU_QUEUED) {
             isp_done(su);
             set_state(su, P25T_SU_CC);
@@ -305,23 +333,21 @@ void p25t_su_ptt(p25t_su *su, bool down, p25t_su_out *out)
     }
     if (su->state == P25T_SU_VOICE_RX) tune_cc(su, out, false);   /* a request goes on the control channel */
     if (su->state != P25T_SU_CC || !system_ok(su)) {
-        su->deny = P25T_SU_DENY_SYSTEM;
-        return;
-    }
-    if (!su->registered) {
-        su->deny = P25T_SU_DENY_NOT_REGISTERED;
+        su->deny = P25T_SU_DENY_NO_SITE;
         return;
     }
     if (!su->cc_tx_hz) {
         su->deny = P25T_SU_DENY_BAND;
         return;
     }
-    p25t_isp r = { .opcode = P25T_ISP_GRP_V_REQ };
-    r.u.voice.svc = 0x04;          /* priority 4, no emergency */
-    r.u.voice.group = su->cfg.talkgroup;
-    r.u.voice.source = su->cfg.unit_id;
-    queue_isp(su, &r);
-    su->calls_made++;
+    if (su->registered) {
+        request_call(su);
+    } else {
+        /* Not registered (yet, or refused earlier): PTT registers now, past the automatic attempts' gap and refusal
+         * hold, and asks for the channel once the system accepts. The system says no, not the radio */
+        request_registration(su);
+        su->call_after_reg = true;
+    }
     set_state(su, P25T_SU_REQUEST);
 }
 
@@ -374,12 +400,7 @@ void p25t_su_tick(p25t_su *su, uint32_t now_ms, p25t_su_out *out)
     if (!su->registered) {
         if (su->reg_refused && now_ms - su->reg_refused_ms < P25T_SU_REG_RETRY_MS) return;
         if (now_ms - su->reg_sent_ms < P25T_SU_AUTO_GAP_MS) return;
-        p25t_isp r = { .opcode = P25T_ISP_U_REG_REQ };
-        r.u.reg.wacn = su->cfg.wacn;
-        r.u.reg.sysid = su->cfg.sysid;
-        r.u.reg.source = su->cfg.unit_id;
-        queue_isp(su, &r);
-        su->reg_sent_ms = now_ms;
+        request_registration(su);
     } else if (!su->affiliated && now_ms - su->aff_sent_ms >= P25T_SU_AUTO_GAP_MS) {
         p25t_isp r = { .opcode = P25T_ISP_GRP_AFF_REQ };
         r.u.aff.sysid = su->cfg.sysid;

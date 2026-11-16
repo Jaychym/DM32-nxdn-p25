@@ -48,7 +48,7 @@ The radio covers VHF and UHF only. 800 MHz systems are out of band and their cha
 | Hunting | "Searching for the site" | Waits for the configured WACN/System ID in NET_STS/RFSS_STS; a WACN or System ID of 0 accepts any (receive only: transmit needs both). With several control channels listed, a channel without either for 3 s means the next one; a trunk channel lists one and stays on it. The logic takes up to 4. |
 | On the site | "TG n", "Listen only" or "Not registered" | Stores the band plan. With transmit on, registers (U_REG_REQ), then affiliates (GRP_AFF_REQ), each at most every 30 s. After a refused registration it waits 60 s. |
 | Following a call | the call (TG, source) | A GRP_V_CH_GRANT or _UPDT for the talkgroup, a priority list entry or (hear all) any group. Tunes to the voice channel and plays it as a P25 channel; encrypted calls are muted. Returns after a terminator or 1.5 s without frames. |
-| Requesting | "Requesting a channel" | PTT sends GRP_V_REQ. ACK_RSP_FNE waits for the answer; QUE_RSP queues (10 s at most); DENY_RSP refuses. A grant for our group and unit ID transmits on the voice channel's inbound frequency. |
+| Requesting | "Requesting a channel" | PTT sends GRP_V_REQ. Not registered yet (or refused earlier): PTT sends U_REG_REQ at once, past the 30 s gap and the 60 s refusal hold, and GRP_V_REQ when the system accepts it. ACK_RSP_FNE waits for the answer; QUE_RSP queues (10 s at most); DENY_RSP refuses. A grant for our group and unit ID transmits on the voice channel's inbound frequency. |
 | Queued | "Queued by the system" | |
 | Talking | as a P25 call | The FDMA call (HDU, LDU1/LDU2 with our unit ID, TDU), then back to the call's hang time. |
 
@@ -56,8 +56,9 @@ A refusal reaches the radio core like a refused transmission:
 
 | Cause | Radio core shows |
 |---|---|
-| The system denied the call, or the radio is not registered or not on the system | `TXDENY_REJECTED` |
-| No answer after 4 tries, or queued too long | `TXDENY_TIMEOUT` |
+| The system denied the call or the registration | `TXDENY_TRUNK_REFUSED` ("System refused") |
+| No answer after 4 tries, or queued too long | `TXDENY_TRUNK_NO_ANSWER` ("System did not answer") |
+| Not on the configured system, or its inbound frequency unknown | `TXDENY_TRUNK_NO_SITE` ("Searching for the site") |
 | Transmit off | `TXDENY_MODE` |
 | Unit ID, talkgroup, WACN or System ID missing | `TXDENY_NO_ID` |
 

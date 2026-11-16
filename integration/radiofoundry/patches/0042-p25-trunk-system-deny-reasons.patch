@@ -1,0 +1,136 @@
+--- a/core/radio/radio.h
++++ b/core/radio/radio.h
+@@ -31,11 +31,14 @@
+ // NO_ID no DMR ID in the codeplug, SFR_RPT the radio is the channel's single frequency repeater. BUSY on FM: busy channel lockout. INHIBIT: transmit is switched off in the
+ // settings. BATTERY: the battery is critical. AM: the channel is received in AM (the air band, CONFIG_AM_RX): receive
+ // only, the radio never transmits there. BCAST: the same for the broadcast band (CONFIG_BCAST_FM). NXDN_ID: the unit ID
+-// an NXDN call would carry is above NXDN's 16-bit range (1-65519), usually the radio's DMR ID on a channel without its own
++// an NXDN call would carry is above NXDN's 16-bit range (1-65519), usually the radio's DMR ID on a channel without its own.
++// P25 trunking (the system answers, not the modem): TRUNK_REFUSED the system denied the call or the registration,
++// TRUNK_NO_ANSWER it did not answer (or queued the call too long), TRUNK_NO_SITE the radio isn't on the channel's system
+ typedef enum {
+ 	TXDENY_NONE, TXDENY_RX_ONLY, TXDENY_BAND, TXDENY_TIMEOUT, TXDENY_NO_FREQ, TXDENY_MODE,
+ 	TXDENY_NO_CODEC, TXDENY_NO_DMR, TXDENY_BUSY, TXDENY_NO_REPEATER, TXDENY_REJECTED, TXDENY_HOTSPOT, TXDENY_NO_ID,
+ 	TXDENY_INHIBIT, TXDENY_BATTERY, TXDENY_AM, TXDENY_BCAST, TXDENY_SFR_RPT, TXDENY_NXDN_ID,
++	TXDENY_TRUNK_REFUSED, TXDENY_TRUNK_NO_ANSWER, TXDENY_TRUNK_NO_SITE,
+ } tx_deny_t;
+ 
+ // Busy channel lockout (FM): CARRIER refuses PTT while anything is heard on the channel; WRONG_TONE only while a
+--- a/core/ui/ui_screens.c
++++ b/core/ui/ui_screens.c
+@@ -1212,6 +1212,9 @@
+ 			TR("No DMR ID in codeplug"));
+ 		break;
+ 	case TXDENY_NXDN_ID: sb_str(&b, TR("NXDN ID above 65519")); break;
++	case TXDENY_TRUNK_REFUSED: sb_str(&b, TR("System refused")); break;
++	case TXDENY_TRUNK_NO_ANSWER: sb_str(&b, TR("System did not answer")); break;
++	case TXDENY_TRUNK_NO_SITE: sb_str(&b, TR("Searching for the site")); break;
+ 	case TXDENY_AM: sb_str(&b, TR("Air band: receive only")); break;
+ 	case TXDENY_BCAST: sb_str(&b, TR("Broadcast: receive only")); break;
+ 	case TXDENY_SFR_RPT: sb_str(&b, TR("Repeater channel: PTT off")); break;
+@@ -1235,6 +1238,9 @@
+ 		if (!dv_channel(v)) return TR("Set your DMR ID in qdmr");
+ 		return v->ch.talkgroup == 0 ? TR("Set channel talkgroup") : TR("Set channel Unit ID");
+ 	case TXDENY_NXDN_ID: return TR("Set channel Unit ID");
++	case TXDENY_TRUNK_REFUSED: return TR("Check unit ID and TG");
++	case TXDENY_TRUNK_NO_ANSWER: return TR("Release PTT, try again");
++	case TXDENY_TRUNK_NO_SITE: return TR("Check WACN and System ID");
+ 	case TXDENY_AM:
+ 	case TXDENY_BCAST: return v->vfo ? TR("Tune out of the band") : TR("Pick another channel");
+ 	case TXDENY_SFR_RPT: return TR("Pick a user channel to talk");
+--- a/core/ui/lang/es.po
++++ b/core/ui/lang/es.po
+@@ -3321,6 +3321,14 @@
+ msgstr "ID NXDN mayor de 65519"
+ 
+ #: core/ui/ui_screens.c
++msgid "System refused"
++msgstr "El sistema rechazó"
++
++#: core/ui/ui_screens.c
++msgid "System did not answer"
++msgstr "El sistema no respondió"
++
++#: core/ui/ui_screens.c
+ msgid "Air band: receive only"
+ msgstr "Banda aérea: solo RX"
+ 
+@@ -3381,6 +3389,14 @@
+ msgstr "Fija el ID de unidad"
+ 
+ #: core/ui/ui_screens.c
++msgid "Check unit ID and TG"
++msgstr "Revisa ID de unidad y TG"
++
++#: core/ui/ui_screens.c
++msgid "Check WACN and System ID"
++msgstr "Revisa WACN e ID de sistema"
++
++#: core/ui/ui_screens.c
+ msgid "Tune out of the band"
+ msgstr "Sal de la banda"
+ 
+--- a/core/ui/lang/it.po
++++ b/core/ui/lang/it.po
+@@ -3321,6 +3321,14 @@
+ msgstr "ID NXDN oltre 65519"
+ 
+ #: core/ui/ui_screens.c
++msgid "System refused"
++msgstr "Il sistema ha rifiutato"
++
++#: core/ui/ui_screens.c
++msgid "System did not answer"
++msgstr "Il sistema non risponde"
++
++#: core/ui/ui_screens.c
+ msgid "Air band: receive only"
+ msgstr "Banda aerea: solo ricezione"
+ 
+@@ -3381,6 +3389,14 @@
+ msgstr "Imposta ID unità canale"
+ 
+ #: core/ui/ui_screens.c
++msgid "Check unit ID and TG"
++msgstr "Verifica ID unità e TG"
++
++#: core/ui/ui_screens.c
++msgid "Check WACN and System ID"
++msgstr "Verifica WACN e ID sistema"
++
++#: core/ui/ui_screens.c
+ msgid "Tune out of the band"
+ msgstr "Sintonizza fuori banda"
+ 
+--- a/tests/host/radioCoreTest.c
++++ b/tests/host/radioCoreTest.c
+@@ -4720,8 +4720,9 @@
+ uint8_t radio_dv_tx_deny(uint8_t r)
+ {
+ 	return r == 0 || r == NT_USER_STOP_ || r == NT_TX_COMPLETE_ ? TXDENY_NONE :
+-	       r == NT_DENIED_ || r == RADIO_DV_TRUNK_REFUSED ? TXDENY_REJECTED :
+-	       r == RADIO_DV_TRUNK_NO_ANSWER ? TXDENY_TIMEOUT : r == RADIO_DV_TRUNK_NO_TX ? TXDENY_MODE : TXDENY_NO_DMR;
++	       r == NT_DENIED_ ? TXDENY_REJECTED : r == RADIO_DV_TRUNK_REFUSED ? TXDENY_TRUNK_REFUSED :
++	       r == RADIO_DV_TRUNK_NO_ANSWER ? TXDENY_TRUNK_NO_ANSWER : r == RADIO_DV_TRUNK_NO_SITE ? TXDENY_TRUNK_NO_SITE :
++	       r == RADIO_DV_TRUNK_NO_TX ? TXDENY_MODE : TXDENY_NO_DMR;
+ }
+ static void dv_tx_ended(uint8_t reason)
+ {
+@@ -4907,7 +4908,7 @@
+ 	// the system refuses: shown until PTT is released
+ 	dv_tx_ended(RADIO_DV_TRUNK_REFUSED);
+ 	run(20);
+-	CHECK(sm.view.state == RS_TX_DENIED && sm.view.tx_deny == TXDENY_REJECTED);
++	CHECK(sm.view.state == RS_TX_DENIED && sm.view.tx_deny == TXDENY_TRUNK_REFUSED);
+ 	req(RREQ_PTT, 0);
+ 	run(20);
+ 	CHECK(sm.view.state != RS_TX_DENIED);
+@@ -4916,7 +4917,7 @@
+ 	CHECK(dv.downs == 2);
+ 	dv_tx_ended(RADIO_DV_TRUNK_NO_ANSWER);
+ 	run(20);
+-	CHECK(sm.view.state == RS_TX_DENIED && sm.view.tx_deny == TXDENY_TIMEOUT);
++	CHECK(sm.view.state == RS_TX_DENIED && sm.view.tx_deny == TXDENY_TRUNK_NO_ANSWER);
+ 	req(RREQ_PTT, 0);
+ 	run(20);
+ 	// granted: a call, then its end

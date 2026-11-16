@@ -17,7 +17,8 @@
 #define RADIO_DV_NAC_ANY 0xF7Eu  /* nac_rx that hears every NAC (CODEPLUG_NAC_ANY) */
 
 /* How a trunking PTT ended without a call (radio_dv_status_t.tx_reason; above the NT_* values) */
-enum { RADIO_DV_TRUNK_REFUSED = 0x40, RADIO_DV_TRUNK_NO_TX = 0x41, RADIO_DV_TRUNK_NO_ANSWER = 0x42 };
+enum { RADIO_DV_TRUNK_REFUSED = 0x40, RADIO_DV_TRUNK_NO_TX = 0x41, RADIO_DV_TRUNK_NO_ANSWER = 0x42,
+       RADIO_DV_TRUNK_NO_SITE = 0x43 };
 
 typedef struct {
     uint8_t mode;               /* radio_mode_t: RADIO_MODE_P25, _NXDN or _P25_TRUNK */

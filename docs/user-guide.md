@@ -143,8 +143,10 @@ Select **P25 Trunk** in the channel editor or the VFO mode cycle (**\* → 4**).
 Trunk TX starts disabled, including on existing channels. To enable it, enter the system's nonzero WACN/System ID, assigned unit ID and talkgroup, then enable **Trunk TX** in the channel editor or web CPS. The switch clears RX-only; disabling it restores RX-only. The release includes experimental trunk TX support, but hardware timing and interoperability remain unverified. AES trunk TX is unavailable.
 
 PTT on a trunk channel with explicit TX permission works as follows:
-- Hold PTT. The radio asks the system for a channel and talks when the system grants it.
-- If the system denies the call, or doesn't answer, the screen shows the refusal until you release PTT.
+- Hold PTT. The radio asks the system for a channel and talks when the system grants it. Not registered yet: PTT
+  registers first, then asks for the channel.
+- If the system refuses ("System refused") or doesn't answer ("System did not answer"), the screen shows it until you
+  release PTT. "Searching for the site" means the radio is not on the channel's system: check WACN and System ID.
 - The radio sends nothing without PTT, except its registration and its affiliation to the talkgroup. It sends each
   at most every 30 s, and only to the system the channel names.
 
