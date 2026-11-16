@@ -224,9 +224,10 @@ int native_lab_channel(const native_channel *c)
     if (c) chan=*c;
     if (was && (voice_owner || test.owned)) { pending_start=0;nt_stop(&test,test.session,NT_USER_STOP); }
     taskEXIT_CRITICAL();
-    /* Leaving: hand the board back now so the radio core can tune it. The
-     * worker releases its session when it sees the stop. */
+    /* Release the modem before waiting: the worker needs it released to finish. */
     if (!c && test.owned) nt_cleanup(&test);
+    /* Its final audio/mic cleanup must precede the next mode's audio start. */
+    if (!c && was) while (p25_lab_busy()) vTaskDelay(1);
     return 1;
 }
 #if CONFIG_P25_TRUNK_TX

@@ -232,8 +232,12 @@ void p25t_su_tsbk(p25t_su *su, uint16_t nac, const uint8_t tsbk[P25T_TSBK_BYTES]
         if (su->state != P25T_SU_CC) break;
         {
             int best = -1, w;
-            for (int i = 0; i < 2; i++)
+            for (int i = 0; i < 2; i++) {
+                bool tdma;
+                if (!m.u.update.group[i] || !p25t_channel_freq(su->bands, m.u.update.channel[i], NULL, NULL, NULL, &tdma) ||
+                    (tdma && !su->cfg.tdma_rx)) continue;
                 if ((w = wanted(su, m.u.update.group[i])) >= 0 && (best < 0 || w < wanted(su, m.u.update.group[best]))) best = i;
+            }
             if (best >= 0) follow(su, m.u.update.channel[best], m.u.update.group[best], 0, out);
         }
         break;

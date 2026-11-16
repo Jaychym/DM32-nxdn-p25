@@ -26,7 +26,7 @@ static bool p25_select(const radio_dv_cfg_t *cfg)
         native_lab_channel(NULL);
         return true;
     }
-    p25_lab_channel c = { cfg->nac_rx, cfg->nac_tx, cfg->talkgroup, cfg->unit_id, cfg->hear_all };
+    p25_lab_channel c = { cfg->nac_rx, cfg->nac_tx, cfg->talkgroup, cfg->unit_id, cfg->hear_all, cfg->aes_slot };
     p25_lab_channel_config(&c);
     native_channel n = { cfg->rx_hz, cfg->tx_hz, cfg->power };
     return native_lab_channel(&n);

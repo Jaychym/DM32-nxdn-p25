@@ -16,8 +16,8 @@ class AudioBenchTests(unittest.TestCase):
         self.assertTrue(allowed(0x20,b'\x08'+struct.pack('<IHHH',145500000,300,0x293,0)))
         for seconds in (0,301):self.assertFalse(allowed(0x20,b'\x08'+struct.pack('<IHHH',145500000,seconds,0x293,0)))
     def test_replay_bounds_and_bad_payloads(self):
-        for n in (1,64):self.assertTrue(allowed(0x20,b'\x02'+struct.pack('<H',n)))
-        for n in (0,65,65535):self.assertFalse(allowed(0x20,b'\x02'+struct.pack('<H',n)))
+        for n in (1,24):self.assertTrue(allowed(0x20,b'\x02'+struct.pack('<H',n)))
+        for n in (0,25,64,65535):self.assertFalse(allowed(0x20,b'\x02'+struct.pack('<H',n)))
         for p in (b'\x04',b'\x04\x02\x00',b'\x04\x01\x10',b'\x03'+bytes(40)):
             self.assertFalse(allowed(0x20,p))
         for ms in (0,999,60001):self.assertFalse(allowed(0x20,b'\x05'+struct.pack('<IHHH',145500000,ms,0x293,0)))

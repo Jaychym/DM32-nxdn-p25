@@ -4,7 +4,7 @@
 
 **¿Quieres firmware para tu radio?** Regálamelo desde mi lista de deseos y lo porto: **<https://throne.com/lyraarsgoetia>** · *Want firmware for your radio? Gift it from my wishlist and I'll port it.*
 
-Firmware abierto y multimodo para el **Baofeng DM-32UV**: FM, DMR, **APCO P25 fase 1** y **NXDN48** (RX y TX) en canales convencionales, más recepción de troncal P25. Es una derivación de [Open25-DM32](https://github.com/tylerwatt12/Open25-DM32) (tylerwatt12), construida como serie de parches sobre [RadioFoundry](https://github.com/RadioFoundry/RadioFoundry). Esta rama la mantiene **lyra XE1POC**.
+Firmware abierto y multimodo para el **Baofeng DM-32UV**: FM, DMR, **APCO P25 fase 1** y **NXDN48** (RX y TX) en canales convencionales, más modo troncal P25 fase 1 con TX experimental y permiso explícito por canal. Es una derivación de [Open25-DM32](https://github.com/tylerwatt12/Open25-DM32) (tylerwatt12), construida como serie de parches sobre [RadioFoundry](https://github.com/RadioFoundry/RadioFoundry). Esta rama la mantiene **lyra XE1POC**.
 
 > Firmware experimental. Úsalo bajo tu responsabilidad, solo en frecuencias en las que tengas licencia y con un respaldo de tu radio.
 
@@ -12,12 +12,14 @@ Firmware abierto y multimodo para el **Baofeng DM-32UV**: FM, DMR, **APCO P25 fa
 
 | Función | Estado |
 |---|---|
-| FM y DMR | Base RadioFoundry; se investiga un fallo intermitente de DMR al cambiar de zona o modo que se recupera al reiniciar (#3) |
+| FM y DMR | Corregida una carrera de audio que silenciaba el primer PTT DMR al salir de P25; 100 transiciones pasan en host. Falta confirmación en la radio; otros fallos de acceso al hotspot de #3 siguen abiertos |
 | Mensajes DMR de texto libre | Hasta 140 caracteres desde Contactos; revisión antes de enviar. Compilado y probado en simulador, pendiente de probar en el aire |
 | P25 convencional, RX y TX | Verificado en la radio (voz IMBE en ambos sentidos) |
 | NXDN48, RX | Verificado en la radio (tramas, llamada y voz AMBE sin errores) |
 | NXDN48, TX | El receptor del firmware y dsd-fme decodifican la TX del DM-32 (RAN 1, TG 1, voz), capturada con un Pluto+. Hay reportes de radios Icom, un repetidor Kenwood y hotspots MMDVM que no la decodifican; pendiente medir la desviación. Solo NXDN48 (Icom «VN», 6,25 kHz), no NXDN96 |
-| Troncal P25 | Solo recepción, fase 1, VHF/UHF; aún sin probar en un sistema real. La TX troncal está desactivada. Pon RX NAC «cualquiera» y el WACN/System ID del sistema (o 0) |
+| Troncal P25 | Modo P25 Trunk en canal y VFO, fase 1, VHF/UHF. WACN/System ID editables en la radio. RX por defecto; TX experimental con permiso explícito por canal y sistema/ID completos. Sin validar en un sistema real |
+| AES-256 P25/DMR | Cuatro claves configurables en el CPS web para voz convencional; pruebas de protocolo y persistencia. Interoperabilidad con otras radios pendiente; véanse los [límites](docs/aes256.md) |
+| Tono de fin de llamada DMR | Interruptor independiente en Ajustes › Sonidos; habilitado por defecto |
 | APRS y posición GPS | Activados en esta versión; sin probar en el aire |
 | Tono de permiso estilo Motorola | P25/NXDN: TPT ASTRO 25 (3 bips de 910 Hz); DMR: chirp MOTOTRBO |
 | Tema «Rosa» | Tema claro rosa (Ajustes › Pantalla › Tema › Rosa) |
@@ -46,9 +48,9 @@ are preserved. DMR voice release has an absolute 1.5 s limit, including the term
 cannot keep it alive indefinitely. The HR_C7000 aborts immediately without waiting for another slot, and its PA
 timer is canceled on abort. The firmware version shown on the radio identifies this repository's build commit.
 
-El VFO ahora permite **FM → DMR → P25 → NXDN → FM**: abre el VFO y pulsa **\* → 4** (Modo).
+El VFO ahora permite **FM → DMR → P25 → NXDN → P25 Trunk → FM**: abre el VFO y pulsa **\* → 4** (Modo).
 El modo se guarda al reiniciar. P25 inicia con NAC 293, NXDN con RAN 1, ambos con TG 1; para otro NAC/RAN o grupo,
-configura un canal y cópialo al VFO. Se conserva el ID de la radio y siguen vigentes los límites de TX.
+configura un canal y cópialo al VFO. P25 Trunk empieza en solo recepción; WACN y System ID se editan en el canal. Se conservan el sistema, grupo e ID al copiarlo al VFO. Consulta la [configuración troncal](docs/user-guide.md#using-a-p25-trunk-channel) antes de activar Trunk TX.
 
 Host regressions reproduce stuck release/timeout conditions before the fix and pass afterwards. **The reported
 radio has not been tested with this build. Intermittent repeater access is not confirmed resolved.** See [validation and hardware checks](docs/dmr-ptt-release.md).
@@ -92,6 +94,11 @@ Parches de la serie (`integration/radiofoundry/patches/`):
 | `0032-flasher-stock-channels-not-found` | Web flasher: si al instalar sobre la firmware de fábrica no reconoce su codeplug, lo dice (aviso y enlace de reporte) en vez de terminar en silencio con la zona de codeplug llena de datos de fábrica; el reporte incluye páginas y canales válidos/rotos (#8) |
 | `0033-zone-scan-keeps-digital-monitor` | El monitor digital (SK1) sigue activo durante el escaneo de zona, también al pasar por canales FM, y en el canal donde el escaneo se detiene: una llamada a cualquier grupo detiene el escaneo. Cambiar de canal a mano lo quita, como antes (#5) |
 | `0034-editor-trunk-channel-rx-nac-any` | Editor web: un canal que pasa a «P25 Trunk» desde FM/DMR toma RX NAC «cualquiera», no el 293 que traía (con 293 el canal de control de casi ningún sistema se oía y la radio se quedaba «Buscando el sitio»). Junto con `src/p25t/su.c`: con un solo canal de control la radio ya no se resintoniza cada 3 s perdiendo lo oído, y WACN/System ID 0 aceptan cualquier sistema (solo RX) |
+| `0036-aes256-voice-and-cps` | AES-256 para voz P25/DMR convencional, claves en el CPS y reserva persistente de la secuencia TX |
+| `0037-daily-release-update-detection` | Reconoce versiones diarias, compara reconstrucciones del mismo día y consulta un catálogo fresco |
+| `0038-dmr-call-end-tone-setting` | Ajuste independiente del tono local al terminar una llamada DMR (#13) |
+| `0039-p25-trunk-radio-mode-and-tx` | Modo P25 Trunk en radio/VFO, WACN/System ID, TX explícita y conservación de campos en CPS/CSV/VFO |
+| `0040-dmr-privacy-header-test-layout` | Corrige la trama de prueba DMR PI para colocar FID, ID de clave, MI y destino en sus posiciones de protocolo |
 | `0035-editor-writes-digital-channel-fields` | Editor web: un cambio solo de NAC/RAN, grupo, «Hear All», WACN o System ID ya se escribe en la radio (antes se descartaba como «ya tiene este codeplug»). Mismo arreglo que el 0031 de kgasso en el PR #7 |
 
 Fuera de la serie: recepción NXDN corregida (filtros del FD6818 en la ruta plana, FSW en ambas polaridades, ganancia AF) en `integration/radiofoundry/nxdn/` y `src/nxdn/`.
@@ -107,7 +114,7 @@ python3 tools/rf_patch.py check        # "derivative tree matches the series"
 
 **Compilación y release automáticas:** cada commit a `main` hace que la acción `Firmware` (`.github/workflows/firmware.yml`) compile la imagen sin códec y publique una release nueva `v<AAAA.MM.DD>-<commit>` con `rfoundry-dm32-<versión>.bin`, su manifiesto `.json` y `SHA256SUMS`. El web flasher la instala solo en unos 15 minutos (su acción `Sync firmware`). También se puede lanzar a mano en Actions › Firmware › Run workflow, con un nombre de versión propio. Nunca descarga el firmware de fábrica ni el AMBE.
 
-`--lean` deja fuera las herramientas de banco (repetición de capturas P25, autoprueba y captura de recepción NXDN) y libera 4,5 KB de RAM; sin él se compila la imagen de laboratorio. `--speed-codec` es obligatorio (el códec IMBE por defecto es ~4× más lento que tiempo real). `--with-local-stock` toma el AMBE de tu propio firmware de fábrica en `research/originals` y genera además `rfoundry_dm32.codec.bin`; esa imagen es solo para uso local y no se publica (la release lleva únicamente `rfoundry_dm32.bin`, que no cambia con esa opción). Pruebas de host: `make -C build/radiofoundry-p25/tests/host run`, `tools/test_nxdn.py`, `test_p25t.py`, `test_voice.py`, `test_native_modem.py`, `test_receive_audio.py`.
+`--lean` deja fuera las herramientas de banco (repetición de capturas P25, autoprueba y captura de recepción NXDN) y libera 4,5 KB de RAM; sin él se compila la imagen de laboratorio. `--speed-codec` es obligatorio (el códec IMBE por defecto es ~4× más lento que tiempo real). `--with-local-stock` toma el AMBE de tu propio firmware de fábrica en `research/originals` y genera además `rfoundry_dm32.codec.bin`; esa imagen es solo para uso local y no se publica (la release lleva únicamente `rfoundry_dm32.bin`, que no cambia con esa opción). La compilación publicada añade `--trunk-tx`; las anteriores siguen siendo pasivas por canal. Pruebas de host: `tools/test_aes.py`, `make -C build/radiofoundry-p25/tests/host run`, `tools/test_nxdn.py`, `test_p25t.py`, `test_voice.py`, `test_native_modem.py`, `test_receive_audio.py`.
 
 ## Apoya el proyecto
 

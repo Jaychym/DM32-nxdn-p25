@@ -736,8 +736,33 @@ static void single_control_channel(void)
     fprintf(stderr, "one control channel: no retune while hunting; WACN/System ID 0 hears any system, receive only\n");
 }
 
+/* An unusable higher-priority grant must not mask the other FDMA call. */
+static void mixed_grant_updates(void)
+{
+    p25t_su su;
+    p25t_su_out out;
+    p25t_su_cfg cfg = { .nac = NAC, .cc_hz = { 460012500 }, .cc_count = 1, .talkgroup = GROUP,
+                        .priority = { GROUP + 1 }, .priority_count = 1 };
+    p25t_osp update = { .opcode = P25T_OSP_GRP_V_CH_GRANT_UPDT,
+        .u.update = { .channel = { 0x200A, 0x100A }, .group = { GROUP, GROUP + 1 } } };
+    uint8_t block[P25T_TSBK_BYTES];
+    assert(p25t_osp_build(&update, block));
+    for (int tdma = 0; tdma < 2; tdma++) {
+        p25t_su_init(&su, &cfg, 0, 1, &out);
+        su.state = P25T_SU_CC;
+        su.bands[1] = (p25t_iden){ .valid = true, .slots = 1, .base_hz = 460000000, .spacing_hz = 12500 };
+        // First case: band unknown; second: a Phase 2 band unsupported by this receiver.
+        if (tdma) su.bands[2] = (p25t_iden){ .valid = true, .tdma = true, .slots = 2,
+            .base_hz = 461000000, .spacing_hz = 12500 };
+        p25t_su_tsbk(&su, NAC, block, &out);
+        assert(su.state == P25T_SU_VOICE_RX && !su.call_tdma && su.call_group == GROUP + 1);
+        assert(out.tune && out.rx_hz == 460125000);
+    }
+}
+
 int main(void)
 {
+    mixed_grant_updates();
     registered_and_affiliated();
     follows_calls();
     group_call();

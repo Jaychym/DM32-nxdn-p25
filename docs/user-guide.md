@@ -129,7 +129,7 @@ hear a valid signal. Report it with the radio's version, mode and frequency.
 | PTT line | Meaning |
 |---|---|
 | Searching for the site | No control channel with the channel's WACN and System ID is heard yet. Check the frequency, set RX NAC to `any`, and WACN/System ID to the system's (or 0 for any) |
-| Listen only | On the system; this firmware does not transmit on trunked systems (the default build) |
+| Listen only | On the system; Trunk TX is disabled for this channel, RX-only is set, or the firmware was built without trunk TX |
 | Not registered | On the system; transmit is built in, but the system has not registered the radio (yet, or it refused) |
 | TG n | Registered: PTT asks for a channel to talk to talkgroup n |
 | Requesting a channel | PTT is down and the request is out |
@@ -138,7 +138,11 @@ hear a valid signal. Report it with the radio's version, mode and frequency.
 Group calls on the channel's talkgroup play, and so do all calls with Hear All Groups. The radio goes to the voice
 channel and comes back to the control channel after the call.
 
-PTT on a trunk channel (only with a firmware built with trunked transmit) works as follows:
+Select **P25 Trunk** in the channel editor or the VFO mode cycle (**\* → 4**). The channel editor includes **WACN** (five hex digits) and **System ID** (three hex digits). Like NAC entry, number keys enter digits and the knob/arrow keys cycle the last digit through A–F. Zero accepts any system for receive.
+
+Trunk TX starts disabled, including on existing channels. To enable it, enter the system's nonzero WACN/System ID, assigned unit ID and talkgroup, then enable **Trunk TX** in the channel editor or web CPS. The switch clears RX-only; disabling it restores RX-only. The release includes experimental trunk TX support, but hardware timing and interoperability remain unverified. AES trunk TX is unavailable.
+
+PTT on a trunk channel with explicit TX permission works as follows:
 - Hold PTT. The radio asks the system for a channel and talks when the system grants it.
 - If the system denies the call, or doesn't answer, the screen shows the refusal until you release PTT.
 - The radio sends nothing without PTT, except its registration and its affiliation to the talkgroup. It sends each
@@ -152,3 +156,13 @@ Limits:
 | Control channels | One per channel. For another site, use another channel |
 | Call types | No emergency, private calls, data or supplementary services |
 | Leaving the channel | De-registration is not sent; the system ages the registration out |
+
+## DMR receive-end tone
+
+**Settings › Sounds › DMR call end tone** controls the local beep after a received DMR call. It starts enabled. Key sounds and Talk Permit remain separate. This cannot remove a tone contained in a network's audio.
+
+## AES-256 conventional voice
+
+In the web CPS **Radio** tab, provision up to four AES-256 slots (64 hex digits per key), each with a unique key ID. Select the slot on a conventional P25 or DMR channel; no slot keeps clear voice. DMR key IDs must fit 1–255; P25 accepts 1–65535. Keys stay out of CSV/YAML exports, but binary codeplug backups contain them. Keep backups private.
+
+RX looks up the received key ID among the four slots. Missing encryption synchronization or a missing key mutes encrypted voice; TX with an invalid key/configuration is refused. Hardware interoperability is untested. Read the [protocol and sequence limits](aes256.md) before use, especially for DMR shared keys or after a settings/flash restore.

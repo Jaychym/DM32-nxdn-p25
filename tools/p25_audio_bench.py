@@ -20,8 +20,8 @@ def allowed(cmd,p):
     if cmd!=0x20 or not p:return False
     if p[0] in (0,1,6,7,10,11):return len(p)==1
     if p[0] in (9,12):return len(p)==2 and p[1]<=1
-    if p[0]==2:return len(p)==3 and 1<=int.from_bytes(p[1:],'little')<=64
-    if p[0]==3:return len(p)==40 and int.from_bytes(p[1:3],'little')<64 and p[3]<=2
+    if p[0]==2:return len(p)==3 and 1<=int.from_bytes(p[1:],'little')<=24
+    if p[0]==3:return len(p)==40 and int.from_bytes(p[1:3],'little')<24 and p[3]<=2
     if p[0]==4:return len(p)==3 and p[1]<=1 and p[2]<=15
     if p[0] in (5,8):
         return len(p)==11 and int.from_bytes(p[1:5],'little')>0 and (1000<=int.from_bytes(p[5:7],'little')<=60000 if p[0]==5 else 1<=int.from_bytes(p[5:7],'little')<=300) and int.from_bytes(p[7:9],'little')<=0xfff
@@ -47,7 +47,7 @@ def status(link):
 
 def capture(path):
     rows=[json.loads(line) for line in path.read_text().splitlines() if line.strip()]
-    if not 1<=len(rows)<=64:raise ValueError('Replay requires 1..64 captured records')
+    if not 1<=len(rows)<=24:raise ValueError('Replay requires 1..24 captured records')
     for i,row in enumerate(rows):
         if len(bytes.fromhex(row['raw_hex']))!=36 or int(row['rx_type_info'],0)&3==3:
             raise ValueError('Malformed or unsupported raw record')

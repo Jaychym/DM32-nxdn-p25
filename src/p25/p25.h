@@ -71,6 +71,14 @@ int p25_nid_decode(uint64_t air_nid, p25_nid *result);
 int p25_nid_decode_any(uint64_t air_nid, p25_nid *result);
 size_t p25_frame_bytes(uint8_t duid);
 
+typedef struct {
+    uint8_t algorithm_id;
+    uint16_t key_id;
+    uint8_t message_indicator[9];
+} p25_crypto_sync;
+int p25_encode_hdu_aes(const p25_call *, const p25_crypto_sync *, uint8_t out[P25_HDU_BYTES]);
+int p25_encode_ldu_aes(const p25_call *, const p25_crypto_sync *, uint8_t duid,
+                       const uint16_t imbe[9][8], const uint8_t lsd[2], uint8_t out[P25_LDU_BYTES]);
 int p25_encode_hdu(const p25_call *call, uint8_t out[P25_HDU_BYTES]);
 int p25_encode_ldu(const p25_call *call, uint8_t duid,
                    const uint16_t imbe[P25_IMBE_FRAMES][8],

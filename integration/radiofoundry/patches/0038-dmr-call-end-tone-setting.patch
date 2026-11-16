@@ -1,0 +1,232 @@
+--- a/core/radio/radio.h
++++ b/core/radio/radio.h
+@@ -64,6 +64,7 @@
+ 	// Beeps (CONFIG_BEEP)
+ 	uint8_t beep_level;	// 0 = silent .. 100: the loudest a beep gets (it follows the volume up to this)
+ 	bool key_beep;		// radio_req_beep(BEEP_KEY) sounds
++	bool call_end_tone;	// local DMR received-call end tone
+ 	bool talk_permit;	// the talk permit tone (DMR, P25, NXDN; channels without no_beep)
+ 	// VOX (CONFIG_VOX)
+ 	uint8_t vox;		// radio_vox_t
+--- a/core/radio/radio_sm.c
++++ b/core/radio/radio_sm.c
+@@ -119,6 +119,7 @@
+ 	s->dual_delay_ms = RADIO_DUAL_DELAY_MS;
+ 	s->beep_level = 50;
+ 	s->key_beep = true;
++	s->call_end_tone = true;
+ 	s->talk_permit = true;
+ 	s->vox = RADIO_VOX_OFF;
+ 	s->vox_level = 5;
+@@ -1883,7 +1884,7 @@
+ 		if (!sm->view.ch.no_beep) {
+ 			if (st == RDMR_TX && sm->set.talk_permit && !early) {
+ 				beep(sm, BEEP_TX_PERMIT);
+-			} else if (sm->dmr_prev_state == RDMR_RX && (st == RDMR_IDLE || st == RDMR_RX_OTHER)) {
++			} else if (sm->set.call_end_tone && sm->dmr_prev_state == RDMR_RX && (st == RDMR_IDLE || st == RDMR_RX_OTHER)) {
+ 				beep(sm, BEEP_CALL_END);
+ 			}
+ 		}
+@@ -4852,6 +4853,7 @@
+ 	s->scan_priority = (st->rs_flags & SETTINGS_RS_SCAN_PRIORITY) != 0;
+ 	s->scan_beep = (st->rs_flags & SETTINGS_RS_SCAN_BEEP) != 0;
+ 	s->key_beep = (st->rs_flags & SETTINGS_RS_KEY_BEEP) != 0;
++	s->call_end_tone = (st->rs_flags & SETTINGS_RS_NO_CALL_END) == 0;
+ 	s->talk_permit = (st->rs_flags & SETTINGS_RS_NO_TALK_PERMIT) == 0;
+ 	s->scan_resume = st->rs_scan_resume;
+ 	s->scan_hold_s = st->rs_scan_hold_s;
+@@ -4879,7 +4881,8 @@
+ 	st->rs_flags = (uint8_t)((s->roger_beep ? SETTINGS_RS_ROGER_BEEP : 0) | (s->tx_inhibit ? SETTINGS_RS_TX_INHIBIT : 0) |
+ 				 (s->scan_priority ? SETTINGS_RS_SCAN_PRIORITY : 0) |
+ 				 (s->scan_beep ? SETTINGS_RS_SCAN_BEEP : 0) | (s->key_beep ? SETTINGS_RS_KEY_BEEP : 0) |
+-				 (s->talk_permit ? 0 : SETTINGS_RS_NO_TALK_PERMIT));
++				 (s->talk_permit ? 0 : SETTINGS_RS_NO_TALK_PERMIT) |
++				 (s->call_end_tone ? 0 : SETTINGS_RS_NO_CALL_END));
+ 	st->rs_scan_resume = s->scan_resume;
+ 	st->rs_scan_hold_s = s->scan_hold_s;
+ 	st->rs_scan_delay_ms = s->scan_delay_ms;
+--- a/core/settings/settings.h
++++ b/core/settings/settings.h
+@@ -346,6 +346,7 @@
+ #define SETTINGS_RS_SCAN_PRIORITY	0x04u
+ #define SETTINGS_RS_SCAN_BEEP		0x08u
+ #define SETTINGS_RS_KEY_BEEP		0x10u
++#define SETTINGS_RS_NO_CALL_END		0x40u	// DMR received-call end tone off; older settings keep it on
+ #define SETTINGS_RS_NO_TALK_PERMIT	0x20u	// the talk permit tone off (0 = on, as before)
+ // settings_t.rpt_beacon (taken with the roam_ fields)
+ #define SETTINGS_RPT_BEACON		0x01u	// our repeater roles key an idle beacon
+--- a/core/ui/ui_svc.h
++++ b/core/ui/ui_svc.h
+@@ -325,6 +325,7 @@
+ 	UI_SET_DMR_ID,		// the radio's own DMR ID in the codeplug, 1..CODEPLUG_DMR_ID_MAX (a set is a codeplug write job)
+ 	UI_SET_REF_TRIM,	// reference oscillator trim, ppb -10000..+10000 (Settings > Advanced; settings_t.ref_trim_ppb)
+ 	UI_SET_LANGUAGE,	// the UI's language, i18n.h lang_value: "en" English, 0 never picked (Settings > Display; settings_t.lang)
++	UI_SET_CALL_END_TONE,	// local DMR received-call end tone
+ 	UI_SET_COUNT
+ } ui_setting_t;
+ 
+--- a/core/ui/ui_svc_radio.c
++++ b/core/ui/ui_svc_radio.c
+@@ -402,6 +402,9 @@
+ 	case UI_SET_KEY_TONES:
+ 		rs.key_beep = value != 0;
+ 		break;
++	case UI_SET_CALL_END_TONE:
++		rs.call_end_tone = value != 0;
++		break;
+ 	case UI_SET_TALK_PERMIT:
+ 		rs.talk_permit = value != 0;
+ 		break;
+--- a/core/ui/ui_svc_storage.c
++++ b/core/ui/ui_svc_storage.c
+@@ -243,6 +243,9 @@
+ 	case UI_SET_AUTO_OFF_MIN:
+ 		settings_read(&st);
+ 		return st.auto_off_min;
++	case UI_SET_CALL_END_TONE:
++		radio_get_settings(&rs);
++		return rs.call_end_tone;
+ 	case UI_SET_TALK_PERMIT:
+ 		radio_get_settings(&rs);
+ 		return rs.talk_permit;
+@@ -333,6 +336,7 @@
+ 	case UI_SET_BACKLIGHT_S:
+ 	case UI_SET_BATTERY_SAVER:
+ 	case UI_SET_REPLY_S:
++	case UI_SET_CALL_END_TONE:
+ 	case UI_SET_TALK_PERMIT:
+ #if CONFIG_SFR
+ 	case UI_SET_SFR_RX:
+--- a/core/ui/ui_svc_stub.c
++++ b/core/ui/ui_svc_stub.c
+@@ -98,7 +98,7 @@
+ 
+ // Safe defaults (P7): no auto-transmit feature on, tones on, hints on
+ static int32_t settings[UI_SET_COUNT] = {
+-	[UI_SET_KEY_TONES] = 1, [UI_SET_TONE_VOLUME] = 5, [UI_SET_TALK_PERMIT] = 1, [UI_SET_MESSAGE_TONE] = 1,
++	[UI_SET_KEY_TONES] = 1, [UI_SET_TONE_VOLUME] = 5, [UI_SET_TALK_PERMIT] = 1, [UI_SET_CALL_END_TONE] = 1, [UI_SET_MESSAGE_TONE] = 1,
+ 	[UI_SET_BRIGHTNESS] = 100, [UI_SET_BACKLIGHT_S] = 30, [UI_SET_HINTS] = 1,
+ 	[UI_SET_REPLY_S] = 10, [UI_SET_TOT_S] = 180, [UI_SET_SQUELCH] = 5, [UI_SET_MIC_GAIN] = 5, [UI_SET_ALIAS_SHOW] = 1,
+ 	[UI_SET_PTT_LOCKED] = 1, [UI_SET_LOW_BATTERY] = 15, [UI_SET_LONG_PRESS_MS] = 600, [UI_SET_REPEAT_MS] = 120,
+--- a/core/ui/ui_menus.c
++++ b/core/ui/ui_menus.c
+@@ -5158,6 +5158,7 @@
+ 	TOGGLE(TRN("Key tones"), "beep", UI_SET_KEY_TONES),
+ 	NUMBER(TRN("Tone volume"), NULL, UI_SET_TONE_VOLUME, 0, 10, 1, NULL),
+ 	TOGGLE(TRN("Talk permit tone"), NULL, UI_SET_TALK_PERMIT),
++	TOGGLE(TRN("DMR call end tone"), NULL, UI_SET_CALL_END_TONE),
+ 	TOGGLE(TRN("Voice prompts"), "speech", UI_SET_VOICE_PROMPTS),
+ 	TOGGLE(TRN("Message tone"), NULL, UI_SET_MESSAGE_TONE),
+ #if CONFIG_VIBRATE
+@@ -5462,6 +5463,8 @@
+ 	switch (s->id) {
+ 	case UI_SET_VOICE_PROMPTS:
+ 		return TR("Voice prompts: not in this build");
++	case UI_SET_CALL_END_TONE:
++		return CONFIG_DMR && CONFIG_BEEP ? NULL : TR("DMR call end tone: not in this build");
+ 	case UI_SET_TALK_PERMIT:
+ 		return CONFIG_DMR && CONFIG_BEEP ? NULL : TR("Talk permit tone: not in this build");
+ 	case UI_SET_MESSAGE_TONE:
+--- a/core/ui/lang/es.po
++++ b/core/ui/lang/es.po
+@@ -2713,6 +2713,10 @@
+ msgstr "Tono de permiso"
+ 
+ #: core/ui/ui_menus.c
++msgid "DMR call end tone"
++msgstr "Tono de fin DMR"
++
++#: core/ui/ui_menus.c
+ msgid "Voice prompts"
+ msgstr "Avisos de voz"
+ 
+@@ -2963,6 +2967,10 @@
+ #: core/ui/ui_menus.c
+ msgid "0-9 open  Back"
+ msgstr "0-9 abrir  Atrás"
++
++#: core/ui/ui_menus.c
++msgid "DMR call end tone: not in this build"
++msgstr "Tono de fin DMR: no incluido en esta compilación"
+ 
+ #: core/ui/ui_menus.c
+ msgid "Talk permit tone: not in this build"
+--- a/core/ui/lang/it.po
++++ b/core/ui/lang/it.po
+@@ -2713,6 +2713,10 @@
+ msgstr "Tono via libera"
+ 
+ #: core/ui/ui_menus.c
++msgid "DMR call end tone"
++msgstr "Tono fine chiamata DMR"
++
++#: core/ui/ui_menus.c
+ msgid "Voice prompts"
+ msgstr "Voce guida"
+ 
+@@ -2963,6 +2967,10 @@
+ #: core/ui/ui_menus.c
+ msgid "0-9 open  Back"
+ msgstr "0-9 apri  Indietro"
++
++#: core/ui/ui_menus.c
++msgid "DMR call end tone: not in this build"
++msgstr "Tono fine chiamata DMR: non presente in questa build"
+ 
+ #: core/ui/ui_menus.c
+ msgid "Talk permit tone: not in this build"
+--- a/tests/host/radioCoreTest.c
++++ b/tests/host/radioCoreTest.c
+@@ -3,6 +3,7 @@
+ // The radio core's state machine (core/radio/radio_sm.c) against a fake board and a fake codeplug
+ #include "input/keyassign.h"
+ #include <stdio.h>
++#include "radio/beep.h"
+ #include <string.h>
+ #include "board.h"
+ #include "radio/radio_sm.h"
+@@ -1166,6 +1167,22 @@
+ 	CHECK(sm.view.ch.mode == RADIO_MODE_FM && !sim.started && !d->active && aud.stops > 0 && !aud.started);
+ 	req(RREQ_CH_STEP, -1);
+ 	CHECK(sim.started && d->active);
++}
++
++static void test_dmr_call_end_tone(void)
++{
++    for (unsigned enabled = 0; enabled < 2; enabled++) {
++        dmr_start(false);
++        sm.set.call_end_tone = enabled != 0;
++        sm.set.beep_level = 50;
++        hear_call(true, 201, 3101234, 2, 1, false);
++        CHECK(sm.view.dmr.state == RDMR_RX);
++        beep_reset_stats();
++        uint8_t lc[9]; mk_lc(lc, true, 201, 3101234);
++        burst_lc(lc, 2, true); run(100);
++        beep_stats_t tones; beep_get_stats(&tones);
++        CHECK(sm.view.dmr.state == RDMR_IDLE && tones.played == enabled);
++    }
+ }
+ 
+ static void test_dmr_tx(void)
+@@ -3322,6 +3339,13 @@
+ 	ui_svc_dtmf_block(false);
+ 	CHECK(!dtmf_blocked);
+ 	// Talk permit tone: the radio core's, saved with its settings
++	CHECK(ui_svc_setting_get(UI_SET_CALL_END_TONE) == 1);
++	ui_svc_apply(UI_SET_CALL_END_TONE, 0); run(20);
++	CHECK(!sm.set.call_end_tone && ui_svc_setting_get(UI_SET_CALL_END_TONE) == 0);
++	settings_t end_settings; settings_read(&end_settings);
++	CHECK((end_settings.rs_flags & SETTINGS_RS_NO_CALL_END) != 0);
++	ui_svc_apply(UI_SET_CALL_END_TONE, 1); run(20);
++	CHECK(sm.set.call_end_tone && ui_svc_setting_get(UI_SET_CALL_END_TONE) == 1);
+ 	CHECK(ui_svc_setting_get(UI_SET_TALK_PERMIT) == 1);
+ 	ui_svc_apply(UI_SET_TALK_PERMIT, 0);
+ 	run(20);
+@@ -5233,6 +5257,7 @@
+ 	test_dmr_rx();
+ 	test_dmr_rssi_hold();
+ 	test_fm_rssi_raw();
++	test_dmr_call_end_tone();
+ 	test_dmr_tx();
+ 	test_dmr_stalled();
+ 	test_dmr_list_talk_target();

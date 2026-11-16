@@ -1,0 +1,11 @@
+--- a/tests/host/dmrCallTest.c
++++ b/tests/host/dmrCallTest.c
+@@ -1824,7 +1824,7 @@
+ {
+ 	dmr_call_config_t c = base_cfg();
+ 	uint8_t lc[9];
+-	static const uint8_t info[10] = { 0x21, 0x05, 0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x5B, 0x00 };
++	static const uint8_t info[10] = { 0x21, 0x10, 0x05, 0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x5B };
+ 	unsigned frame = 1;
+ 	dmr_call_stats_t st;
+ 

@@ -1,0 +1,1027 @@
+--- a/core/codeplug/codeplug.h
++++ b/core/codeplug/codeplug.h
+@@ -61,6 +61,7 @@
+ 	bool hear_all;		// RX plays every talkgroup (else ours and all call)
+ 	// P25 trunking (RADIO_MODE_P25_TRUNK; rx_hz is a control channel, tx_hz its inbound): the system the channel
+ 	// belongs to, from the record's SFR, color code and APRS bytes. 0 when unset
++	bool trunk_tx;		// explicit opt-in; old records remain passive
+ 	uint32_t wacn;		// 20 bits
+ 	uint16_t sysid;		// 12 bits
+ } channel_t;
+--- a/core/codeplug/codeplug.c
++++ b/core/codeplug/codeplug.c
+@@ -770,14 +770,15 @@
+ 	if (!freq(&r[CH_RX], &out->rx_hz) || !freq(&r[CH_TX], &out->tx_hz)) {
+ 		return false;
+ 	}
+-	out->aes_slot = (r[0x32] & 31) == 0 ? 0 : (r[0x32] & 31) >= 17 && (r[0x32] & 31) <= 20 ? (r[0x32] & 31) - 16 : 255;
++	out->trunk_tx = r[CH_MODE] == RADIO_MODE_P25_TRUNK && (r[0x32] & 31) == 26;
++	out->aes_slot = out->trunk_tx ? 0 : (r[0x32] & 31) == 0 ? 0 : (r[0x32] & 31) >= 17 && (r[0x32] & 31) <= 20 ? (r[0x32] & 31) - 16 : 255;
+ 	copy_name(out->name, &r[CH_NAME], CODEPLUG_NAME_LEN);
+ 	out->mode = r[CH_MODE] < RADIO_MODE_COUNT ? r[CH_MODE] : RADIO_MODE_FM;
+ 	out->bw = (r[CH_FLAG4] & FLAG4_25K) ? RADIO_BW_25K : RADIO_BW_12K5;
+ 	out->rx_tone = tone(le16(&r[CH_RX_TONE]));
+ 	out->tx_tone = tone(le16(&r[CH_TX_TONE]));
+ 	out->power = r[CH_POWER] == 0 ? CODEPLUG_POWER_DEFAULT : power_from_byte(r[CH_POWER]);
+-	out->rx_only = (r[CH_FLAG4] & FLAG4_RX_ONLY) != 0;
++	out->rx_only = (r[CH_FLAG4] & FLAG4_RX_ONLY) != 0 || (out->mode == RADIO_MODE_P25_TRUNK && !out->trunk_tx);
+ 	out->color_code = r[CH_CC] & 0x0Fu;
+ 	out->timeslot = (r[CH_FLAG2] & FLAG2_TS2) ? 2 : 1;
+ 	out->contact = le16(&r[CH_CONTACT]);
+@@ -824,7 +825,7 @@
+ 	put_name(&r[CH_NAME], ch->name, CODEPLUG_NAME_LEN);
+ 	put_freq(&r[CH_RX], ch->rx_hz);
+ 	put_freq(&r[CH_TX], ch->tx_hz);
+-	r[0x32] = (uint8_t)((r[0x32] & 0xE0) | (ch->aes_slot ? ch->aes_slot <= 4 ? 16 + ch->aes_slot : 31 : 0));
++	r[0x32] = (uint8_t)((r[0x32] & 0xE0) | (ch->aes_slot ? ch->aes_slot <= 4 ? 16 + ch->aes_slot : 31 : ch->mode == RADIO_MODE_P25_TRUNK && ch->trunk_tx ? 26 : 0));
+ 	r[CH_MODE] = (uint8_t)(ch->mode < RADIO_MODE_COUNT ? ch->mode : RADIO_MODE_FM);
+ 	r[CH_POWER] = ch->power == CODEPLUG_POWER_DEFAULT ? 0 : power_to_byte(ch->power);
+ 	put16(&r[CH_RX_TONE], tone_word(&ch->rx_tone));
+--- a/core/settings/settings.h
++++ b/core/settings/settings.h
+@@ -223,8 +223,10 @@
+ 	// Zone share: the zones imported last, so the same zone sent again updates its import instead of adding a copy
+ 	// (docs/spec/zone-share.md 5.4); key 0 = unused, the oldest replaced first
+ 	settings_zs_import_t zs_import[SETTINGS_ZS_IMPORTS];
+-	uint32_t aes_vfo_slots;	// low byte VFO A, next byte VFO B; same fail-closed channel selector
++	uint32_t vfo_digital;	// low byte VFO A, next byte VFO B; same fail-closed channel selector
+ 	uint32_t aes_next_sf;	// monotonic voice encryption reservation; outside the CPS image
++	uint32_t vfo_trunk_system[2];	// WACN in bits 12-31, System ID in bits 0-11
++	uint32_t vfo_unit_id[2];
+ } settings_t;
+ 
+ // Pages: settings_t is stored as records of SETTINGS_PAGE_BYTES each (settings-store.md 2.1). Only the pages its size
+--- a/core/settings/settings.c
++++ b/core/settings/settings.c
+@@ -28,7 +28,7 @@
+ _Static_assert(sizeof(settings_t) % 4 == 0, "settings_t has tail padding");
+ _Static_assert(offsetof(settings_t, dual_b) == SETTINGS_PAGE_BYTES, "page 1 starts at its first field");
+ _Static_assert(offsetof(settings_t, ref_trim_ppb) % 2 == 0, "ref_trim_ppb is aligned");
+-_Static_assert(sizeof(settings_t) == 400, "settings_t changed size: update docs/spec/settings-store.md 3 and this");
++_Static_assert(sizeof(settings_t) == 416, "settings_t changed size: update docs/spec/settings-store.md 3 and this");
+ 
+ static settings_t live;			// under the quick lock
+ static settings_t saved;		// what the newest record holds (or the defaults)
+--- a/core/radio/radio.h
++++ b/core/radio/radio.h
+@@ -10,12 +10,12 @@
+ #include "codeplug/codeplug.h"
+ #include "config.h"
+ 
+-// Conventional modes available to a VFO; trunking still needs a programmed channel.
++// Modes available to a VFO; trunking defaults to passive receive.
+ static inline bool radio_vfo_mode_built(int mode)
+ {
+ 	return (mode == RADIO_MODE_FM && CONFIG_VFO_FM) || (mode == RADIO_MODE_DMR && CONFIG_VFO_DMR) ||
+ 		((CONFIG_VFO_FM || CONFIG_VFO_DMR) && ((mode == RADIO_MODE_P25 && CONFIG_P25 && CONFIG_P25_NATIVE) ||
+-		(mode == RADIO_MODE_NXDN && CONFIG_NXDN)));
++		(mode == RADIO_MODE_NXDN && CONFIG_NXDN) || (mode == RADIO_MODE_P25_TRUNK && CONFIG_P25_TRUNK)));
+ }
+ 
+ typedef enum {
+--- a/core/radio/radio_sm.c
++++ b/core/radio/radio_sm.c
+@@ -733,6 +733,9 @@
+ 	v->nac_tx = c->nac_tx;
+ 	v->talkgroup = c->talkgroup;
+ 	v->aes_slot = c->aes_slot;
++	v->wacn = c->wacn; v->sysid = c->sysid; v->trunk_tx = c->trunk_tx;
++	v->dmr_id = c->dmr_id;
++	if (c->mode == RADIO_MODE_P25_TRUNK) v->rx_only = c->rx_only;
+ 	if (c->mode == RADIO_MODE_DMR) {
+ #if CONFIG_VFO_DMR
+ 		uint8_t over = sm->one_shot ? 0 : sm->manual ? sm->manual_ts : sm->talk_ts;
+@@ -861,7 +864,7 @@
+ 	radio_dv_cfg_t c = {
+ 		.mode = ch->mode, .rx_hz = ch->rx_hz, .tx_hz = ch->tx_hz, .power = sm->view.power,
+ 		.nac_rx = ch->nac_rx, .nac_tx = ch->nac_tx, .talkgroup = ch->talkgroup, .unit_id = dv_unit_id(ch),
+-		.hear_all = ch->hear_all, .wacn = ch->wacn, .sysid = ch->sysid, .aes_slot = ch->aes_slot,
++		.hear_all = ch->hear_all, .wacn = ch->wacn, .sysid = ch->sysid, .aes_slot = ch->aes_slot, .trunk_tx = ch->trunk_tx, .rx_only = ch->rx_only,
+ 	};
+ 	if (sm->hear_all_latch) {
+ 		// Digital monitor (the monitor key's press, as on DMR): every group, and on a conventional channel every NAC
+@@ -950,7 +953,7 @@
+ 		if (!sm->dv_running) {
+ 			return TXDENY_NO_DMR;	// the digital session is not up (starting or recovering): the modem
+ 		}
+-		if (ch->mode == RADIO_MODE_P25_TRUNK && !CONFIG_P25_TRUNK_TX) {
++		if (ch->mode == RADIO_MODE_P25_TRUNK && (!CONFIG_P25_TRUNK_TX || !ch->trunk_tx)) {
+ 			return TXDENY_MODE;		// trunked transmit is a separate switch, off by default (receive only)
+ 		}
+ 		if (dv_unit_id(ch) == 0 || ch->talkgroup == 0) {
+@@ -4576,11 +4579,16 @@
+ 	if (v.rx_hz == 0 || !board_in_band(v.rx_hz, false)) {
+ 		return;
+ 	}
+-	sm->vfo_ch.aes_slot = (uint8_t)(st->aes_vfo_slots >> (idx * 8));
++	sm->vfo_ch.aes_slot = (uint8_t)(st->vfo_digital >> (idx * 8));
++	sm->vfo_ch.wacn = st->vfo_trunk_system[idx] >> 12;
++	sm->vfo_ch.sysid = st->vfo_trunk_system[idx] & 0xFFF;
++	sm->vfo_ch.trunk_tx = (st->vfo_digital & (1u << (16 + idx))) != 0;
++	sm->vfo_ch.dmr_id = st->vfo_unit_id[idx];
+ 	sm->vfo_ch.rx_hz = v.rx_hz;
+ 	sm->vfo_ch.tx_hz = v.tx_hz != 0 ? v.tx_hz : v.rx_hz;
+ 	// The saved mode if this build has that VFO; an older record holds FM
+ 	sm->vfo_ch.mode = radio_vfo_mode_built(v.mode) ? v.mode : VFO_MODE_DEFAULT;
++	if (sm->vfo_ch.mode == RADIO_MODE_P25_TRUNK) sm->vfo_ch.rx_only = !sm->vfo_ch.trunk_tx;
+ 	if (codeplug_mode_digital_voice(sm->vfo_ch.mode)) {
+ 		uint16_t max = sm->vfo_ch.mode == RADIO_MODE_NXDN ? 63 : 0xFFF;
+ 		sm->vfo_ch.nac_tx = v.tx_tone <= max && (max == 63 || v.tx_tone < CODEPLUG_NAC_ANY) ? v.tx_tone : (max == 63 ? 1 : CODEPLUG_NAC_DEFAULT);
+@@ -4602,7 +4610,12 @@
+ {
+ 	const channel_t *v = &sm->vfo_ch;
+ 	uint8_t power = v->power == CODEPLUG_POWER_DEFAULT ? SETTINGS_UNSET8 : v->power;
+-	if (sm->vfo_seeded) st->aes_vfo_slots = (st->aes_vfo_slots & ~(255u << (idx * 8))) | ((uint32_t)v->aes_slot << (idx * 8));
++	if (sm->vfo_seeded) {
++		st->vfo_digital = (st->vfo_digital & ~((255u << (idx * 8)) | (1u << (16 + idx)))) |
++			((uint32_t)v->aes_slot << (idx * 8)) | (v->trunk_tx && !v->rx_only ? 1u << (16 + idx) : 0);
++		st->vfo_trunk_system[idx] = (v->wacn << 12) | v->sysid;
++		st->vfo_unit_id[idx] = v->dmr_id;
++	}
+ 	// Digital modes have no analog tones: reuse their saved values for NAC/RAN, without changing the settings record.
+ 	bool dv = codeplug_mode_digital_voice(v->mode);
+ 	subtone_t rx = dv ? (subtone_t){ TONE_NONE, v->nac_rx } : v->rx_tone;
+@@ -5591,15 +5604,20 @@
+ 			break;
+ 		}
+ 		sm->view.ch.mode = (uint8_t)req->arg;
++		sm->view.ch.trunk_tx = false;
++		if (req->arg == RADIO_MODE_P25_TRUNK) sm->view.ch.rx_only = true;
+ 		if (codeplug_mode_digital_voice(sm->view.ch.mode)) {
+ 			sm->view.ch.nac_rx = sm->view.ch.nac_tx = req->arg == RADIO_MODE_NXDN ? 1 : CODEPLUG_NAC_DEFAULT;
+ 			sm->view.ch.talkgroup = 1;
++			if (req->arg == RADIO_MODE_P25_TRUNK) sm->view.ch.nac_rx = CODEPLUG_NAC_ANY;
+ 			sm->view.ch.bw = RADIO_BW_12K5;
+ 		}
+ 		if (sm->view.ch.mode == RADIO_MODE_DMR && sm->view.ch.timeslot != 2) {
+ 			sm->view.ch.timeslot = 1;
+ 		}
+ 		if (sm->view.vfo) {
++			sm->vfo_ch.trunk_tx = false;
++			sm->vfo_ch.rx_only = sm->view.ch.rx_only;
+ 			sm->vfo_ch.mode = sm->view.ch.mode;	// the VFO's own mode, not a temporary change
+ 			sm->vfo_ch.timeslot = sm->view.ch.timeslot;
+ 			sm->vfo_ch.nac_rx = sm->view.ch.nac_rx;
+--- a/core/cps/cps_openfw.c
++++ b/core/cps/cps_openfw.c
+@@ -117,7 +117,15 @@
+ 	ch->rx_hz = st.vfo_rx_hz;
+ 	ch->tx_hz = st.vfo_tx_hz != 0 ? st.vfo_tx_hz : st.vfo_rx_hz;
+ 	ch->mode = settings_vfo_mode(&st);
+-	ch->aes_slot = (uint8_t)st.aes_vfo_slots;
++	ch->aes_slot = (uint8_t)st.vfo_digital;
++	ch->wacn = st.vfo_trunk_system[0] >> 12; ch->sysid = st.vfo_trunk_system[0] & 0xFFF;
++	ch->trunk_tx = (st.vfo_digital & (1u << 16)) != 0;
++	ch->rx_only = ch->mode == RADIO_MODE_P25_TRUNK && !ch->trunk_tx;
++	ch->dmr_id = st.vfo_unit_id[0];
++	if (codeplug_mode_digital_voice(ch->mode)) {
++		ch->nac_rx = st.vfo_rx_tone; ch->nac_tx = st.vfo_tx_tone;
++		ch->talkgroup = (uint16_t)settings_vfo_talk_id(&st);
++	}
+ 	ch->bw = settings_vfo_bw(&st);
+ 	ch->rx_tone = (subtone_t){ st.vfo_rx_tone_type, st.vfo_rx_tone };
+ 	ch->tx_tone = (subtone_t){ st.vfo_tx_tone_type, st.vfo_tx_tone };
+@@ -174,15 +182,23 @@
+ 		return;		// unchanged (written back as read), or not a valid record
+ 	}
+ 	settings_t *st = settings_begin();
+-	st->aes_vfo_slots = (st->aes_vfo_slots & ~255u) | ch.aes_slot;
++	st->vfo_digital = (st->vfo_digital & ~(255u | (1u << 16))) | ch.aes_slot |
++		(ch.trunk_tx && !ch.rx_only ? 1u << 16 : 0);
++	st->vfo_trunk_system[0] = (ch.wacn << 12) | ch.sysid; st->vfo_unit_id[0] = ch.dmr_id;
+ 	st->vfo_rx_hz = ch.rx_hz;
+ 	st->vfo_tx_hz = ch.tx_hz;
+-	settings_set_vfo_mode_bw(st, ch.mode == RADIO_MODE_DMR && CONFIG_VFO_DMR ? RADIO_MODE_DMR :
++	bool digital = (ch.mode == RADIO_MODE_P25 && CONFIG_P25 && CONFIG_P25_NATIVE) ||
++		(ch.mode == RADIO_MODE_NXDN && CONFIG_NXDN) || (ch.mode == RADIO_MODE_P25_TRUNK && CONFIG_P25_TRUNK);
++	settings_set_vfo_mode_bw(st, digital ? ch.mode : ch.mode == RADIO_MODE_DMR && CONFIG_VFO_DMR ? RADIO_MODE_DMR :
+ 				 CONFIG_VFO_FM ? RADIO_MODE_FM : RADIO_MODE_DMR, ch.bw);
+ 	st->vfo_rx_tone_type = ch.rx_tone.type;
+ 	st->vfo_rx_tone = ch.rx_tone.value;
+ 	st->vfo_tx_tone_type = ch.tx_tone.type;
+ 	st->vfo_tx_tone = ch.tx_tone.value;
++	if (digital) {
++		st->vfo_rx_tone = ch.nac_rx; st->vfo_tx_tone = ch.nac_tx;
++		settings_set_vfo_talk(st, ch.talkgroup, false);
++	}
+ 	st->vfo_power = ch.power == CODEPLUG_POWER_DEFAULT ? SETTINGS_UNSET8 : ch.power;
+ 	settings_set_vfo_cc_ts(st, ch.color_code, ch.timeslot);
+ 	settings_end(now_ms);
+--- a/core/ui/ui_app.c
++++ b/core/ui/ui_app.c
+@@ -1340,15 +1340,15 @@
+ 		break;
+ 	case QT_MODE: {
+ 		uint8_t mode = view->ch.mode;
+-		for (int i = 0; i < 4; i++) {
+-			mode = (uint8_t)((mode + 1) % 4);
++		for (int i = 0; i < RADIO_MODE_COUNT; i++) {
++			mode = (uint8_t)((mode + 1) % RADIO_MODE_COUNT);
+ 			if (radio_vfo_mode_built(mode)) break;
+ 		}
+ 		if (mode != RADIO_MODE_FM && (view->am || view->bcast)) {
+ 			ui_toast(view->am ? TR("AM only in the air band") : TR("FM only in the broadcast band"));
+ 			break;
+ 		}
+-		const char *const names[] = { "VFO: FM", "VFO: DMR", "VFO: P25", "VFO: NXDN" };
++		const char *const names[] = { "VFO: FM", "VFO: DMR", "VFO: P25", "VFO: NXDN", "VFO: P25 Trunk" };
+ 		if (ui_svc_mode(mode))
+ 			ui_toast(names[mode]);
+ 		else
+--- a/core/ui/ui_menus.c
++++ b/core/ui/ui_menus.c
+@@ -1738,7 +1738,7 @@
+ // Without CONFIG_CHANNEL_EDIT the rows are read only and OK goes to the channel
+ 
+ enum { CE_NAME, CE_NUMBER, CE_MODE, CE_RX, CE_TX, CE_POWER, CE_RX_ONLY, CE_BW, CE_RX_TONE, CE_TX_TONE, CE_VOX,
+-       CE_NAC, CE_TG, CE_CC, CE_TS, CE_CONTACT, CE_LIST, CE_ID, CE_DMO, CE_BEEP, CE_ALIAS1, CE_ALIAS2, CE_TOT, CE_SCAN, CE_ECO,
++       CE_NAC, CE_TG, CE_WACN, CE_SYSID, CE_TRUNK_TX, CE_CC, CE_TS, CE_CONTACT, CE_LIST, CE_ID, CE_DMO, CE_BEEP, CE_ALIAS1, CE_ALIAS2, CE_TOT, CE_SCAN, CE_ECO,
+        CE_ZONES, CE_GO, CE_SHARE, CE_SAVE, CE_SAVE_NEW, CE_COUNT, CE_NONE = 0xFF };
+ 
+ static channel_t ced_ch;		// what the screen shows (the working copy when editing)
+@@ -1776,6 +1776,7 @@
+ 	[CE_RX_TONE] = CE_FIELD(rx_tone), [CE_TX_TONE] = CE_FIELD(tx_tone), [CE_VOX] = CE_FIELD(vox),
+ 	[CE_NAC] = { offsetof(channel_t, nac_rx), 2 * sizeof(uint16_t), 0 },	// nac_rx and nac_tx, side by side
+ 	[CE_TG] = CE_FIELD(talkgroup),
++	[CE_WACN] = CE_FIELD(wacn), [CE_SYSID] = CE_FIELD(sysid), [CE_TRUNK_TX] = CE_FIELD(trunk_tx),
+ 	[CE_CC] = CE_FIELD(color_code), [CE_TS] = CE_FIELD(timeslot), [CE_CONTACT] = CE_FIELD(contact),
+ 	[CE_LIST] = CE_FIELD(listen_list), [CE_ID] = CE_FIELD(dmr_id), [CE_DMO] = CE_FIELD(dmo),
+ 	[CE_BEEP] = CE_FIELD(no_beep), [CE_ALIAS1] = { offsetof(channel_t, alias_tx), 1, CODEPLUG_ALIAS_TS1_TEXT },
+@@ -1853,6 +1854,8 @@
+ 		bool fm_only = r == CE_BW || r == CE_RX_TONE || r == CE_TX_TONE || r == CE_VOX;
+ 		bool dmr_only = r >= CE_CC && r <= CE_ALIAS2;
+ 		bool dv_only = r == CE_NAC || r == CE_TG;
++		if ((r == CE_WACN || r == CE_SYSID || r == CE_TRUNK_TX) && ced_ch.mode != RADIO_MODE_P25_TRUNK) continue;
++		if (r == CE_RX_ONLY && ced_ch.mode == RADIO_MODE_P25_TRUNK) continue;
+ 		if ((fm_only && (dmr || dv)) || (dmr_only && !dmr && !(dv && r == CE_ID)) || (dv_only && !dv) ||
+ 		    (r == CE_MODE && !CONFIG_DMR))
+ 			continue;
+@@ -1993,7 +1996,7 @@
+ static void chinfo_item(uint16_t i, ui_item_t *it)
+ {
+ 	static const char *const labels[CE_COUNT] = { TRN("Name"), TRN("Number"), TRN("Mode"), "RX", "TX", TRN("Power"),
+-		TRN("RX only"), TRN("Bandwidth"), TRN("RX CTCSS/DCS"), TRN("TX CTCSS/DCS"), "VOX", "NAC", TRN("Talkgroup"),
++		TRN("RX only"), TRN("Bandwidth"), TRN("RX CTCSS/DCS"), TRN("TX CTCSS/DCS"), "VOX", "NAC", TRN("Talkgroup"), "WACN", TRN("System ID"), TRN("Trunk TX"),
+ 		TRN("Color code"),
+ 		TRN("Timeslot"), TRN("TX contact"), TRN("RX group list"), TRN("Own ID"), TRN("Direct mode"),
+ 		TRN("Talk permit beeps"), TRN("Talker alias TS1"), TRN("Talker alias TS2"), TRN("TX time-out"), TRN("Scan"),
+@@ -2019,10 +2022,10 @@
+ 	sbuf_t b;
+ 	sb_init(&b, it->value, sizeof it->value);
+ #if CONFIG_CHANNEL_EDIT
+-	if (editing && (r == CE_RX || r == CE_TX || r == CE_ID || r == CE_TG || r == CE_NAC)) {
++	if (editing && (r == CE_RX || r == CE_TX || r == CE_ID || r == CE_TG || r == CE_NAC || r == CE_WACN || r == CE_SYSID)) {
+ 		// What has been typed so far: "446.07_", "3101_"
+ 		for (uint8_t k = 0; k < ced_len; k++) {
+-			if (r != CE_ID && r != CE_TG && r != CE_NAC && k == UI_ENTRY_MHZ)
++			if (r != CE_ID && r != CE_TG && r != CE_NAC && r != CE_WACN && r != CE_SYSID && k == UI_ENTRY_MHZ)
+ 				sb_chr(&b, '.');
+ 			sb_chr(&b, ced_digits[k]);
+ 		}
+@@ -2064,6 +2067,16 @@
+ 			sb_str(&b, TR(", RX other"));
+ 		break;
+ 	}
++	case CE_WACN:
++	case CE_SYSID: {
++		uint32_t value = r == CE_WACN ? ch->wacn : ch->sysid;
++		for (int shift = r == CE_WACN ? 16 : 8; shift >= 0; shift -= 4)
++			sb_chr(&b, "0123456789ABCDEF"[(value >> shift) & 15]);
++		break;
++	}
++	case CE_TRUNK_TX:
++		sb_str(&b, ch->trunk_tx && !ch->rx_only ? TR("On") : TR("Off"));
++		break;
+ 	case CE_TG:
+ #if CONFIG_CHANNEL_EDIT
+ 		if (editing && ced_len > 0)
+@@ -2297,9 +2310,11 @@
+ 		ced_len = 0;
+ 		ced_tone = tones_step(&ced_tone, dir);
+ 		break;
++	case CE_WACN:
++	case CE_SYSID:
+ 	case CE_NAC: {
+ 		// A P25 NAC's last typed digit steps through 0-F, as the keys have no A-F (a step with none typed types a 0)
+-		if (ced_ch.mode == RADIO_MODE_NXDN)
++		if (ced_edit == CE_NAC && ced_ch.mode == RADIO_MODE_NXDN)
+ 			break;
+ 		if (ced_len == 0) {
+ 			ced_val = 0;
+@@ -2347,9 +2362,11 @@
+ 		ced_digits[ced_len++] = d;
+ 		ced_digits[ced_len] = 0;
+ 		break;
++	case CE_WACN:
++	case CE_SYSID:
+ 	case CE_NAC:		// a P25 channel's NAC: 3 hex digits. An NXDN channel's RAN
+-		if (ced_ch.mode != RADIO_MODE_NXDN) {
+-			if (ced_len >= 3)
++		if (ced_edit != CE_NAC || ced_ch.mode != RADIO_MODE_NXDN) {
++			if (ced_len >= (ced_edit == CE_WACN ? 5 : 3))
+ 				break;
+ 			v = ced_val * 16 + (d - '0');
+ 		} else if (v > 63) {
+@@ -2408,6 +2425,12 @@
+ 		}
+ 		break;
+ 	}
++	case CE_WACN:
++		if (ced_len > 0) c->wacn = (uint32_t)ced_val;
++		break;
++	case CE_SYSID:
++		if (ced_len > 0) c->sysid = (uint16_t)ced_val;
++		break;
+ 	case CE_ID:
+ 		if (ced_len > 0)
+ 			c->dmr_id = (uint32_t)ced_val;	// 0 = the radio's
+@@ -2496,10 +2519,10 @@
+ 		return true;
+ 	}
+ 	if (ev->action == ACT_BACK && ev->gesture == GESTURE_PRESS) {
+-		if ((ced_edit == CE_RX || ced_edit == CE_TX || ced_edit == CE_ID || ced_edit == CE_TG || ced_edit == CE_NAC ||
++		if ((ced_edit == CE_RX || ced_edit == CE_TX || ced_edit == CE_ID || ced_edit == CE_TG || ced_edit == CE_NAC || ced_edit == CE_WACN || ced_edit == CE_SYSID ||
+ 		     ced_edit == CE_RX_TONE || ced_edit == CE_TX_TONE) && ced_len > 0) {
+ 			ced_digits[--ced_len] = 0;	// takes the last digit back
+-			ced_val /= ced_edit == CE_NAC && ced_ch.mode != RADIO_MODE_NXDN ? 16 : 10;
++			ced_val /= (ced_edit == CE_WACN || ced_edit == CE_SYSID || (ced_edit == CE_NAC && ced_ch.mode != RADIO_MODE_NXDN)) ? 16 : 10;
+ 		} else {
+ 			ced_edit = CE_NONE;		// leaves the editor, the row unchanged
+ 		}
+@@ -2541,15 +2564,19 @@
+ 	switch (r) {
+ 	case CE_NAME: ui_text_open(c->name, CODEPLUG_NAME_LEN); break;
+ 	case CE_MODE:
+-		// FM, DMR, then P25 and NXDN where the build has them (trunking comes from the editor or CSV)
++		// Cycle the modes this build has; a newly selected trunk mode is passive.
+ 		if (c->mode == RADIO_MODE_FM)
+ 			c->mode = RADIO_MODE_DMR;
+ 		else if (c->mode == RADIO_MODE_DMR && CONFIG_P25 && CONFIG_P25_NATIVE)
+ 			c->mode = RADIO_MODE_P25;
+ 		else if ((c->mode == RADIO_MODE_DMR || c->mode == RADIO_MODE_P25) && CONFIG_NXDN)
+ 			c->mode = RADIO_MODE_NXDN;
++		else if (c->mode != RADIO_MODE_P25_TRUNK && CONFIG_P25_TRUNK)
++			c->mode = RADIO_MODE_P25_TRUNK;
+ 		else
+ 			c->mode = RADIO_MODE_FM;
++		c->trunk_tx = false;
++		if (c->mode == RADIO_MODE_P25_TRUNK) { c->rx_only = true; c->nac_rx = CODEPLUG_NAC_ANY; }
+ 		if (c->mode == RADIO_MODE_NXDN) {
+ 			if (c->nac_tx > 63)
+ 				c->nac_tx = 1;		// a NAC left from P25: RAN 1
+@@ -2561,7 +2588,7 @@
+ 				c->talkgroup = 1;
+ 			c->bw = RADIO_BW_12K5;
+ 		}
+-		if (c->mode == RADIO_MODE_P25) {
++		if (c->mode == RADIO_MODE_P25 || c->mode == RADIO_MODE_P25_TRUNK) {
+ 			if (c->nac_tx == 0 || c->nac_tx >= CODEPLUG_NAC_ANY)
+ 				c->nac_tx = CODEPLUG_NAC_DEFAULT;
+ 			if (c->nac_rx == 0)
+@@ -2572,6 +2599,8 @@
+ 		}
+ 		ced_build();
+ 		break;
++	case CE_WACN:
++	case CE_SYSID:
+ 	case CE_NAC:		// typed: a P25 NAC in hex, an NXDN RAN (OK alone switches RX any)
+ 	case CE_TG:
+ 	case CE_RX:
+@@ -2585,6 +2614,13 @@
+ 	case CE_POWER:
+ 		ced_edit = r;
+ 		ced_val = c->power < board.power_count ? c->power : board.power_count;
++		break;
++	case CE_TRUNK_TX:
++		if (!c->trunk_tx && (!c->wacn || !c->sysid || !(c->dmr_id ? c->dmr_id : codeplug_dmr_id()) || c->aes_slot)) {
++			ui_toast(TR("Set system and unit IDs; AES must be off")); break;
++		}
++		if (!CONFIG_P25_TRUNK_TX) { ui_toast(TR("Trunk TX: not in this build")); break; }
++		c->trunk_tx = !c->trunk_tx; c->rx_only = !c->trunk_tx;
+ 		break;
+ 	case CE_RX_ONLY: c->rx_only = !c->rx_only; break;
+ 	case CE_BW: c->bw = c->bw == RADIO_BW_25K ? RADIO_BW_12K5 : RADIO_BW_25K; break;
+--- a/core/ui/ui_screens.c
++++ b/core/ui/ui_screens.c
+@@ -533,7 +533,7 @@
+ #if CONFIG_DUAL_WATCH
+ 	if (s->dual.on)
+ 		mw = s->dual.pane[s->dual.sel].mode == RADIO_MODE_DMR ? "DMR" : s->dual.pane[s->dual.sel].mode == RADIO_MODE_P25 ? "P25" :
+-			s->dual.pane[s->dual.sel].mode == RADIO_MODE_NXDN ? "NXDN" : "FM";
++			s->dual.pane[s->dual.sel].mode == RADIO_MODE_NXDN ? "NXDN" : s->dual.pane[s->dual.sel].mode == RADIO_MODE_P25_TRUNK ? "P25 T" : "FM";
+ #endif
+ 	int lx = gfx_text(f, x, ty, mw, sfg);
+ #if CONFIG_DUAL_WATCH
+--- a/core/ui/lang/es.po
++++ b/core/ui/lang/es.po
+@@ -1601,6 +1601,14 @@
+ msgstr "Grupo"
+ 
+ #: core/ui/ui_menus.c
++msgid "System ID"
++msgstr "ID de sistema"
++
++#: core/ui/ui_menus.c
++msgid "Trunk TX"
++msgstr "TX troncal"
++
++#: core/ui/ui_menus.c
+ msgid "Color code"
+ msgstr "Código de color"
+ 
+@@ -1757,6 +1765,14 @@
+ msgstr "Guarda: mant OK"
+ 
+ #: core/ui/ui_menus.c
++msgid "Set system and unit IDs; AES must be off"
++msgstr "Fija los IDs de sistema y unidad; desactiva AES"
++
++#: core/ui/ui_menus.c
++msgid "Trunk TX: not in this build"
++msgstr "TX troncal: no incluida en esta compilación"
++
++#: core/ui/ui_menus.c
+ msgid "Tones: not in this build"
+ msgstr "Tonos: no disponible"
+ 
+--- a/core/ui/lang/it.po
++++ b/core/ui/lang/it.po
+@@ -1601,6 +1601,14 @@
+ msgstr "Gruppo"
+ 
+ #: core/ui/ui_menus.c
++msgid "System ID"
++msgstr "ID sistema"
++
++#: core/ui/ui_menus.c
++msgid "Trunk TX"
++msgstr "TX trunking"
++
++#: core/ui/ui_menus.c
+ msgid "Color code"
+ msgstr "Color code"
+ 
+@@ -1757,6 +1765,14 @@
+ msgstr "Salva prima: tieni OK"
+ 
+ #: core/ui/ui_menus.c
++msgid "Set system and unit IDs; AES must be off"
++msgstr "Imposta gli ID sistema e unità; disattiva AES"
++
++#: core/ui/ui_menus.c
++msgid "Trunk TX: not in this build"
++msgstr "TX trunking: non presente in questa build"
++
++#: core/ui/ui_menus.c
+ msgid "Tones: not in this build"
+ msgstr "Toni: non in questa build"
+ 
+--- a/site/static/js/codeplug/model.js
++++ b/site/static/js/codeplug/model.js
+@@ -125,7 +125,7 @@
+ 	"name", "rxHz", "txHz", "mode", "power", "tot", "rxTone", "txTone", "bw", "rxOnly", "allSkip", "zoneSkip", "vox",
+ 	"squelch", "colorCode", "timeslot", "contact", "rxList", "aprs", "dmrId", "noBeep", "noEco", "dmo", "roam",
+ 	"aliasTs1", "aliasTs2", "useLocation", "lat", "lon", "sfr", "sfrA", "sfrB",
+-	"aesSlot", "nacRx", "nacTx", "talkgroup", "hearAll", "wacn", "sysid",	// P25 / NXDN / trunking (records.js decodeDigital)
++	"trunkTx", "aesSlot", "nacRx", "nacTx", "talkgroup", "hearAll", "wacn", "sysid",	// P25 / NXDN / trunking (records.js decodeDigital)
+ ];
+ 
+ function flatChannel(c) {
+@@ -241,7 +241,7 @@
+ 		txTone: "", bw: 12.5, rxOnly: false, allSkip: false, zoneSkip: false, vox: false, squelch: 0, colorCode: 1,
+ 		timeslot: 1, contact: null, rxList: null, aprs: null, dmrId: 0, noBeep: false, noEco: false, dmo: false,
+ 		roam: false, aliasTs1: 0, aliasTs2: 0, useLocation: false, lat: 0, lon: 0, sfr: false, sfrA: 0, sfrB: 0,
+-		aesSlot: 0, nacRx: 0x293, nacTx: 0x293, talkgroup: 0, hearAll: false, wacn: 0, sysid: 0,
++		trunkTx: false, aesSlot: 0, nacRx: 0x293, nacTx: 0x293, talkgroup: 0, hearAll: false, wacn: 0, sysid: 0,
+ 		...fields,
+ 	};
+ }
+@@ -307,6 +307,8 @@
+ 			const max = c.mode === "nxdn" ? 65519 : 65535;
+ 			if (!Number.isInteger(c.talkgroup) || c.talkgroup < 1 || c.talkgroup > max) err("channels", c, "talkgroup", "range", { min: 1, max });
+ 		}
++		if (c.trunkTx && (c.mode !== "p25trunk" || c.rxOnly || !c.wacn || !c.sysid || !(c.dmrId || g.dmrId) || c.aesSlot))
++			err("channels", c, "trunkTx", "trunk_tx");
+ 		if (c.aesSlot && (!["dmr", "p25"].includes(c.mode) || c.aesSlot > 4 ||
+ 			!g.aesKeys?.[c.aesSlot - 1]?.key || (c.mode !== "p25" && g.aesKeys[c.aesSlot - 1].kid > 255)))
+ 			err("channels", c, "aesSlot", "aes_slot");
+--- a/site/static/js/codeplug/records.js
++++ b/site/static/js/codeplug/records.js
+@@ -101,7 +101,8 @@
+ 
+ function decodeChannelFields(r, rxHz, txHz, l1, f1, f4, hasLoc, mode) {
+ 	return {
+-		aesSlot: (r[0x32] & 31) === 0 ? 0 : (r[0x32] & 31) >= 17 && (r[0x32] & 31) <= 20 ? (r[0x32] & 31) - 16 : 255,
++		trunkTx: mode === "p25trunk" && (r[0x32] & 31) === 26,
++		aesSlot: mode === "p25trunk" && (r[0x32] & 31) === 26 ? 0 : (r[0x32] & 31) === 0 ? 0 : (r[0x32] & 31) >= 17 && (r[0x32] & 31) <= 20 ? (r[0x32] & 31) - 16 : 255,
+ 		name: getName(r, 0, 16),
+ 		rxHz, txHz,
+ 		mode,
+@@ -110,7 +111,7 @@
+ 		rxTone: getTone(r, 0x20),
+ 		txTone: getTone(r, 0x22),
+ 		bw: f4 & 0x02 ? 25 : 12.5,
+-		rxOnly: (f4 & 0x04) !== 0,
++		rxOnly: (f4 & 0x04) !== 0 || (mode === "p25trunk" && (r[0x32] & 31) !== 26),
+ 		allSkip: (f4 & 0x10) !== 0,
+ 		zoneSkip: (f4 & 0x20) !== 0,
+ 		vox: (f4 & 0x40) !== 0,
+@@ -139,7 +140,7 @@
+ // Write a channel's fields onto its stored record r (a blank one if r doesn't decode); r is changed in place
+ export function encodeChannel(c, r) {
+ 	if (getFreq(r, 0x10) === null) r.set(blankChannel());
+-	r[0x32] = (r[0x32] & 0xE0) | (c.aesSlot ? c.aesSlot <= 4 ? 16 + c.aesSlot : 31 : 0);
++	r[0x32] = (r[0x32] & 0xE0) | (c.aesSlot ? c.aesSlot <= 4 ? 16 + c.aesSlot : 31 : c.mode === "p25trunk" && c.trunkTx ? 26 : 0);
+ 	putName(r, 0, 16, c.name);
+ 	putFreq(r, 0x10, c.rxHz);
+ 	putFreq(r, 0x14, c.txHz);
+--- a/site/static/js/codeplug/csv.js
++++ b/site/static/js/codeplug/csv.js
+@@ -364,6 +364,7 @@
+ 			keep("Talkgroup", "talkgroup", asInt(1, 65535), (r) => (DIGITAL.has(r.mode) ? r.talkgroup || "" : ""), ["TG", "Group ID", "TGID"]),
+ 			keep("Hear All Groups", "hearAll", asBool, (r) => (DIGITAL.has(r.mode) ? yesNo(r.hearAll) : ""), ["Hear All", "Monitor All"]),
+ 			keep("AES key slot", "aesSlot", asInt(0, 4), (r) => r.aesSlot || 0),
++			keep("Trunk TX", "trunkTx", asBool, (r) => r.mode === "p25trunk" ? yesNo(r.trunkTx) : ""),
+ 			keep("WACN", "wacn", asHex(0xFFFFF, false), (r) => (r.mode === "p25trunk" ? hex(5)(r.wacn) : "")),
+ 			keep("System ID", "sysid", asHex(0xFFF, false), (r) => (r.mode === "p25trunk" ? hex(3)(r.sysid) : ""), ["SysID", "System"]),
+ 		],
+--- a/site/static/js/codeplug/qdmr.js
++++ b/site/static/js/codeplug/qdmr.js
+@@ -371,7 +371,7 @@
+ 
+ // qdmr YAML for the model: {text, notes}
+ export function exportQdmr(m) {
+-	if (m.channels.some((c) => c.aesSlot)) throw new Error("AES channels require a binary or CSV export; YAML cannot preserve key selection.");
++	if (m.channels.some((c) => c.aesSlot || c.trunkTx)) throw new Error("AES/trunk TX channels require a binary or CSV export; YAML cannot preserve these settings.");
+ 	const notes = new Map();
+ 	const note = (code, n = 1) => notes.set(code, (notes.get(code) || 0) + n);
+ 	const g = m.general;
+--- a/site/static/js/codeplug/aes_keys.js
++++ b/site/static/js/codeplug/aes_keys.js
+@@ -54,3 +54,8 @@
+   put(h, 12, crc(h.subarray(0, 12)));
+  }
+ }
++
++export function aesFirmwareAllowed(model, features) {
++ const secure = [...model.channels, ...(model.vfo || [])].some((c) => c?.aesSlot);
++ return !secure || String(features || "").split(",").includes("DV_AES");
++}
+--- a/site/static/js/editor/views.js
++++ b/site/static/js/editor/views.js
+@@ -66,6 +66,7 @@
+ // NXDN gets the decoder's RAN defaults (records.js) for a number that isn't a RAN, and one moved out of NXDN into P25
+ // gets the P25 defaults: never the other family's number
+ const setMode = (r, k, v) => {
++	if (r.mode !== v) { r.trunkTx = false; if (v === "p25trunk") r.rxOnly = true; }
+ 	if (v === "nxdn" && r.mode !== "nxdn") {
+ 		if (!(r.nacRx <= 63)) r.nacRx = 0;
+ 		if (!(r.nacTx <= 63)) r.nacTx = 1;
+@@ -301,7 +302,7 @@
+ 		} },
+ 		txt("tot", "editor.col.tot", tot(t), (v) => (v ? String(v) : t("editor.tot.default"))),
+ 		// a receive-only band makes the channel RX only on save (rxFreq): the box shows it as the RX frequency is typed
+-		{ ...chk("rxOnly", "editor.col.rx_only"), implied: listening },
++		{ ...chk("rxOnly", "editor.col.rx_only"), implied: listening, show: (r) => r.mode !== "p25trunk" },
+ 		fm({ group: t("editor.form.analog") }),
+ 		fm(sel("bw", "editor.col.bw", () => [[12.5, "12.5 kHz"], [25, "25 kHz"]])),
+ 		fm(txt("rxTone", "editor.col.rx_tone", tone(t), (v) => v)),
+@@ -327,6 +328,9 @@
+ 		dv(txt("talkgroup", "editor.col.talkgroup", int(1, 65535)(t), (v) => (v ? String(v) : ""))),
+ 		dv(txt("dmrId", "editor.col.unit_id", dmrId(t), (v) => (v ? String(v) : ""))),
+ 		dv(chk("hearAll", "editor.col.hear_all")),
++		dv({ ...chk("trunkTx", "editor.col.trunk_tx"), show: (r) => r.mode === "p25trunk", set: (r, on) => {
++			if (r.mode === "p25trunk") { r.trunkTx = on; r.rxOnly = !on; }
++		} }),
+ 		dv({ ...txt("wacn", "editor.col.wacn", hexField(0xFFFFF, false, "editor.err.wacn")(t), hexText(5)), show: (r) => r.mode === "p25trunk" }),
+ 		dv({ ...txt("sysid", "editor.col.sysid", hexField(0xFFF, false, "editor.err.sysid")(t), hexText(3)), show: (r) => r.mode === "p25trunk" }),
+ 		{ group: t("editor.form.scan") },
+--- a/site/static/js/editor/app.js
++++ b/site/static/js/editor/app.js
+@@ -359,7 +359,7 @@
+ 	}
+ }
+ 
+-import { validateAesKeys } from "../codeplug/aes_keys.js";
++import { validateAesKeys, aesFirmwareAllowed } from "../codeplug/aes_keys.js";
+ 
+ // --- Radio tab: the radio-wide settings ---
+ 
+@@ -775,7 +775,7 @@
+ 
+ // Features a newer release may add that change what the editor can do with the radio, with what each gains
+ const UPDATE_GAINS = ["CPS_FAST", "IDDB_COMPACT"];
+-let releaseList = null;
++
+ 
+ // After a read: a newer release for this radio (releases.json, updateFor), offered once per tab for each radio, running
+ // build and release
+@@ -783,13 +783,12 @@
+ 	const v = c.transport.probe?.version || {};
+ 	const gitTime = Number(v.git_time) || 0;
+ 	if (!v.release && !gitTime) return;
+-	if (!releaseList) {
+-		try {
+-			releaseList = (await (await fetch(`${ROOT}data/releases.json`)).json()).releases || [];
+-		} catch {
+-			return;
+-		}
+-	}
++	let releaseList;
++	try {
++		const response = await fetch(`${ROOT}data/releases.json?check=${Date.now()}`, { cache: "no-store" });
++		if (!response.ok) return;
++		releaseList = (await response.json()).releases || [];
++	} catch { return; }
+ 	const rel = updateFor(releaseList, c.radio.id, v.release, gitTime);
+ 	if (!rel) return;
+ 	// a release by its name, any other build by its commit and that commit's date
+@@ -826,6 +825,12 @@
+ 	try {
+ 		const c = await connect();
+ 		if (!c) return;
++		if (!S.sim && !aesFirmwareAllowed(S.model, c.transport.probe?.features)) {
++			say(t("editor.aes.firmware"), "bad"); return;
++		}
++		if (!S.sim && S.model.channels.some((c) => c.trunkTx) && !String(c.transport.probe?.features || "").split(",").includes("P25_TRUNK_TX")) {
++			say(t("editor.problem.trunk_tx_firmware"), "bad"); return;
++		}
+ 		stage = "prepare radio";
+ 		if (!await ensureStorage(c)) return;
+ 		stage = "encode codeplug";
+--- a/site/i18n/en.json
++++ b/site/i18n/en.json
+@@ -1881,5 +1881,9 @@
+  "editor.aes.key": "Key (64 hexadecimal digits)",
+  "editor.aes.help": "Four local AES-256 voice keys. P25 key IDs: 1–65535; DMR: 1–255. Binary backups contain these keys: keep them private. Re-provision keys after a settings reset or full-flash restore. DMR receivers need a PI header; late entry without it is muted.",
+  "editor.problem.aes_keys": "Enter unique key IDs and exactly 64 hexadecimal digits per key. Clear the key to remove a slot.",
+- "editor.problem.aes_slot": "Select a provisioned AES key slot supported by this mode."
++ "editor.problem.aes_slot": "Select a provisioned AES key slot supported by this mode.",
++ "editor.aes.firmware": "Update the radio firmware before writing AES channels. This firmware does not report AES support.",
++ "editor.col.trunk_tx": "Trunk TX",
++ "editor.problem.trunk_tx": "Trunk TX requires WACN, System ID, Unit ID, RX-only off and AES off.",
++ "editor.problem.trunk_tx_firmware": "Update the radio firmware before enabling trunk TX."
+ }
+--- a/site/i18n/es.json
++++ b/site/i18n/es.json
+@@ -1881,5 +1881,9 @@
+  "editor.aes.key": "Clave (64 dígitos hexadecimales)",
+  "editor.aes.help": "Cuatro claves locales de voz AES-256. ID P25: 1–65535; DMR: 1–255. Las copias binarias contienen estas claves: guárdalas en privado. Reconfigura las claves tras reiniciar ajustes o restaurar toda la memoria. DMR necesita cabecera PI; sin ella se silencia la entrada tardía.",
+  "editor.problem.aes_keys": "Usa IDs únicos y exactamente 64 dígitos hexadecimales por clave. Borra la clave para quitar una ranura.",
+- "editor.problem.aes_slot": "Selecciona una ranura AES configurada y compatible con este modo."
++ "editor.problem.aes_slot": "Selecciona una ranura AES configurada y compatible con este modo.",
++ "editor.aes.firmware": "Actualiza el firmware de la radio antes de escribir canales AES. Este firmware no indica soporte AES.",
++ "editor.col.trunk_tx": "TX troncal",
++ "editor.problem.trunk_tx": "TX troncal requiere WACN, ID de sistema, ID de unidad, solo recepción desactivado y AES desactivado.",
++ "editor.problem.trunk_tx_firmware": "Actualiza el firmware de la radio antes de activar TX troncal."
+ }
+--- a/site/i18n/it.json
++++ b/site/i18n/it.json
+@@ -1881,5 +1881,9 @@
+  "editor.aes.key": "Chiave (64 cifre esadecimali)",
+  "editor.aes.help": "Quattro chiavi vocali AES-256 locali. ID P25: 1–65535; DMR: 1–255. I backup binari contengono le chiavi: conservali privatamente. Riconfigura le chiavi dopo il ripristino delle impostazioni o della memoria completa. DMR richiede un header PI; senza, l’ingresso tardivo è silenziato.",
+  "editor.problem.aes_keys": "Usa ID univoci e 64 cifre esadecimali per chiave. Cancella la chiave per rimuovere lo slot.",
+- "editor.problem.aes_slot": "Seleziona uno slot AES configurato e compatibile con questa modalità."
++ "editor.problem.aes_slot": "Seleziona uno slot AES configurato e compatibile con questa modalità.",
++ "editor.aes.firmware": "Aggiorna il firmware della radio prima di scrivere canali AES. Questo firmware non indica il supporto AES.",
++ "editor.col.trunk_tx": "TX trunking",
++ "editor.problem.trunk_tx": "TX trunking richiede WACN, ID sistema, ID unità, solo ricezione disattivato e AES disattivato.",
++ "editor.problem.trunk_tx_firmware": "Aggiorna il firmware della radio prima di attivare TX trunking."
+ }
+--- a/site/tests/aes_keys.test.mjs
++++ b/site/tests/aes_keys.test.mjs
+@@ -6,7 +6,7 @@
+ if (!globalThis.crypto) globalThis.crypto = webcrypto;
+ import { empty, newChannel, encode, decode, validate } from "../static/js/codeplug/model.js";
+ import { channelAddr } from "../static/js/codeplug/records.js";
+-import { validateAesKeys } from "../static/js/codeplug/aes_keys.js";
++import { validateAesKeys, aesFirmwareAllowed } from "../static/js/codeplug/aes_keys.js";
+ import { exportQdmr } from "../static/js/codeplug/qdmr.js";
+ import { channelForm } from "../static/js/editor/views.js";
+ const key = "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F";
+@@ -36,3 +36,11 @@
+  assert.ok(validate(decode(img)).some((e)=>e.code==="aes_slot"));
+  img.bytes[0x7C00+20]^=1;assert.equal(decode(img).general.aesKeys[0].key,"");
+ });
++
++test("older firmware cannot be given channels whose AES selector it would ignore", () => {
++ const m = empty(); assert.equal(aesFirmwareAllowed(m,"DMR"),true);
++ m.channels.push(newChannel({mode:"dmr",aesSlot:1}));
++ assert.equal(aesFirmwareAllowed(m,"DMR"),false);
++ assert.equal(aesFirmwareAllowed(m,"DMR,DV_AES"),true);
++ m.channels=[];m.vfo=[newChannel({mode:"p25",aesSlot:1})];assert.equal(aesFirmwareAllowed(m,""),false);
++});
+--- /dev/null
++++ b/site/tests/p25_trunk.test.mjs
+@@ -0,0 +1,32 @@
++// SPDX-License-Identifier: MIT
++// Copyright (c) 2026 The RadioFoundry Authors
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { empty, newChannel, encode, decode, validate } from "../static/js/codeplug/model.js";
++import { channelAddr } from "../static/js/codeplug/records.js";
++import { exportTable, importTable } from "../static/js/codeplug/csv.js";
++import { exportQdmr } from "../static/js/codeplug/qdmr.js";
++import { channelForm } from "../static/js/editor/views.js";
++const channel = () => newChannel({number:1,name:"Site",mode:"p25trunk",rxHz:460000000,txHz:465000000,
++ talkgroup:100,wacn:0xBEE00,sysid:0x3A5,dmrId:1001,trunkTx:true});
++test("trunk TX is explicit, keeps neighboring flag bits and survives image/CSV round trips", () => {
++ const m=empty();m.channels.push(channel());let img=encode(m),a=channelAddr(1)+0x32;
++ assert.equal(img.bytes[a]&31,26);img.bytes[a]|=0xE0;
++ let back=decode(img);assert.equal(back.channels[0].trunkTx,true);assert.equal(back.channels[0].rxOnly,false);
++ assert.equal(back.channels[0].aesSlot,0);assert.equal(encode(back).bytes[a],0xFA);
++ const copy=empty();assert.deepEqual(importTable(copy,exportTable(m,"channels")).problems,[]);
++ assert.equal(copy.channels[0].trunkTx,true);assert.equal(copy.channels[0].wacn,0xBEE00);assert.equal(copy.channels[0].sysid,0x3A5);
++ assert.throws(()=>exportQdmr(m),/trunk/i);
++ img.bytes[a]&=0xE0;back=decode(img);assert.equal(back.channels[0].trunkTx,false);assert.equal(back.channels[0].rxOnly,true);
++ m.channels[0].rxOnly=true;assert.equal(decode(encode(m)).channels[0].rxOnly,true);
++ m.channels[0].aesSlot=1;back=decode(encode(m));assert.equal(back.channels[0].trunkTx,false);assert.equal(back.channels[0].aesSlot,1);
++});
++test("trunk TX validates identity, RX-only, AES and mode; form never transfers TX permission", () => {
++ const m=empty(),c=channel();m.channels.push(c);assert.ok(!validate(m).some(e=>e.code==="trunk_tx"));
++ for (const fields of [{wacn:0},{sysid:0},{dmrId:0},{rxOnly:true},{aesSlot:1},{mode:"dmr"}]) {
++  m.channels[0]={...c,...fields};m.general.dmrId=0;assert.ok(validate(m).some(e=>e.code==="trunk_tx"),JSON.stringify(fields));
++ }
++ const form=channelForm(m,s=>s),mode=form.find(f=>f.key==="mode"),tx=form.find(f=>f.key==="trunkTx");
++ const r=channel();tx.set(r,false);assert.equal(r.rxOnly,true);tx.set(r,true);assert.equal(r.rxOnly,false);
++ mode.set(r,"dmr");assert.equal(r.trunkTx,false);mode.set(r,"p25trunk");assert.equal(r.rxOnly,true);assert.equal(r.trunkTx,false);
++});
+--- a/tests/host/Makefile
++++ b/tests/host/Makefile
+@@ -1125,14 +1125,18 @@
+ # The open-firmware CPS shim against a simulated flash, driven like qdmr's UV380 driver (core/cps)
+ CPS     := $(CORE)/cps/cps_openfw.c $(CORE)/codeplug/codeplug.c $(CORE)/settings/settings.c $(CORE)/storage/storage.c \
+            sim/sim_flash.c
+-TESTS   += cpsTest
++TESTS   += cpsTest cpsTestP25Trunk
+ 
+ cpsTest: cpsTest.c $(CPS) $(wildcard $(CORE)/cps/*.h $(CORE)/codeplug/*.h $(CORE)/settings/*.h $(CORE)/storage/*.h)
+ 	$(CC) $(CFLAGS) -I$(ROOT)/hal -I. -Wshadow -o $@ cpsTest.c $(CPS)
+ 
+ run: run-cps
+-run-cps: cpsTest
++cpsTestP25Trunk: cpsTest.c $(CPS) $(wildcard $(CORE)/cps/*.h $(CORE)/codeplug/*.h $(CORE)/settings/*.h $(CORE)/storage/*.h)
++	$(CC) $(CFLAGS) -I$(ROOT)/hal -I. -Wshadow -DCONFIG_P25=1 -DCONFIG_P25_NATIVE=1 -DCONFIG_P25_TRUNK=1 -o $@ cpsTest.c $(CPS)
++
++run-cps: cpsTest cpsTestP25Trunk
+ 	./cpsTest
++	./cpsTestP25Trunk
+ .PHONY: run-cps
+ 
+ # The fast codeplug protocol (core/cps/cps_fast.c, docs/spec/cps-fast.md): LZ4 both ways, blank blocks, CRC compare,
+@@ -1346,3 +1350,11 @@
+ 	./httpAssetsTestWebctl out/http_webctl
+ 	python3 -I $(ROOT)/tools/gen_http_assets.py --check out/http_webctl $(WEBCTL_ASSETS)
+ .PHONY: run-webctlassets
++
++TESTS += uiFlowTestP25Trunk
++uiFlowTestP25Trunk: uiFlowTest.c $(UIDEPS)
++	$(CC) $(UIFLAGS) -DCONFIG_P25=1 -DCONFIG_P25_NATIVE=1 -DCONFIG_NXDN=1 -DCONFIG_P25_TRUNK=1 -DCONFIG_P25_TRUNK_TX=1 -o $@ uiFlowTest.c $(UIAPP) -lz
++run: run-p25-trunk-ui
++run-p25-trunk-ui: uiFlowTestP25Trunk
++	./uiFlowTestP25Trunk
++.PHONY: run-p25-trunk-ui
+--- a/tests/host/radioCoreTest.c
++++ b/tests/host/radioCoreTest.c
+@@ -1605,6 +1605,23 @@
+ 
+ #if CONFIG_VFO_DMR
+ // A DMR channel: color code, timeslot and the talk target (a contact is its ID and the group / private flag)
++#if CONFIG_P25_TRUNK
++static void test_trunk_vfo_copy(void)
++{
++    setup_codeplug();
++    add(3, "Trunk", 438500000, RADIO_MODE_P25_TRUNK, false, 1);
++    chans[3].wacn=0xBEE00; chans[3].sysid=0x3A5; chans[3].dmr_id=1001;
++    chans[3].talkgroup=100; chans[3].trunk_tx=true;
++    start(); req(RREQ_ZONE_POS,2); run(30); req(RREQ_VFO_COPY,0); run(30);
++    CHECK(sm.view.vfo && sm.view.ch.mode==RADIO_MODE_P25_TRUNK);
++    CHECK(sm.view.ch.wacn==0xBEE00 && sm.view.ch.sysid==0x3A5 && sm.view.ch.dmr_id==1001 && sm.view.ch.trunk_tx);
++    radio_sm_init(&sm,now);
++    CHECK(sm.vfo_ch.mode==RADIO_MODE_P25_TRUNK && sm.vfo_ch.wacn==0xBEE00 && sm.vfo_ch.sysid==0x3A5);
++    CHECK(sm.vfo_ch.trunk_tx && !sm.vfo_ch.rx_only && sm.vfo_ch.dmr_id==1001);
++    settings_defaults(settings_begin()); settings_end(now);
++}
++#endif
++
+ static void test_aes_vfo_copy(void)
+ {
+     dmr_start(true);
+@@ -1612,7 +1629,7 @@
+     req(RREQ_VFO_COPY, 0); run(50);
+     CHECK(sm.view.vfo && sm.view.ch.aes_slot == 1);
+     settings_t st; settings_read(&st);
+-    CHECK((st.aes_vfo_slots & 255) == 1);
++    CHECK((st.vfo_digital & 255) == 1);
+     radio_sm_init(&sm, now);
+     CHECK(sm.vfo_ch.aes_slot == 1);
+     settings_defaults(settings_begin()); settings_end(now);
+@@ -4833,6 +4850,7 @@
+ // whole identity entered; no busy lockout (the system hands out the channels)
+ static void test_p25_trunk_channel(void)
+ {
++	_Static_assert(offsetof(settings_t, aes_next_sf) == 396, "AES stream counter offset must remain stable");
+ 	setup_codeplug();
+ 	add(3, "Site 1", 460112500, RADIO_MODE_P25_TRUNK, false, 1);	// UHF: the radio has no 800 MHz
+ 	chans[3].tx_hz = 465112500;
+@@ -4850,6 +4868,27 @@
+ 	CHECK(dv.cfg.rx_hz == 460112500 && dv.cfg.tx_hz == 465112500 && dv.cfg.wacn == 0xBEE00 && dv.cfg.sysid == 0x3A5);
+ 	CHECK(dv.cfg.unit_id == 1001 && dv.cfg.talkgroup == 100);
+ 
++	// Old channels stay passive; RX-only also overrides an explicit opt-in.
++	req(RREQ_PTT, 1);
++	CHECK(sm.view.state == RS_TX_DENIED && sm.view.tx_deny == TXDENY_MODE && dv.downs == 0);
++	req(RREQ_PTT, 0);
++	chans[3].trunk_tx = true;
++	chans[3].rx_only = true;
++	req(RREQ_ZONE_POS, 0);
++	run(30);
++	req(RREQ_ZONE_POS, 2);
++	run(30);
++	req(RREQ_PTT, 1);
++	CHECK(sm.view.state == RS_TX_DENIED && sm.view.tx_deny == TXDENY_RX_ONLY && dv.downs == 0);
++	req(RREQ_PTT, 0);
++	chans[3].rx_only = false;
++	req(RREQ_ZONE_POS, 0);
++	run(30);
++	req(RREQ_ZONE_POS, 2);
++	run(30);
++	CHECK(dv.cfg.trunk_tx && !dv.cfg.rx_only);
++
++
+ 	// A call the trunking logic followed plays
+ 	dv_heard(true, true, 100, 5555);
+ 	run(30);
+@@ -4899,7 +4938,7 @@
+ 	req(RREQ_PTT, 0);
+ #else
+ 	// receive only: PTT never reaches the channel
+-		CHECK(sm.view.state == RS_TX_DENIED && sm.view.tx_deny == TXDENY_MODE && dv.downs == before_downs);
++		CHECK(sm.view.state == RS_TX_DENIED && sm.view.tx_deny == TXDENY_MODE && dv.downs == 0);
+ 	req(RREQ_PTT, 0);
+ #endif
+ 	sm.set.bcl = RADIO_BCL_OFF;
+@@ -5131,9 +5170,10 @@
+ 		CHECK(dv.cfg.nac_tx == (mode == RADIO_MODE_NXDN ? 1 : CODEPLUG_NAC_DEFAULT));
+ 		req(RREQ_MODE, RADIO_MODE_FM);
+ 	}
+-	CHECK(!radio_vfo_mode_built(RADIO_MODE_P25_TRUNK) && !radio_vfo_mode_built(-1) && !radio_vfo_mode_built(256));
++	CHECK(!radio_vfo_mode_built(-1) && !radio_vfo_mode_built(256));
+ 	req(RREQ_MODE, RADIO_MODE_P25_TRUNK);
+-	CHECK(sm.view.ch.mode == RADIO_MODE_FM);
++	CHECK(sm.view.ch.mode == (CONFIG_P25_TRUNK ? RADIO_MODE_P25_TRUNK : RADIO_MODE_FM));
++	if (CONFIG_P25_TRUNK) CHECK(sm.view.ch.rx_only && !sm.view.ch.trunk_tx);
+ #if CONFIG_AM_RX
+ 	if (board.caps & CAP_AM_RX) {
+ 		req(RREQ_VFO_SET, 118100000);
+@@ -5267,7 +5307,12 @@
+ 	test_vfo_no_dmr();
+ #endif
+ 	test_vfo_copy();
++#if CONFIG_VFO_DMR
+ 	test_aes_vfo_copy();
++#if CONFIG_P25_TRUNK
++	test_trunk_vfo_copy();
++#endif
++#endif
+ 	test_vfo_copy_dmr();
+ 	test_dmr_denied();
+ 	test_dmr_voice_features();
+--- a/tests/host/codeplugTest.c
++++ b/tests/host/codeplugTest.c
+@@ -879,12 +879,26 @@
+ 	CHECK(codeplug_openfw_decode(rec, &back) && back.mode == RADIO_MODE_FM);
+ }
+ 
++static void test_trunk_tx_opt_in(void)
++{
++    channel_t c={.mode=RADIO_MODE_P25_TRUNK,.rx_hz=438500000,.tx_hz=438500000,.talkgroup=100,.wacn=0xBEE00,.sysid=0x3A5};
++    uint8_t rec[56]={0}; channel_t back;
++    codeplug_openfw_encode(&c,rec); CHECK(codeplug_openfw_decode(rec,&back));
++    CHECK(!back.trunk_tx && back.rx_only);
++    c.trunk_tx=true; codeplug_openfw_encode(&c,rec); CHECK(codeplug_openfw_decode(rec,&back));
++    CHECK(back.trunk_tx && !back.rx_only && back.aes_slot==0 && (rec[0x32]&31)==26);
++    rec[0x33]|=4; CHECK(codeplug_openfw_decode(rec,&back) && back.rx_only);
++    c.aes_slot=1; codeplug_openfw_encode(&c,rec); CHECK(codeplug_openfw_decode(rec,&back));
++    CHECK(!back.trunk_tx && back.rx_only && back.aes_slot==1);
++}
++
+ int main(void)
+ {
+ 	image = malloc(IMAGE_SIZE);
+ 	if (image == NULL) {
+ 		return 1;
+ 	}
++	test_trunk_tx_opt_in();
+ 	test_openfw();
+ 	test_digital_voice_records();
+ #if CONFIG_APRS
+--- a/tests/host/cpsTest.c
++++ b/tests/host/cpsTest.c
+@@ -497,6 +497,35 @@
+ 	CHECK(x_prepare(0x7) && x_data(EE + 0x7590, &sec[0x590], 56, 0) && x_commit());
+ 	settings_read(&st);
+ 	CHECK(st.vfo_rx_hz == 433500000 && st.vfo_bw == RADIO_BW_12K5);
++#if CONFIG_P25_TRUNK
++	// A digital VFO survives the CPS overlay and a write, without changing the AES high-water mark or VFO B.
++	w = settings_begin();
++	w->aes_next_sf = 123456;
++	w->vfo_digital = 4u << 8;
++	settings_end(now);
++	ch.mode = RADIO_MODE_P25_TRUNK;
++	ch.wacn = 0xBEE00; ch.sysid = 0x3A5; ch.dmr_id = 1001; ch.talkgroup = 100;
++	ch.nac_rx = CODEPLUG_NAC_ANY; ch.nac_tx = 0x293; ch.trunk_tx = true; ch.rx_only = false;
++	codeplug_openfw_encode(&ch, &sec[0x590]);
++	CHECK(x_prepare(0x7) && x_data(EE + 0x7590, &sec[0x590], 56, 0) && x_commit());
++	settings_read(&st);
++	CHECK(settings_vfo_mode(&st) == RADIO_MODE_P25_TRUNK && st.vfo_trunk_system[0] == 0xBEE003A5 && st.vfo_unit_id[0] == 1001);
++	CHECK(st.aes_next_sf == 123456 && st.vfo_digital == ((4u << 8) | (1u << 16)));
++	CHECK(read_block(1, EE + 0x7580, 96, b));
++	CHECK(codeplug_openfw_decode(b + 0x10, &ch) && ch.mode == RADIO_MODE_P25_TRUNK && ch.trunk_tx && !ch.rx_only);
++	CHECK(ch.wacn == 0xBEE00 && ch.sysid == 0x3A5 && ch.dmr_id == 1001 && ch.talkgroup == 100);
++	CHECK(ch.nac_rx == CODEPLUG_NAC_ANY && ch.nac_tx == 0x293);
++	ch.trunk_tx = false; ch.rx_only = true;
++	codeplug_openfw_encode(&ch, &sec[0x590]);
++	CHECK(x_prepare(0x7) && x_data(EE + 0x7590, &sec[0x590], 56, 0) && x_commit());
++	CHECK(read_block(1, EE + 0x7580, 96, b));
++	CHECK(codeplug_openfw_decode(b + 0x10, &ch) && !ch.trunk_tx && ch.rx_only);
++	ch.mode = RADIO_MODE_P25; ch.aes_slot = 1;
++	codeplug_openfw_encode(&ch, &sec[0x590]);
++	CHECK(x_prepare(0x7) && x_data(EE + 0x7590, &sec[0x590], 56, 0) && x_commit());
++	CHECK(read_block(1, EE + 0x7580, 96, b));
++	CHECK(codeplug_openfw_decode(b + 0x10, &ch) && ch.mode == RADIO_MODE_P25 && ch.aes_slot == 1 && !ch.trunk_tx);
++#endif
+ }
+ 
+ static void test_session_timeout(void)
+--- a/tests/host/uiFlowTest.c
++++ b/tests/host/uiFlowTest.c
+@@ -320,6 +320,14 @@
+ #if CONFIG_P25 && CONFIG_P25_NATIVE
+ 	// A P25 channel's NAC on the radio: channel 3 made P25 (Mode is row 2, NAC row 7). The keys type hex digits, the
+ 	// knob steps the last one through 0-F for the letters; OK alone switches RX between our NAC and every NAC
++#if CONFIG_P25_TRUNK
++#define CE_TRUNK "ok 5 ok down down ok ok ok"
++	{ "E trunk mode exposes site fields", CE_TRUNK, "down down down down down down", "screen=channel focus=WACN", 6, false },
++	{ "E trunk WACN hex entry", CE_TRUNK " down down down down down down", "ok 1 2 3 4 5 ok", "shows=12345", 7, false },
++	{ "E trunk System ID hex entry", CE_TRUNK " down down down down down down down", "ok 1 2 3 ok", "shows=123", 5, false },
++	{ "E trunk TX needs site identity", CE_TRUNK " down down down down down down down down", "ok", "toast=Set_system_and_unit", 1, false },
++	{ "E trunk site fields and TX saved", CE_TRUNK " down down down down down down ok 1 2 3 4 5 ok down ok 1 2 3 ok down ok", "long:ok", "writes=1 toast=Saved_channel", 1, true },
++#endif
+ #define CE_P25_NAC	"ok 5 ok down down ok down down down down down"
+ 	{ "E P25 NAC typed, the knob steps a letter", CE_P25_NAC, "ok 1 0 down ok", "shows=01F", 5, false },
+ 	{ "E P25 NAC: Back takes back a hex digit", CE_P25_NAC, "ok 1 0 down back 2 ok", "shows=012", 7, false },
+@@ -533,7 +541,7 @@
+ 	{ "S vibrate on a call alert", "", "alert:91", "vibes=1 vibe=1", 0, false },
+ 	{ "S vibrate on a private call", "", "privcall:91", "vibes=1 vibe=1", 0, false },
+ 	{ "S vibrate on an emergency", "", "emergency:91", "vibes=1 vibe=2", 0, false },
+-	{ "S vibrate off", "ok 7 1 down down down down down ok long:back", "msg:3101234,Hi", "vibes=0 beep=2", 0,
++	{ "S vibrate off", "ok 7 1 down down down down down down ok long:back", "msg:3101234,Hi", "vibes=0 beep=2", 0,
+ 	  false },
+ 	{ "S low battery warning", "", "battery:14", "banner=Battery_14%", 0, false },
+ 	// What reaches the user lights the screen; the radio's own traffic doesn't (radio_view_wakes covers the radio side)
+@@ -545,7 +553,7 @@
+ 	{ "S privacy key out of range", "ok 7 4 ok down", "ok 3 0 0 ok", "toast=Not_changed set32=0", 5, false },
+ 	{ "S privacy key needs a type", "ok 7 4 down", "ok", "toast=Pick_a_key", 1, false },
+ 	{ "S number typed", "", "ok 7 3 down down ok 3 ok", "sq=5 set12=3", 8, false },
+-	{ "S voice prompts not built", "ok 7 1 down down down", "ok", "toast=Voice_prompts", 1, false },
++	{ "S voice prompts not built", "ok 7 1 down down down down", "ok", "toast=Voice_prompts", 1, false },
+ 	{ "S mode tile in the VFO", "ok 4 up ok", "quick 4", "toast=VFO:_DMR mode=dmr temporary=0 vfo=1", 2, false },
+ 	{ "S Copy to VFO key", "", "copykey", "vfo=1 screen=home toast=Copied_to_VFO", 1, false },
+ 	{ "S Copy to VFO key, long press", "", "long:copykey", "vfo=1 toast=Copied_to_VFO", 1, false },
+@@ -554,7 +562,12 @@
+ 	{ "S Copy to VFO: tile 4 cycles to P25", "copykey", "quick 4", "toast=VFO:_P25 mode=p25 vfo=1", 2, false },
+ 	{ "S VFO P25 mode", "vfokey quick 4", "4", "mode=p25 toast=VFO:_P25 vfo=1 temporary=0", 1, false },
+ 	{ "S VFO NXDN mode", "vfokey quick 4 4", "4", "mode=nxdn toast=VFO:_NXDN vfo=1 temporary=0", 1, false },
++	#if CONFIG_P25_TRUNK
++	{ "S VFO P25 Trunk mode", "vfokey quick 4 4 4", "4", "mode=p25trunk toast=VFO:_P25_Trunk vfo=1 temporary=0", 1, false },
++	{ "S VFO all five modes", "vfokey quick 4 4 4 4", "4", "mode=fm toast=VFO:_FM vfo=1 temporary=0", 1, false },
++#else
+ 	{ "S VFO all four modes", "vfokey quick 4 4 4", "4", "mode=fm toast=VFO:_FM vfo=1 temporary=0", 1, false },
++#endif
+ 	{ "S VFO P25 retained across channels", "vfokey quick 4 4 back vfokey", "vfokey", "mode=p25 vfo=1", 1, false },
+ #else
+ 	{ "S Copy to VFO: tile 4 in the VFO is Mode", "copykey", "quick 4", "toast=VFO:_FM mode=fm vfo=1", 2, false },
+@@ -575,7 +588,11 @@
+ 	// Quick settings in the FM VFO: tile 8 is Width, as on a channel
+ 	{ "Q FM VFO: Width on 8", "vfokey", "quick 8", "toast=Bandwidth", 2, false },
+ #if CONFIG_P25 && CONFIG_P25_NATIVE && CONFIG_NXDN
++	#if CONFIG_P25_TRUNK
++	{ "S VFO mode back to FM", "ok 4 up ok quick 4 back", "quick 4 4 4 4", "toast=VFO:_FM mode=fm temporary=0", 5, false },
++#else
+ 	{ "S VFO mode back to FM", "ok 4 up ok quick 4 back", "quick 4 4 4", "toast=VFO:_FM mode=fm temporary=0", 4, false },
++#endif
+ #else
+ 	{ "S VFO mode back to FM", "ok 4 up ok quick 4 back", "quick 4", "toast=VFO:_FM mode=fm temporary=0", 2, false },
+ #endif
+--- a/tests/host/sim/ui_sim.c
++++ b/tests/host/sim/ui_sim.c
+@@ -2185,7 +2185,7 @@
+ 	else if (strcmp(key, "vfo") == 0) snprintf(got, sizeof got, "%u", view.vfo);
+ 	else if (strcmp(key, "freq") == 0) snprintf(got, sizeof got, "%u", (unsigned)view.ch.rx_hz);
+ 	else if (strcmp(key, "txfreq") == 0) snprintf(got, sizeof got, "%u", (unsigned)view.ch.tx_hz);
+-	else if (strcmp(key, "mode") == 0) snprintf(got, sizeof got, "%s", view.ch.mode == RADIO_MODE_DMR ? "dmr" : view.ch.mode == RADIO_MODE_P25 ? "p25" : view.ch.mode == RADIO_MODE_NXDN ? "nxdn" : "fm");
++	else if (strcmp(key, "mode") == 0) snprintf(got, sizeof got, "%s", view.ch.mode == RADIO_MODE_DMR ? "dmr" : view.ch.mode == RADIO_MODE_P25 ? "p25" : view.ch.mode == RADIO_MODE_NXDN ? "nxdn" : view.ch.mode == RADIO_MODE_P25_TRUNK ? "p25trunk" : "fm");
+ 	else if (strcmp(key, "tx") == 0) snprintf(got, sizeof got, "%u", (unsigned)sim_rec.tx_count);
+ 	else if (strcmp(key, "txid") == 0) snprintf(got, sizeof got, "%u", (unsigned)sim_rec.tx_id);
+ 	else if (strcmp(key, "txpriv") == 0) snprintf(got, sizeof got, "%u", sim_rec.tx_private);

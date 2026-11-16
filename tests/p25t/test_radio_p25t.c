@@ -217,7 +217,22 @@ int main(void)
     site_init(&S, &c);
     p25_rx_init(&vrx, P25_NAC_ANY, 2);
     radio_dv_cfg_t cfg = { .mode = 4, .rx_hz = S.cc_down_hz, .tx_hz = S.cc_up_hz, .power = 1, .nac_rx = 0x293,
-                           .nac_tx = 0x293, .talkgroup = 100, .unit_id = 1001, .wacn = 0xBEE00, .sysid = 0x3A5 };
+                         .nac_tx = 0x293, .talkgroup = 100, .unit_id = 1001, .wacn = 0xBEE00, .sysid = 0x3A5 };
+    assert(radio_p25t_select(&cfg));
+    run_ms(3000);
+    assert(inbound_sent == 0 && S.n_isps == 0 && !keyed);
+    radio_p25t_ptt(true); run_ms(100); radio_p25t_ptt(false);
+    assert(inbound_sent == 0 && !keyed);
+    radio_p25t_select(NULL);
+    cfg.trunk_tx = true; cfg.rx_only = true;
+    assert(radio_p25t_select(&cfg)); run_ms(3000);
+    assert(inbound_sent == 0 && S.n_isps == 0 && !keyed);
+    radio_p25t_select(NULL);
+    cfg.rx_only = false; cfg.aes_slot = 1;
+    assert(radio_p25t_select(&cfg)); run_ms(3000);
+    assert(inbound_sent == 0 && S.n_isps == 0 && !keyed);
+    radio_p25t_select(NULL);
+    cfg.aes_slot = 0;
     assert(radio_p25t_select(&cfg));
     assert(tap && chan_on && chan.rx_hz == S.cc_down_hz);
 

@@ -407,7 +407,7 @@ int p25_imbe_decode(const uint8_t cw[18], uint16_t u[8], uint8_t *u0_errors)
 
 static int valid_call(const p25_call *call)
 {
-    return call && call->nac <= 0xfff && call->source_id <= 0xffffff && call->manufacturer_id <= 1 && call->status_symbol <= 3 && !(call->service_options & 0x78);
+    return call && call->nac <= 0xfff && call->source_id <= 0xffffff && call->manufacturer_id <= 1 && call->status_symbol <= 3 && !(call->service_options & 0x38);
 }
 
 static void frame_start(uint8_t *out, size_t size, const p25_call *call, uint8_t duid)
@@ -446,12 +446,21 @@ static void group_lc(const p25_call *call, uint8_t lc[9])
     lc[6] = (uint8_t)(call->source_id >> 16); lc[7] = (uint8_t)(call->source_id >> 8); lc[8] = (uint8_t)call->source_id;
 }
 
-int p25_encode_hdu(const p25_call *call, uint8_t out[P25_HDU_BYTES])
+static int valid_crypto(const p25_call *call, const p25_crypto_sync *sync)
+{
+    return call && (sync ? sync->algorithm_id == 0x84 && !sync->message_indicator[8] && (call->service_options & 0x40) : !(call->service_options & 0x40));
+}
+
+int p25_encode_hdu_aes(const p25_call *call, const p25_crypto_sync *sync, uint8_t out[P25_HDU_BYTES])
 {
     uint8_t payload[15] = {0}, symbols[36];
     unsigned i;
-    if (!out || !valid_call(call)) return -1;
-    payload[9] = call->manufacturer_id; payload[10] = 0x80; /* clear */
+    if (!out || !valid_call(call) || !valid_crypto(call, sync)) return -1;
+    if (sync) {
+        memcpy(payload, sync->message_indicator, 9);
+        payload[11] = (uint8_t)(sync->key_id >> 8); payload[12] = (uint8_t)sync->key_id;
+    }
+    payload[9] = call->manufacturer_id; payload[10] = sync ? sync->algorithm_id : 0x80;
     payload[13] = (uint8_t)(call->talkgroup >> 8); payload[14] = (uint8_t)call->talkgroup;
     bytes_to_symbols(payload, 20, symbols);
     p25_rs_encode(symbols, 20, 16, symbols);
@@ -472,23 +481,30 @@ static unsigned voice_start(unsigned frame)
 static unsigned voice_permutation(unsigned bit)
 { return 6 * (bit % 24) + ((bit / 24) ^ (bit & 1)); }
 
-int p25_encode_ldu(const p25_call *call, uint8_t duid, const uint16_t imbe[9][8], const uint8_t lsd[2], uint8_t out[P25_LDU_BYTES])
+int p25_encode_ldu_aes(const p25_call *call, const p25_crypto_sync *sync, uint8_t duid, const uint16_t imbe[9][8], const uint8_t lsd[2], uint8_t out[P25_LDU_BYTES])
 {
     uint8_t payload[12] = {0}, symbols[24], cw[18];
     uint16_t u[8];
     unsigned count, parity, i, j;
-    if (!out || !imbe || !lsd || !valid_call(call) || (duid != P25_DUID_LDU1 && duid != P25_DUID_LDU2)) return -1;
+    if (!out || !imbe || !lsd || !valid_call(call) || !valid_crypto(call, sync) || (duid != P25_DUID_LDU1 && duid != P25_DUID_LDU2)) return -1;
     /* Validate every frame before touching caller output. */
     for (i = 0; i < 9; ++i) for (j = 0; j < 8; ++j)
         if (imbe[i][j] >= (1u << (j < 4 ? 12 : j < 7 ? 11 : 7))) return -1;
     if (duid == P25_DUID_LDU1) { group_lc(call, payload); count = 12; parity = 12; }
-    else { payload[9] = 0x80; count = 16; parity = 8; }
+    else {
+        payload[9] = sync ? sync->algorithm_id : 0x80;
+        if (sync) {
+            memcpy(payload, sync->message_indicator, 9);
+            payload[10] = (uint8_t)(sync->key_id >> 8); payload[11] = (uint8_t)sync->key_id;
+        }
+        count = 16; parity = 8;
+    }
     bytes_to_symbols(payload, count, symbols);
     p25_rs_encode(symbols, count, parity, symbols);
     frame_start(out, P25_LDU_BYTES, call, duid);
     for (i = 0; i < 9; ++i) {
         memcpy(u, imbe[i], sizeof u);
-        u[7] = (uint16_t)((u[7] & ~1u) | ((i + (duid == P25_DUID_LDU2)) & 1));
+        if (!sync) u[7] = (uint16_t)((u[7] & ~1u) | ((i + (duid == P25_DUID_LDU2)) & 1));
         p25_imbe_encode(u, cw);
         for (j = 0; j < 144; ++j) bit_set(out, physical(voice_start(i) + voice_permutation(j)), bit_get(cw, j));
     }
@@ -498,6 +514,11 @@ int p25_encode_ldu(const p25_call *call, uint8_t duid, const uint16_t imbe[9][8]
     put_value(out, 1520, cyclic16(lsd[1]), 16);
     return 0;
 }
+
+int p25_encode_hdu(const p25_call *c, uint8_t out[P25_HDU_BYTES])
+{ return p25_encode_hdu_aes(c, NULL, out); }
+int p25_encode_ldu(const p25_call *c, uint8_t duid, const uint16_t imbe[9][8], const uint8_t lsd[2], uint8_t out[P25_LDU_BYTES])
+{ return p25_encode_ldu_aes(c, NULL, duid, imbe, lsd, out); }
 
 int p25_encode_tdu(const p25_call *call, uint8_t out[P25_TDU_BYTES])
 {

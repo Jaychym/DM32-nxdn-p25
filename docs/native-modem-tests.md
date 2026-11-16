@@ -217,6 +217,18 @@ measurement has been made. See [results](../results/native-modem-interface.json)
 
 ## First attached-radio work
 
+### P25 to DMR audio handoff
+
+Leaving a live native channel releases the modem, then yields until the P25 worker finishes its audio and
+microphone cleanup. The wait runs in the radio task, outside the critical section. DMR can start its stream only
+after that cleanup; otherwise the departing worker can stop the first DMR PTT's microphone stream.
+
+`tests/native/test_audio_handoff.c` exercises 100 transitions from P25 receive and live transmit with delayed worker
+cleanup. It feeds nonzero microphone PCM into the real DMR audio queue, checks the vocoder input and first encoded
+frame, and decodes the AMBE FEC back to the expected parameters. The vocoder and audio driver are host doubles.
+Removing the handoff barrier fails the first-frame assertion. ASan/UBSan passes with the barrier. Actual radio
+scheduling and RF audio remain a hardware check; the test does not establish interoperability.
+
 The interface requires this derivative already running; it cannot control OEM
 firmware. It has no flashing or power-cycle operation. Unit/version identity,
 recovery access and verified backups remain the installation prerequisites in

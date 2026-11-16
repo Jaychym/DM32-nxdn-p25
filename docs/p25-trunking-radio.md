@@ -1,0 +1,12 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+# P25 Phase 1 trunking on the radio
+
+The radio exposes P25 Trunk as a distinct channel and VFO mode, using the existing native Phase 1 control/voice path. The channel editor exposes WACN (five hex digits), System ID (three hex digits), NAC, talkgroup, unit ID and an explicit Trunk TX switch. WACN/System ID zero retain wildcard receive behavior. VFO settings and the CPS VFO overlay preserve all these fields across restart and channel copy.
+
+The release includes CONFIG_P25_TRUNK_TX, reusing the existing registration, affiliation, group request/grant and FDMA voice transmitter. This is experimental protocol support, not a claim of interoperability with a production network. A channel must explicitly enable Trunk TX; old channels and newly selected trunk modes remain receive-only. The opt-in is encoded as channel flag3 low five bits 0x1A, distinct from AES slots. The core also requires RX-only clear, complete WACN/System ID and unit ID. Without opt-in, the subscriber cannot register, affiliate or send voice. The CPS and radio editor keep the switch and RX-only state consistent. AES remains limited to conventional P25/DMR voice in this change; no encrypted trunk TX is claimed.
+
+The VFO already stores a four-bit mode. Append two packed WACN/System ID words to settings and retain the TX opt-in in otherwise unused high bits of the digital VFO options word; preserve AES selectors in its low bytes. Settings grow append-only. Existing channel formats, identifiers and settings defaults retain their meaning.
+
+Tests cover mode availability, radio editor entry and persistence, WACN/System ID validation, codeplug/web/CSV round trips, VFO copy/restart/CPS overlays, explicit RX-only and old-record no-TX behavior, registration/affiliation/granted voice in the simulated site, and feature-off builds. A mixed grant update must choose a usable FDMA entry rather than stop at an unsupported Phase 2 entry. Resource and stack checks cover the release with trunk TX enabled.
+
+The Pluto bench initially generates a bounded, clear C4FM control channel and a separate FDMA voice carrier. It verifies receiver acquisition, grant following, audio and return to control. A transmit test requires a duplex responder, which is a separate hardware test; the outbound-only waveform cannot validate the DM32's trunk transmitter. The owner provides the SDR connection and configures the radio before any opt-in RF run.

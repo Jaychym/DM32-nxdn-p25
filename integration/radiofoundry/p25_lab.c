@@ -14,6 +14,9 @@
 #include "debuglink/dl_fmt.h"
 #include "FreeRTOS.h"
 #include "task.h"
+#if CONFIG_DV_AES
+#include "codeplug/codeplug.h"
+#endif
 #if CONFIG_P25_NATIVE
 #include "native_modem/native_lab.h"
 #endif
@@ -33,7 +36,8 @@ static uint8_t request_mode, play_requested, delay_seconds;
 static volatile uint8_t stop_requested;
 static uint32_t stack_free;
 #if CONFIG_P25_BENCH
-static struct { uint8_t kind,raw[36]; } replay[64];
+enum { REPLAY_CAP = 24 }; /* Leave RAM for the voice cipher contexts. */
+static struct { uint8_t kind,raw[36]; } replay[REPLAY_CAP];
 #endif
 static uint16_t expected,loaded,nac,group;
 static uint32_t frequency,duration_ms;
@@ -144,7 +148,23 @@ static int live_run(void)
     uint8_t raw[36],queued=0;
     unsigned lead=3;
     bool kicked=false,sealed=false,closed=false;
-    bool ok=p25_voice_tx_begin(&voice,&call)!=0;
+    bool ok = false;
+    uint8_t slot = chan.aes_slot;
+#if CONFIG_DV_AES
+    uint8_t key[32]; uint16_t kid; uint64_t mi; uint32_t dmi;
+    if (slot) {
+        if (codeplug_aes_key(slot, key, &kid) && codeplug_aes_reserve(slot, &mi, &dmi)) {
+            p25_voice_set_aes(&voice, key, kid);
+            ok = p25_voice_tx_begin_aes(&voice, &call, mi) != 0;
+        }
+    } else {
+        p25_voice_set_aes(&voice, NULL, 0);
+        ok = p25_voice_tx_begin(&voice, &call) != 0;
+    }
+    voice_aes_wipe(key, sizeof key);
+#else
+    if (!slot) ok = p25_voice_tx_begin(&voice, &call) != 0;
+#endif
     uint32_t sid=live_sid;
     live_mic_frames=live_peak=live_encode_max=live_encode_us=live_slow=live_encoded=0;
     live_first_us=live_last_us=live_fifo_high=live_overflows=0;
@@ -404,6 +424,16 @@ static int receive_run(void)
     memset(&phy,0,sizeof phy);p25_audio_fifo_reset(&fifo);
     p25_voice_init(&voice,nac,group,sink,NULL);voice.micros=sample_checks?hal_micros:NULL;
     int ok=1;
+#if CONFIG_P25_NATIVE && CONFIG_DV_AES
+    if (request_mode == 5 && chan.aes_slot) {
+        uint8_t key[32] = {0}; uint16_t kid = 0;
+        // A missing TX slot cannot make an AES channel admit clear audio.
+        codeplug_aes_key(chan.aes_slot, key, &kid);
+        p25_voice_set_aes(&voice, key, kid);
+        voice.aes_lookup = codeplug_aes_lookup;
+        voice_aes_wipe(key, sizeof key);
+    }
+#endif
 #if CONFIG_P25_NATIVE
     /* Playback also borrows native RX ownership to exclude normal beeps/PTT and
      * radio retunes. Replayed bytes remain in RAM and never enter a TX path. */
@@ -616,7 +646,7 @@ size_t p25_lab_command(const uint8_t *req,uint16_t len,uint8_t *out,size_t cap)
 #if CONFIG_P25_BENCH
     else if(req[0]==12 && len==2 && req[1]<=1) { sample_checks=req[1];out[0]=DL_ST_OK; }
     else if(req[0]==9 && len==2 && req[1]<=1) { pcm_paced=req[1];out[0]=DL_ST_OK; }
-    else if(req[0]==2 && len==3 && u16(req+1)>=1 && u16(req+1)<=64) {
+    else if(req[0]==2 && len==3 && u16(req+1)>=1 && u16(req+1)<=REPLAY_CAP) {
         expected=u16(req+1);loaded=0;out[0]=DL_ST_OK;
     } else if(req[0]==3 && len==40 && loaded<expected && u16(req+1)==loaded && req[3]<=2) {
         replay[loaded].kind=req[3];memcpy(replay[loaded].raw,req+4,36);loaded++;out[0]=DL_ST_OK;

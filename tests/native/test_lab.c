@@ -20,6 +20,9 @@ void mock_exit(void) { assert(depth);depth--; }
 uint32_t hal_micros(void) { return clock_us; }
 uint32_t hal_millis(void) { return clock_us/1000; }
 int p25_lab_busy(void) { return busy; }
+#ifndef NATIVE_AUDIO_HANDOFF_TEST
+void vTaskDelay(unsigned ticks) { (void)ticks;assert(!"unexpected worker wait"); }
+#endif
 #ifndef NATIVE_CHANNEL_TEST
 /* The worker's side of the radio core's channel, idle in these tests. */
 int p25_lab_live_begin(uint32_t sid) { (void)sid;return 0; }

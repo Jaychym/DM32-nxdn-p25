@@ -240,12 +240,13 @@ def prepare(write=True, apply_series=True, limit=None):
     for p in sorted((ROOT / "integration/radiofoundry/nxdn").glob("*")):
         folder = "boards/dm32" if p.suffix == ".inc" else "core/dv"
         write_owned(DEST / folder / p.name, p.read_bytes())
-    for sub in ("p25t", "p25p2"):
+    for sub in ("p25t", "p25p2", "crypto"):
         for p in sorted((ROOT / "src" / sub).glob("*")):
             if p.suffix in (".c", ".h", ".inc"):
                 write_owned(DEST / "core" / sub / p.name, p.read_bytes())
-    for p in sorted((ROOT / "integration/radiofoundry/p25t").glob("*")):
-        write_owned(DEST / "core/dv" / p.name, p.read_bytes())
+    for sub in ("p25t",):
+        for p in sorted((ROOT / "integration/radiofoundry" / sub).glob("*")):
+            write_owned(DEST / "core/dv" / p.name, p.read_bytes())
     for p in sorted((ROOT / "src/modem").glob("*")):
         if p.suffix in (".c", ".h"): write_owned(DEST / "core/native_modem" / p.name,p.read_bytes())
     for p in sorted((ROOT / "integration/radiofoundry/native").glob("*")):
@@ -333,7 +334,7 @@ def main():
     b = f"build/dm32-p25-{suffix}"
     command = ["make", "-j8", "BOARD=dm32", f"CROSS={ROOT}/toolchain/bin/csky-elf-", f"BUILD={b}",
         "CONFIG_P25=" + ("n" if args.disable else "y"), "CONFIG_P25_NATIVE="+("y" if native else "n"), "CONFIG_DMR_IP_GATEWAY=n", "CONFIG_NET_PPP=n",
-        "CONFIG_NXDN=" + ("n" if args.no_nxdn else "y"),
+        "CONFIG_NXDN=" + ("n" if args.no_nxdn else "y"), "CONFIG_DV_AES=y",
         "CONFIG_P25_TRUNK=" + ("y" if native and not args.no_trunk else "n"),
         "CONFIG_P25_TRUNK_TX=" + ("y" if native and args.trunk_tx and not args.no_trunk else "n"),
         "CONFIG_P25_PHASE2=" + ("y" if native and not args.no_trunk and not args.no_phase2 else "n"),
@@ -384,7 +385,7 @@ def main():
                 "pa":("native_pa",),"restore":("native_irq_restore","native_restore"),
                 "lock":("native_lock",),"unlock":("native_unlock",),
                 "native_lab_command":("snapshot",),
-                "p25_voice_rx_dibit":("core/p25/p25_lab.c:sink","core/p25/selftest.c:sink"),
+                "p25_voice_rx_dibit":("core/p25/p25_lab.c:sink","core/p25/selftest.c:sink","codeplug_aes_lookup"),
                 "audio_task":("core/p25/p25_lab.c:audio_block",),
                 "audio_block":("dm32_native_speaker",),
                 "receive_run":("dm32_native_speaker","hrc_audio_pcm_spk_pending"),

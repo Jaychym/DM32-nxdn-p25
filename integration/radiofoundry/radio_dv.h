@@ -28,6 +28,8 @@ typedef struct {
     bool hear_all;
     uint32_t wacn;              /* trunking: the system */
     uint16_t sysid;
+    uint8_t aes_slot;
+    bool trunk_tx, rx_only;
 } radio_dv_cfg_t;
 
 typedef struct {

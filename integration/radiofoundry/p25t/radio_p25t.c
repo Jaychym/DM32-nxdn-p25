@@ -89,7 +89,7 @@ static uint8_t deny_reason(uint8_t deny)
 
 static void tune(uint32_t rx_hz, uint32_t tx_hz, uint16_t group, uint32_t source)
 {
-    p25_lab_channel c = { P25_NAC_ANY, su.cc_nac, group, source, true };
+    p25_lab_channel c = { P25_NAC_ANY, su.cc_nac, group, source, true, 0 };
     p25_lab_channel_config(&c);
     nch.rx_hz = rx_hz;
     nch.tx_hz = tx_hz;
@@ -147,7 +147,7 @@ bool radio_p25t_select(const radio_dv_cfg_t *cfg)
     c.cc_count = 1;
     c.talkgroup = cfg->talkgroup;
     c.hear_all = cfg->hear_all;
-    c.tx_enabled = CONFIG_P25_TRUNK_TX != 0;   /* p25t_su_init also wants the whole identity */
+    c.tx_enabled = CONFIG_P25_TRUNK_TX && cfg->trunk_tx && !cfg->rx_only && !cfg->aes_slot;
     c.tdma_rx = c.tdma_tx = false;             /* no Phase 2 physical layer on this radio */
     taskENTER_CRITICAL();
     ring_head = ring_count = 0;

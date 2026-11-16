@@ -1,0 +1,888 @@
+--- a/config/features.mk
++++ b/config/features.mk
+@@ -322,6 +322,9 @@
+ endif
+ endif
+ 
++CONFIG_DV_AES ?= n
++FEATURES += DV_AES
++
+ # Dependencies
+ feature_on = $(filter y,$(CONFIG_$(1)))
+ ifneq ($(call feature_on,SUBTONE),)
+--- a/core/config.h
++++ b/core/config.h
+@@ -4,6 +4,9 @@
+ // tests). Always defined to 0 or 1: test with #if CONFIG_X, never #ifdef. See docs/build-config.md.
+ #ifndef RFOUNDRY_CONFIG_H
+ #define RFOUNDRY_CONFIG_H
++#ifndef CONFIG_DV_AES
++#define CONFIG_DV_AES 0
++#endif
+ #ifndef CONFIG_P25
+ #define CONFIG_P25 0
+ #endif
+--- a/Makefile
++++ b/Makefile
+@@ -125,6 +125,9 @@
+ endif
+ ifeq ($(CONFIG_FIRSTBOOT),y)
+ CORE_DIRS += core/firstboot
++endif
++ifeq ($(CONFIG_DV_AES),y)
++CORE_DIRS += core/crypto
+ endif
+ APP_DIRS := $(CORE_DIRS) $(PLATFORM_DIRS) $(BOARD_DIRS)
+ # Sorted: the link order steers LTO's code, and $(wildcard)'s order depends on the make (gotchas 13.10)
+@@ -218,7 +221,7 @@
+ endif
+ endif
+ 
+-INCLUDES := -Icore/p25 -Icore/native_modem -Icore/dv -Icore/nxdn -Icore/p25t -Icore/p25p2 -Ihal -Icore -Idrivers -Iboards/$(BOARD) -Iplatform/$(PLATFORM) -I$(BUILD)/gen $(PLATFORM_INC)
++INCLUDES := -Icore/crypto -Icore/p25 -Icore/native_modem -Icore/dv -Icore/nxdn -Icore/p25t -Icore/p25p2 -Ihal -Icore -Idrivers -Iboards/$(BOARD) -Iplatform/$(PLATFORM) -I$(BUILD)/gen $(PLATFORM_INC)
+ 
+ # Firmware version: the commit, with -dirty when tracked files differ from it or untracked sources sit in the built
+ # directories (both end up in the image). Only the files that use RFOUNDRY_GIT or RFOUNDRY_RELEASE get it, through
+--- a/core/settings/settings.h
++++ b/core/settings/settings.h
+@@ -223,6 +223,8 @@
+ 	// Zone share: the zones imported last, so the same zone sent again updates its import instead of adding a copy
+ 	// (docs/spec/zone-share.md 5.4); key 0 = unused, the oldest replaced first
+ 	settings_zs_import_t zs_import[SETTINGS_ZS_IMPORTS];
++	uint32_t aes_vfo_slots;	// low byte VFO A, next byte VFO B; same fail-closed channel selector
++	uint32_t aes_next_sf;	// monotonic voice encryption reservation; outside the CPS image
+ } settings_t;
+ 
+ // Pages: settings_t is stored as records of SETTINGS_PAGE_BYTES each (settings-store.md 2.1). Only the pages its size
+--- a/core/settings/settings.c
++++ b/core/settings/settings.c
+@@ -28,7 +28,7 @@
+ _Static_assert(sizeof(settings_t) % 4 == 0, "settings_t has tail padding");
+ _Static_assert(offsetof(settings_t, dual_b) == SETTINGS_PAGE_BYTES, "page 1 starts at its first field");
+ _Static_assert(offsetof(settings_t, ref_trim_ppb) % 2 == 0, "ref_trim_ppb is aligned");
+-_Static_assert(sizeof(settings_t) == 392, "settings_t changed size: update docs/spec/settings-store.md 3 and this");
++_Static_assert(sizeof(settings_t) == 400, "settings_t changed size: update docs/spec/settings-store.md 3 and this");
+ 
+ static settings_t live;			// under the quick lock
+ static settings_t saved;		// what the newest record holds (or the defaults)
+--- a/core/codeplug/codeplug.h
++++ b/core/codeplug/codeplug.h
+@@ -10,6 +10,11 @@
+ #define CODEPLUG_H
+ 
+ #include <stdint.h>
++#include <stdbool.h>
++// AES slots: 0 clear, 1-4 enabled, 255 invalid (TX denied).
++bool codeplug_aes_key(uint8_t slot, uint8_t key[32], uint16_t *kid);
++bool codeplug_aes_lookup(uint16_t kid, uint8_t key[32]);
++bool codeplug_aes_reserve(uint8_t slot, uint64_t *p25_mi, uint32_t *dmr_mi);
+ #include <stdbool.h>
+ #include "hal_radio.h"
+ #include "config.h"
+@@ -51,7 +56,8 @@
+ 	// the channel's override, else the radio's DMR ID. The record keeps these where FM tones and the DMR contact go
+ 	uint16_t nac_rx;	// P25: RX NAC 0x000-0xFFF, CODEPLUG_NAC_ANY hears every NAC. NXDN: RX RAN 0-63, 0 hears every RAN
+ 	uint16_t nac_tx;	// P25: TX NAC 0x000-0xF7D. NXDN: TX RAN 0-63
+-	uint16_t talkgroup;	// P25 talkgroup / NXDN group: the TX target (1-65535 / 1-65519), and the group RX plays
++	uint16_t talkgroup;	// P25 talkgroup / NXDN group
++	uint8_t aes_slot;	// 0 clear, 1-4 AES key slot, 255 invalid
+ 	bool hear_all;		// RX plays every talkgroup (else ours and all call)
+ 	// P25 trunking (RADIO_MODE_P25_TRUNK; rx_hz is a control channel, tx_hz its inbound): the system the channel
+ 	// belongs to, from the record's SFR, color code and APRS bytes. 0 when unset
+--- a/core/codeplug/codeplug.c
++++ b/core/codeplug/codeplug.c
+@@ -8,6 +8,12 @@
+ #include "codeplug.h"
+ #include "board.h"
+ #include "storage/storage.h"
++#include "config.h"
++#if CONFIG_DV_AES
++#include "voice_aes.h"
++#include "settings/settings.h"
++#include "hal_time.h"
++#endif
+ 
+ // Where the two open-firmware images sit in the data flash when the board gives no map: the STM32 family puts the 64 KB
+ // EEPROM image at 0 and the flash image at +128 KB
+@@ -94,6 +100,111 @@
+ 
+ static codeplug_source_t source = CODEPLUG_NONE;
+ static uint32_t serial;
++
++#if CONFIG_DV_AES
++enum { AES_BASE = 0x7C00, AES_ENTRY = 96, AES_SLOTS = 4 };
++static uint32_t aes_u32(const uint8_t *p)
++{ return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
++static void aes_put32(uint8_t *p, uint32_t n)
++{ for (unsigned i = 0; i < 4; i++) p[i] = (uint8_t)(n >> (i * 8)); }
++static bool aes_entry(uint8_t slot, uint8_t e[AES_ENTRY])
++{
++    uint8_t h[16];
++    return slot >= 1 && slot <= AES_SLOTS && board.flash &&
++        board.flash->read(EE(AES_BASE), h, sizeof h) && !memcmp(h, "DVAES1\0\0", 8) &&
++        h[8] == AES_SLOTS && h[9] == AES_ENTRY && aes_u32(h + 12) == storage_crc32(0, h, 12) &&
++        board.flash->read(EE(AES_BASE + 16 + (slot - 1) * AES_ENTRY), e, AES_ENTRY) &&
++        e[0] == 1 && e[1] == 0 && (e[2] || e[3]) &&
++        aes_u32(e + 92) == storage_crc32(0, e, 92);
++}
++bool codeplug_aes_key(uint8_t slot, uint8_t key[32], uint16_t *kid)
++{
++    uint8_t e[AES_ENTRY];
++    storage_lock();
++    bool ok = aes_entry(slot, e);
++    storage_unlock();
++    if (ok) { memcpy(key, e + 4, 32); *kid = (uint16_t)(e[2] | (e[3] << 8)); }
++    voice_aes_wipe(e, sizeof e);
++    return ok;
++}
++bool codeplug_aes_lookup(uint16_t kid, uint8_t key[32])
++{
++    bool found = false;
++    uint8_t candidate[32]; uint16_t id;
++    for (uint8_t slot = 1; slot <= AES_SLOTS; slot++) {
++        if (!codeplug_aes_key(slot, candidate, &id) || id != kid) continue;
++        if (found) { voice_aes_wipe(candidate, sizeof candidate); return false; }
++        memcpy(key, candidate, 32); found = true;
++    }
++    voice_aes_wipe(candidate, sizeof candidate);
++    return found;
++}
++static uint64_t aes_apply(const uint64_t m[64], uint64_t v)
++{
++    uint64_t result = 0;
++    for (unsigned i = 0; v; i++, v >>= 1) if (v & 1) result ^= m[i];
++    return result;
++}
++// Jump whole superframes without iterating over the radio's lifetime of reservations.
++static uint64_t aes_jump(uint64_t mi, uint32_t n, bool dmr)
++{
++    uint64_t m[64], square[64];
++    unsigned bits = dmr ? 32 : 64;
++    for (unsigned i = 0; i < bits; i++)
++        m[i] = dmr ? voice_aes_dmr_step((uint32_t)(1ULL << i)) : voice_aes_p25_step(1ULL << i);
++    while (n) {
++        if (n & 1) mi = aes_apply(m, mi);
++        n >>= 1;
++        if (!n) break;
++        for (unsigned i = 0; i < bits; i++) square[i] = aes_apply(m, m[i]);
++        memcpy(m, square, bits * sizeof *m);
++    }
++    voice_aes_wipe(m, sizeof m); voice_aes_wipe(square, sizeof square);
++    return mi;
++}
++bool codeplug_aes_reserve(uint8_t slot, uint64_t *p25_mi, uint32_t *dmr_mi)
++{
++    uint8_t e[AES_ENTRY], iv[16]; hal_chip_t chip;
++    struct AES_ctx cipher;
++    bool ok = false;
++    storage_lock();
++    if (!aes_entry(slot, e) || !board.system || !board.system->chip || !board.system->chip(&chip) ||
++        !(chip.uid[0] | chip.uid[1] | chip.uid[2])) goto done;
++    memcpy(iv, e + 36, 16);
++    for (unsigned i = 0; i < 12; i++) iv[i] ^= (uint8_t)(chip.uid[i / 4] >> (8 * (i % 4)));
++    AES_init_ctx(&cipher, e + 4); AES_ECB_encrypt(&cipher, iv);
++    uint64_t pmi = 0; uint32_t dmi = 0;
++    for (unsigned i = 0; i < 8; i++) pmi = (pmi << 8) | iv[i];
++    for (unsigned i = 8; i < 12; i++) dmi = (dmi << 8) | iv[i];
++    if (!pmi || !dmi) goto done; // zero is an LFSR fixed point
++    settings_t *settings = settings_begin();
++    uint32_t n = settings->aes_next_sf;
++    settings_end(hal_millis());
++    if ((!n && !memcmp(e + 52, chip.uid, 12)) || n > UINT32_MAX - VOICE_AES_RESERVE) goto done;
++    if (memcmp(e + 52, chip.uid, 12)) {
++        memcpy(e + 52, chip.uid, 12);
++        aes_put32(e + 92, storage_crc32(0, e, 92));
++        if (!storage_write(EE(AES_BASE + 16 + (slot - 1) * AES_ENTRY), e, AES_ENTRY)) goto done;
++    }
++    settings = settings_begin(); settings->aes_next_sf = n + VOICE_AES_RESERVE;
++    settings_end(hal_millis());
++    if (!settings_flush()) goto done;
++    *p25_mi = aes_jump(pmi, n, false); *dmr_mi = (uint32_t)aes_jump(dmi, n, true);
++    ok = true;
++done:
++    voice_aes_wipe(e, sizeof e); voice_aes_wipe(iv, sizeof iv); voice_aes_wipe(&cipher, sizeof cipher);
++    storage_unlock();
++    return ok;
++}
++#else
++bool codeplug_aes_key(uint8_t slot, uint8_t key[32], uint16_t *kid)
++{ (void)slot; (void)key; (void)kid; return false; }
++bool codeplug_aes_lookup(uint16_t kid, uint8_t key[32])
++{ (void)kid; (void)key; return false; }
++bool codeplug_aes_reserve(uint8_t slot, uint64_t *p25_mi, uint32_t *dmr_mi)
++{ (void)slot; (void)p25_mi; (void)dmr_mi; return false; }
++#endif
++
+ // Open-firmware evidence (codeplug-stock-tyt.md 2, step 1), which codeplug_foreign() decides from (no flag of its own:
+ // RAM is tight on some radios)
+ static uint16_t ev_good, ev_bad;
+@@ -659,6 +770,7 @@
+ 	if (!freq(&r[CH_RX], &out->rx_hz) || !freq(&r[CH_TX], &out->tx_hz)) {
+ 		return false;
+ 	}
++	out->aes_slot = (r[0x32] & 31) == 0 ? 0 : (r[0x32] & 31) >= 17 && (r[0x32] & 31) <= 20 ? (r[0x32] & 31) - 16 : 255;
+ 	copy_name(out->name, &r[CH_NAME], CODEPLUG_NAME_LEN);
+ 	out->mode = r[CH_MODE] < RADIO_MODE_COUNT ? r[CH_MODE] : RADIO_MODE_FM;
+ 	out->bw = (r[CH_FLAG4] & FLAG4_25K) ? RADIO_BW_25K : RADIO_BW_12K5;
+@@ -712,6 +824,7 @@
+ 	put_name(&r[CH_NAME], ch->name, CODEPLUG_NAME_LEN);
+ 	put_freq(&r[CH_RX], ch->rx_hz);
+ 	put_freq(&r[CH_TX], ch->tx_hz);
++	r[0x32] = (uint8_t)((r[0x32] & 0xE0) | (ch->aes_slot ? ch->aes_slot <= 4 ? 16 + ch->aes_slot : 31 : 0));
+ 	r[CH_MODE] = (uint8_t)(ch->mode < RADIO_MODE_COUNT ? ch->mode : RADIO_MODE_FM);
+ 	r[CH_POWER] = ch->power == CODEPLUG_POWER_DEFAULT ? 0 : power_to_byte(ch->power);
+ 	put16(&r[CH_RX_TONE], tone_word(&ch->rx_tone));
+--- a/core/dmr/call/dmr_call.h
++++ b/core/dmr/call/dmr_call.h
+@@ -87,6 +87,7 @@
+ typedef void (*dmr_privacy_fn)(uint8_t ambe27[DMR_VOICE_BYTES], uint8_t voice_index, bool tx, void *ctx);
+ 
+ typedef struct {
++	uint8_t aes_slot;		// 0 clear, 1-4 AES-256, other values deny TX
+ 	uint32_t own_id;
+ 	uint8_t cc;			// 0-15
+ 	uint8_t ts;			// 1 or 2
+@@ -130,6 +131,7 @@
+ 	bool to_us;		// private call addressed to our ID
+ 	uint8_t fid;
+ 	uint8_t svc;		// service options (emergency, privacy, priority)
++	bool decrypted;		// encrypted voice successfully transformed for the sink
+ 	bool encrypted;		// PI or the privacy service option
+ 	bool late_entry;	// acquired from the embedded LC, no header heard
+ 	bool emergency;		// the emergency service option
+--- a/core/dmr/call/dmr_call.c
++++ b/core/dmr/call/dmr_call.c
+@@ -6,6 +6,9 @@
+ #include <string.h>
+ #include "dmr/call/dmr_call.h"
+ #include "config.h"
++#if CONFIG_DV_AES
++#include "dmr_aes.h"
++#endif
+ #if CONFIG_SFR
+ #include "dmr/sfr.h"
+ #endif
+@@ -46,6 +49,7 @@
+ } evq_item_t;
+ 
+ static evq_item_t evq[DMR_CALL_EVQ_DEPTH];
++static bool aes_pi_left;
+ static uint8_t evq_head;	// written by the producer
+ static uint8_t evq_tail;	// written by the consumer
+ static uint32_t evq_drops;
+@@ -514,6 +518,9 @@
+ 		if (s.view.caller.group || s.view.caller.to_us)
+ 			set_reply(t, now);
+ 	}
++#if CONFIG_DV_AES
++	dmr_aes_reset();
++#endif
+ 	s.last_call_end_ms = now;
+ 	s.call_end_seen = true;
+ 	s.rx = RXC_NONE;
+@@ -535,6 +542,9 @@
+ 
+ 	bool continuing = s.rx != RXC_NONE;
+ 	bool new_talker = !continuing || l.src != s.view.caller.src;
++#if CONFIG_DV_AES
++	if (continuing && new_talker) dmr_aes_reset();
++#endif
+ 
+ 	if (s.rx == RXC_PLAY) {
+ 		dual_flush();
+@@ -640,7 +650,11 @@
+ 				return;
+ 			}
+ 		}
+-		sink_lost((uint8_t)(missing * DMR_AMBE_FRAMES_PER_BURST));
++#if CONFIG_DV_AES
++        if (s.cfg.aes_slot && slot && s.last_voice_slot && slot - s.last_voice_slot >= SUPERFRAME_SLOTS)
++            dmr_aes_reset();
++#endif
++        sink_lost((uint8_t)(missing * DMR_AMBE_FRAMES_PER_BURST));
+ 	}
+ 	s.next_index = (uint8_t)((i + 1) % 6);
+ 	s.have_index = true;
+@@ -654,19 +668,22 @@
+ 		stats.rx_encrypted_calls++;
+ 		s.dirty = true;
+ 	}
+-	// No key, or a PI header: an MI-based scheme the static key hook can't undo (docs/spec/gotchas.md 6.4)
+-	if (enc && (!s.cfg.privacy || s.view.caller.pi_header)) {
+-		stats.rx_enc_dropped++;
+-		TR_WHAT('e');
+-		sink_lost(DMR_AMBE_FRAMES_PER_BURST);	// no key: never play the scrambled voice
+-		return;
+-	}
+-
+ 	uint8_t v[DMR_VOICE_BYTES];
+-
+ 	memcpy(v, b->payload, DMR_VOICE_BYTES);
+-	if (enc)
+-		s.cfg.privacy(v, i, false, s.cfg.privacy_ctx);
++	s.view.caller.decrypted = false;
++	bool playable = !s.cfg.aes_slot && (!enc || (s.cfg.privacy && !s.view.caller.pi_header));
++#if CONFIG_DV_AES
++	if (s.cfg.aes_slot) {
++		playable = enc && s.cfg.aes_slot <= 4 && dmr_aes_voice(v, i, false, now, s.view.caller.dst);
++		s.view.caller.decrypted = playable;
++	} else
++#endif
++	if (enc && playable) s.cfg.privacy(v, i, false, s.cfg.privacy_ctx);
++	if (!playable) {
++		stats.rx_enc_dropped++; TR_WHAT('e');
++		sink_lost(DMR_AMBE_FRAMES_PER_BURST);
++		return;
++	}
+ 	stats.rx_voice_bursts++;
+ 	TR_WHAT('p');
+ 	if (s.sink && s.sink->frame)
+@@ -913,14 +930,22 @@
+ 
+ 		ok = b->payload[10] == (uint8_t)(crc >> 8) && b->payload[11] == (uint8_t)crc;
+ 	}
+-	if (!ok || b->len < 2)
+-		return;
++	if (!ok || b->len < 2) {
++#if CONFIG_DV_AES
++        if (s.cfg.aes_slot) dmr_aes_reset();
++#endif
++        return;
++    }
++#if CONFIG_DV_AES
++	if (s.cfg.aes_slot && s.cfg.aes_slot <= 4)
++		dmr_aes_header(b->payload, b->len, s.rx == RXC_NONE ? 0 : s.view.caller.dst, now);
++#endif
+ 	stats.rx_pi_headers++;
+ 	if (s.rx == RXC_NONE) {
+ 		s.pi_pending = true;
+ 		s.pi_pending_ms = now;
+ 		s.pi_pending_alg = b->payload[0];
+-		s.pi_pending_key = b->payload[1];
++		s.pi_pending_key = b->len >= 3 ? b->payload[2] : 0;
+ 		return;
+ 	}
+ 
+@@ -930,7 +955,7 @@
+ 		stats.rx_encrypted_calls++;
+ 	c->pi_header = true;
+ 	c->pi_alg = b->payload[0];
+-	c->pi_key = b->payload[1];
++	c->pi_key = b->len >= 3 ? b->payload[2] : 0;
+ 	c->encrypted = true;
+ 	s.dirty = true;
+ }
+@@ -1194,6 +1219,12 @@
+ 			s.headers_left--;
+ 			continue;
+ 		}
++#if CONFIG_DV_AES
++		if (aes_pi_left) {
++			if (!tx_put(DMR_BURST_PI_HEADER, 0, true, dmr_aes_tx_header(), 12)) return;
++			aes_pi_left = false; continue;
++		}
++#endif
+ 		if (s.stop_req && s.voice_index == 0) {
+ 			// Superframe boundary: terminator, then let the modem drain (tx_done)
+ 			uint8_t full[DMR_LC_FULL_BYTES];
+@@ -1224,6 +1255,11 @@
+ 		uint8_t v[DMR_VOICE_BYTES];
+ 
+ 		memcpy(v, s.stage, DMR_VOICE_BYTES);
++#if CONFIG_DV_AES
++		if (s.cfg.aes_slot) {
++			if (!dmr_aes_voice(v, s.voice_index, true, now, 0)) { tx_deny(DMR_TX_ERR_REJECTED); return; }
++		} else
++#endif
+ 		if (s.cfg.privacy && (s.cfg.tx_svc & DMR_SVC_PRIVACY))
+ 			s.cfg.privacy(v, s.voice_index, true, s.cfg.privacy_ctx);
+ 		if (!tx_put(DMR_BURST_VOICE, s.voice_index, false, v, DMR_VOICE_BYTES))
+@@ -1248,6 +1284,14 @@
+ 		.src = s.cfg.own_id & DMR_ID_MAX,
+ 	};
+ 	dmr_timing_t timing;
++	if (s.cfg.aes_slot) {
++#if CONFIG_DV_AES
++		if (s.cfg.aes_slot > 4 || !dmr_aes_begin(s.cfg.aes_slot, l.dst)) { tx_deny(DMR_TX_ERR_REJECTED); return; }
++		l.fid = 0x10; l.svc |= DMR_SVC_PRIVACY;
++#else
++		tx_deny(DMR_TX_ERR_REJECTED); return;
++#endif
++	}
+ 
+ 	if (s.cfg.rmo)
+ 		timing = DMR_TIMING_ALIGNED;
+@@ -1278,6 +1322,7 @@
+ #endif
+ 	s.queue_cap = s.modem->tx_queue_space();
+ 	s.headers_left = DMR_CALL_TX_HEADERS;
++	aes_pi_left = s.cfg.aes_slot != 0;
+ 	s.voice_index = 0;
+ 	s.queued = s.started = 0;
+ 	s.stop_req = false;
+@@ -1692,6 +1737,9 @@
+ 		rx_end(s.now);
+ 		s.rpt_seen = false;
+ 	}
++#if CONFIG_DV_AES
++	if (rf_change || cfg->aes_slot != s.cfg.aes_slot) dmr_aes_reset();
++#endif
+ 	s.cfg = *cfg;
+ 	if (s.cfg.ts != 2)
+ 		s.cfg.ts = 1;
+@@ -1735,6 +1783,9 @@
+ 
+ void dmr_call_stop(void)
+ {
++#if CONFIG_DV_AES
++	dmr_aes_reset();
++#endif
+ 	if (!s.running)
+ 		return;
+ 	if (s.data_active)
+@@ -1940,6 +1991,7 @@
+ 
+ bool dmr_call_data_tx(const dmr_data_source_t *src)
+ {
++	if (s.cfg.aes_slot) return false; // data encryption is not implemented
+ 	if (!s.modem || !s.running || !s.configured || s.tx != TX_NONE || s.ptt || s.data_active || src == NULL ||
+ 	    src->next == NULL)
+ 		return false;
+--- a/core/cps/cps_openfw.c
++++ b/core/cps/cps_openfw.c
+@@ -117,6 +117,7 @@
+ 	ch->rx_hz = st.vfo_rx_hz;
+ 	ch->tx_hz = st.vfo_tx_hz != 0 ? st.vfo_tx_hz : st.vfo_rx_hz;
+ 	ch->mode = settings_vfo_mode(&st);
++	ch->aes_slot = (uint8_t)st.aes_vfo_slots;
+ 	ch->bw = settings_vfo_bw(&st);
+ 	ch->rx_tone = (subtone_t){ st.vfo_rx_tone_type, st.vfo_rx_tone };
+ 	ch->tx_tone = (subtone_t){ st.vfo_tx_tone_type, st.vfo_tx_tone };
+@@ -173,6 +174,7 @@
+ 		return;		// unchanged (written back as read), or not a valid record
+ 	}
+ 	settings_t *st = settings_begin();
++	st->aes_vfo_slots = (st->aes_vfo_slots & ~255u) | ch.aes_slot;
+ 	st->vfo_rx_hz = ch.rx_hz;
+ 	st->vfo_tx_hz = ch.tx_hz;
+ 	settings_set_vfo_mode_bw(st, ch.mode == RADIO_MODE_DMR && CONFIG_VFO_DMR ? RADIO_MODE_DMR :
+--- a/core/radio/radio_sm.c
++++ b/core/radio/radio_sm.c
+@@ -731,6 +731,7 @@
+ 	v->nac_rx = c->nac_rx;
+ 	v->nac_tx = c->nac_tx;
+ 	v->talkgroup = c->talkgroup;
++	v->aes_slot = c->aes_slot;
+ 	if (c->mode == RADIO_MODE_DMR) {
+ #if CONFIG_VFO_DMR
+ 		uint8_t over = sm->one_shot ? 0 : sm->manual ? sm->manual_ts : sm->talk_ts;
+@@ -859,7 +860,7 @@
+ 	radio_dv_cfg_t c = {
+ 		.mode = ch->mode, .rx_hz = ch->rx_hz, .tx_hz = ch->tx_hz, .power = sm->view.power,
+ 		.nac_rx = ch->nac_rx, .nac_tx = ch->nac_tx, .talkgroup = ch->talkgroup, .unit_id = dv_unit_id(ch),
+-		.hear_all = ch->hear_all, .wacn = ch->wacn, .sysid = ch->sysid,
++		.hear_all = ch->hear_all, .wacn = ch->wacn, .sysid = ch->sysid, .aes_slot = ch->aes_slot,
+ 	};
+ 	if (sm->hear_all_latch) {
+ 		// Digital monitor (the monitor key's press, as on DMR): every group, and on a conventional channel every NAC
+@@ -932,6 +933,8 @@
+ 	if (ch->tx_hz == 0) {
+ 		return TXDENY_NO_FREQ;
+ 	}
++	if (ch->aes_slot && (ch->aes_slot > 4 || !CONFIG_DV_AES ||
++	    (ch->mode != RADIO_MODE_DMR && ch->mode != RADIO_MODE_P25))) return TXDENY_MODE;
+ 	if (ch->rx_only) {
+ 		return TXDENY_RX_ONLY;
+ 	}
+@@ -1283,6 +1286,7 @@
+ 	const channel_t *ch = &sm->view.ch;
+ 	dmr_call_config_t cfg;
+ 	dmr_call_config_default(&cfg);
++	cfg.aes_slot = ch->aes_slot;
+ 	cfg.own_id = ch->dmr_id != 0 ? ch->dmr_id : sm->own_id;
+ 	cfg.cc = ch->color_code & 0x0Fu;
+ 	// The talk target: a one-shot target (the focused row PTT went to), else one chosen for now, else the channel's.
+@@ -4571,6 +4575,7 @@
+ 	if (v.rx_hz == 0 || !board_in_band(v.rx_hz, false)) {
+ 		return;
+ 	}
++	sm->vfo_ch.aes_slot = (uint8_t)(st->aes_vfo_slots >> (idx * 8));
+ 	sm->vfo_ch.rx_hz = v.rx_hz;
+ 	sm->vfo_ch.tx_hz = v.tx_hz != 0 ? v.tx_hz : v.rx_hz;
+ 	// The saved mode if this build has that VFO; an older record holds FM
+@@ -4596,6 +4601,7 @@
+ {
+ 	const channel_t *v = &sm->vfo_ch;
+ 	uint8_t power = v->power == CODEPLUG_POWER_DEFAULT ? SETTINGS_UNSET8 : v->power;
++	if (sm->vfo_seeded) st->aes_vfo_slots = (st->aes_vfo_slots & ~(255u << (idx * 8))) | ((uint32_t)v->aes_slot << (idx * 8));
+ 	// Digital modes have no analog tones: reuse their saved values for NAC/RAN, without changing the settings record.
+ 	bool dv = codeplug_mode_digital_voice(v->mode);
+ 	subtone_t rx = dv ? (subtone_t){ TONE_NONE, v->nac_rx } : v->rx_tone;
+--- a/tests/host/radioCoreTest.c
++++ b/tests/host/radioCoreTest.c
+@@ -1588,6 +1588,19 @@
+ 
+ #if CONFIG_VFO_DMR
+ // A DMR channel: color code, timeslot and the talk target (a contact is its ID and the group / private flag)
++static void test_aes_vfo_copy(void)
++{
++    dmr_start(true);
++    chans[4].aes_slot = 1; reload_channel();
++    req(RREQ_VFO_COPY, 0); run(50);
++    CHECK(sm.view.vfo && sm.view.ch.aes_slot == 1);
++    settings_t st; settings_read(&st);
++    CHECK((st.aes_vfo_slots & 255) == 1);
++    radio_sm_init(&sm, now);
++    CHECK(sm.vfo_ch.aes_slot == 1);
++    settings_defaults(settings_begin()); settings_end(now);
++}
++
+ static void test_vfo_copy_dmr(void)
+ {
+ 	const radio_dmr_view_t *d = &sm.view.dmr;
+@@ -4274,7 +4287,7 @@
+ 	CHECK(settings_flush());
+ 	n_ev = 0;
+ 	CHECK(ui_svc_factory_reset());
+-	sim_flash_cut_after(432);	// the settings records (page 1: 172 + 4 bytes, page 0: 252 + 4) go in, the native erase fails
++	sim_flash_cut_after(sizeof(settings_t) + SETTINGS_PAGES * 20);	// the settings records (page 1: 172 + 4 bytes, page 0: 252 + 4) go in, the native erase fails
+ 	storage_job_poll();
+ 	sim_flash_power_on();
+ 	CHECK(n_ev == 1 && strstr(last_ev.text, "native") != NULL);
+@@ -4862,7 +4875,7 @@
+ 	req(RREQ_PTT, 0);
+ #else
+ 	// receive only: PTT never reaches the channel
+-	CHECK(sm.view.state == RS_TX_DENIED && sm.view.tx_deny == TXDENY_MODE && dv.downs == 0);
++		CHECK(sm.view.state == RS_TX_DENIED && sm.view.tx_deny == TXDENY_MODE && dv.downs == before_downs);
+ 	req(RREQ_PTT, 0);
+ #endif
+ 	sm.set.bcl = RADIO_BCL_OFF;
+@@ -5229,6 +5242,7 @@
+ 	test_vfo_no_dmr();
+ #endif
+ 	test_vfo_copy();
++	test_aes_vfo_copy();
+ 	test_vfo_copy_dmr();
+ 	test_dmr_denied();
+ 	test_dmr_voice_features();
+--- /dev/null
++++ b/site/static/js/codeplug/aes_keys.js
+@@ -0,0 +1,56 @@
++// SPDX-License-Identifier: MIT
++// Copyright (c) 2026 The RadioFoundry Authors
++import { EE } from "./image.js";
++const BASE = EE + 0x7C00, ENTRY = 96, SLOTS = 4;
++const magic = [68, 86, 65, 69, 83, 49, 0, 0];
++const hex = (b) => Array.from(b, (n) => n.toString(16).padStart(2, "0")).join("").toUpperCase();
++const word = (b, o) => new DataView(b.buffer, b.byteOffset, b.byteLength).getUint32(o, true);
++const put = (b, o, n) => new DataView(b.buffer, b.byteOffset, b.byteLength).setUint32(o, n, true);
++function crc(b) {
++ let n = 0xFFFFFFFF;
++ for (const x of b) {
++  n ^= x;
++  for (let i = 0; i < 8; i++) n = (n >>> 1) ^ ((n & 1) ? 0xEDB88320 : 0);
++ }
++ return (n ^ 0xFFFFFFFF) >>> 0;
++}
++export function decodeAesKeys(b) {
++ const h = b.subarray(BASE, BASE + 16);
++ const valid = magic.every((n, i) => h[i] === n) && h[8] === SLOTS && h[9] === ENTRY && word(h, 12) === crc(h.subarray(0, 12));
++ return Array.from({ length: SLOTS }, (_, i) => {
++  const e = b.subarray(BASE + 16 + i * ENTRY, BASE + 16 + (i + 1) * ENTRY);
++  return valid && e[0] === 1 && e[1] === 0 && (e[2] || e[3]) && word(e, 92) === crc(e.subarray(0, 92))
++   ? { kid: e[2] | (e[3] << 8), key: hex(e.subarray(4, 36)) } : { kid: 0, key: "" };
++ });
++}
++export function validateAesKeys(keys) {
++ const seen = new Set();
++ if (keys.length > SLOTS) return true;
++ for (const k of keys) {
++  if (!k?.key) continue;
++  if (!/^[0-9A-Fa-f]{64}$/.test(k.key) || !Number.isInteger(k.kid) || k.kid < 1 || k.kid > 65535 || seen.has(k.kid)) return true;
++  seen.add(k.kid);
++ }
++ return false;
++}
++export function encodeAesKeys(keys, b) {
++ if (validateAesKeys(keys)) throw new Error("Invalid AES keys");
++ const was = decodeAesKeys(b);
++ let changed = false;
++ for (let i = 0; i < SLOTS; i++) {
++  const k = keys[i] || { kid: 0, key: "" };
++  if ((k.key || "").toUpperCase() === was[i].key && (!k.key || k.kid === was[i].kid)) continue;
++  const e = b.subarray(BASE + 16 + i * ENTRY, BASE + 16 + (i + 1) * ENTRY);
++  e.fill(0);
++  if (k.key) {
++   e[0] = 1; e[2] = k.kid & 255; e[3] = k.kid >> 8;
++   e.set(k.key.match(/../g).map((s) => parseInt(s, 16)), 4);
++   crypto.getRandomValues(e.subarray(36, 52));
++  }
++  put(e, 92, crc(e.subarray(0, 92))); changed = true;
++ }
++ if (changed) {
++  const h = b.subarray(BASE, BASE + 16); h.fill(0); h.set(magic); h[8] = SLOTS; h[9] = ENTRY;
++  put(h, 12, crc(h.subarray(0, 12)));
++ }
++}
+--- a/site/static/js/codeplug/records.js
++++ b/site/static/js/codeplug/records.js
+@@ -5,6 +5,7 @@
+ // field covers survive an edit. Addresses are image addresses (image.js). References between records (a channel's
+ // contact, a zone's channels) are 1-based numbers here; model.js turns them into objects.
+ 
++import { decodeAesKeys, encodeAesKeys } from "./aes_keys.js";
+ import { EE, FL } from "./image.js";
+ import {
+ 	getFreq, putFreq, getBcdId, putBcdId, getTone, putTone, getName, putName, getCoord, coordBytes, u16, put16,
+@@ -100,6 +101,7 @@
+ 
+ function decodeChannelFields(r, rxHz, txHz, l1, f1, f4, hasLoc, mode) {
+ 	return {
++		aesSlot: (r[0x32] & 31) === 0 ? 0 : (r[0x32] & 31) >= 17 && (r[0x32] & 31) <= 20 ? (r[0x32] & 31) - 16 : 255,
+ 		name: getName(r, 0, 16),
+ 		rxHz, txHz,
+ 		mode,
+@@ -137,6 +139,7 @@
+ // Write a channel's fields onto its stored record r (a blank one if r doesn't decode); r is changed in place
+ export function encodeChannel(c, r) {
+ 	if (getFreq(r, 0x10) === null) r.set(blankChannel());
++	r[0x32] = (r[0x32] & 0xE0) | (c.aesSlot ? c.aesSlot <= 4 ? 16 + c.aesSlot : 31 : 0);
+ 	putName(r, 0, 16, c.name);
+ 	putFreq(r, 0x10, c.rxHz);
+ 	putFreq(r, 0x14, c.txHz);
+@@ -362,6 +365,7 @@
+ export function decodeGeneral(b) {
+ 	const g = b.subarray(GENERAL, GENERAL + GENERAL_SIZE);
+ 	return {
++		aesKeys: decodeAesKeys(b),
+ 		radioName: getName(g, 0, 8),
+ 		dmrId: getBcdId(g, 8),
+ 		groupHang: g[0x18] === 0xFF ? 0 : g[0x18],
+@@ -372,6 +376,7 @@
+ }
+ 
+ export function encodeGeneral(s, b) {
++	encodeAesKeys(s.aesKeys || [], b);
+ 	const was = decodeGeneral(b);
+ 	const g = b.subarray(GENERAL, GENERAL + GENERAL_SIZE);
+ 	if (was.radioName !== s.radioName) putName(g, 0, 8, s.radioName);
+--- a/site/static/js/codeplug/model.js
++++ b/site/static/js/codeplug/model.js
+@@ -15,6 +15,7 @@
+ 	decodeAprs, encodeAprs, decodeGeneral, encodeGeneral, VFO, LUCZ,
+ } from "./records.js";
+ import { parseTone } from "./fields.js";
++import { validateAesKeys } from "./aes_keys.js";
+ import { readHeader } from "./iddb.js";
+ 
+ const REFS = ["contact", "rxList", "aprs"];
+@@ -124,7 +125,7 @@
+ 	"name", "rxHz", "txHz", "mode", "power", "tot", "rxTone", "txTone", "bw", "rxOnly", "allSkip", "zoneSkip", "vox",
+ 	"squelch", "colorCode", "timeslot", "contact", "rxList", "aprs", "dmrId", "noBeep", "noEco", "dmo", "roam",
+ 	"aliasTs1", "aliasTs2", "useLocation", "lat", "lon", "sfr", "sfrA", "sfrB",
+-	"nacRx", "nacTx", "talkgroup", "hearAll", "wacn", "sysid",	// P25 / NXDN / trunking (records.js decodeDigital)
++	"aesSlot", "nacRx", "nacTx", "talkgroup", "hearAll", "wacn", "sysid",	// P25 / NXDN / trunking (records.js decodeDigital)
+ ];
+ 
+ function flatChannel(c) {
+@@ -240,7 +241,7 @@
+ 		txTone: "", bw: 12.5, rxOnly: false, allSkip: false, zoneSkip: false, vox: false, squelch: 0, colorCode: 1,
+ 		timeslot: 1, contact: null, rxList: null, aprs: null, dmrId: 0, noBeep: false, noEco: false, dmo: false,
+ 		roam: false, aliasTs1: 0, aliasTs2: 0, useLocation: false, lat: 0, lon: 0, sfr: false, sfrA: 0, sfrB: 0,
+-		nacRx: 0x293, nacTx: 0x293, talkgroup: 0, hearAll: false, wacn: 0, sysid: 0,
++		aesSlot: 0, nacRx: 0x293, nacTx: 0x293, talkgroup: 0, hearAll: false, wacn: 0, sysid: 0,
+ 		...fields,
+ 	};
+ }
+@@ -285,6 +286,7 @@
+ 	const err = (table, item, field, code, params = {}) => out.push({ level: "error", table, item, field, code, params });
+ 	const warn = (table, item, field, code, params = {}) => out.push({ level: "warning", table, item, field, code, params });
+ 	const g = m.general;
++	if (validateAesKeys(g.aesKeys || [])) err("general", null, "aesKeys", "aes_keys");
+ 	if (!g.dmrId) warn("general", null, "dmrId", "no_dmr_id");
+ 	else if (g.dmrId > 0xFFFFFF) err("general", null, "dmrId", "id_range");
+ 	if (g.radioName.length > LIMITS.radioName) err("general", null, "radioName", "too_long", { max: LIMITS.radioName });
+@@ -301,6 +303,13 @@
+ 			else if (bands && !bands.some(([lo, hi]) => c[f] >= lo && c[f] <= hi)) warn("channels", c, f, "out_of_band");
+ 		}
+ 		for (const f of ["rxTone", "txTone"]) if (parseTone(c[f]) === null) err("channels", c, f, "bad_tone");
++		if (["p25", "nxdn", "p25trunk"].includes(c.mode)) {
++			const max = c.mode === "nxdn" ? 65519 : 65535;
++			if (!Number.isInteger(c.talkgroup) || c.talkgroup < 1 || c.talkgroup > max) err("channels", c, "talkgroup", "range", { min: 1, max });
++		}
++		if (c.aesSlot && (!["dmr", "p25"].includes(c.mode) || c.aesSlot > 4 ||
++			!g.aesKeys?.[c.aesSlot - 1]?.key || (c.mode !== "p25" && g.aesKeys[c.aesSlot - 1].kid > 255)))
++			err("channels", c, "aesSlot", "aes_slot");
+ 		if (c.colorCode < 0 || c.colorCode > 15) err("channels", c, "colorCode", "range", { min: 0, max: 15 });
+ 		if (c.mode === "dmr" && !c.contact && !c.rxOnly) warn("channels", c, "contact", "no_contact");
+ 		const band = listenBand(c.rxHz);
+--- a/site/static/js/codeplug/csv.js
++++ b/site/static/js/codeplug/csv.js
+@@ -363,6 +363,7 @@
+ 			keep("TX RAN", "nacTx", asInt(0, 63), (r) => (r.mode === "nxdn" ? r.nacTx : ""), ["RAN TX", "RAN"]),
+ 			keep("Talkgroup", "talkgroup", asInt(1, 65535), (r) => (DIGITAL.has(r.mode) ? r.talkgroup || "" : ""), ["TG", "Group ID", "TGID"]),
+ 			keep("Hear All Groups", "hearAll", asBool, (r) => (DIGITAL.has(r.mode) ? yesNo(r.hearAll) : ""), ["Hear All", "Monitor All"]),
++			keep("AES key slot", "aesSlot", asInt(0, 4), (r) => r.aesSlot || 0),
+ 			keep("WACN", "wacn", asHex(0xFFFFF, false), (r) => (r.mode === "p25trunk" ? hex(5)(r.wacn) : "")),
+ 			keep("System ID", "sysid", asHex(0xFFF, false), (r) => (r.mode === "p25trunk" ? hex(3)(r.sysid) : ""), ["SysID", "System"]),
+ 		],
+--- a/site/static/js/codeplug/qdmr.js
++++ b/site/static/js/codeplug/qdmr.js
+@@ -371,6 +371,7 @@
+ 
+ // qdmr YAML for the model: {text, notes}
+ export function exportQdmr(m) {
++	if (m.channels.some((c) => c.aesSlot)) throw new Error("AES channels require a binary or CSV export; YAML cannot preserve key selection.");
+ 	const notes = new Map();
+ 	const note = (code, n = 1) => notes.set(code, (notes.get(code) || 0) + n);
+ 	const g = m.general;
+--- a/site/static/js/editor/views.js
++++ b/site/static/js/editor/views.js
+@@ -323,6 +323,7 @@
+ 		dv({ ...txt("nacTx", "editor.col.nac_tx", nac(false)(t), (v) => nacText(v)), show: (r) => P25.has(r.mode) }),
+ 		dv({ ...txt("nacRx", "editor.col.ran_rx", nac(true)(t), (v) => String(v)), key: "nacRx", show: (r) => r.mode === "nxdn" }),
+ 		dv({ ...txt("nacTx", "editor.col.ran_tx", nac(false)(t), (v) => String(v)), key: "nacTx", show: (r) => r.mode === "nxdn" }),
++		{ ...sel("aesSlot", "editor.aes.slot", () => [[0, t("editor.aes.off")], ...[1, 2, 3, 4].map((i) => [i, `AES-256 · ${i}`]), [255, t("editor.aes.invalid")]]), show: (r) => ["dmr", "p25"].includes(r.mode) },
+ 		dv(txt("talkgroup", "editor.col.talkgroup", int(1, 65535)(t), (v) => (v ? String(v) : ""))),
+ 		dv(txt("dmrId", "editor.col.unit_id", dmrId(t), (v) => (v ? String(v) : ""))),
+ 		dv(chk("hearAll", "editor.col.hear_all")),
+--- a/site/static/js/editor/app.js
++++ b/site/static/js/editor/app.js
+@@ -359,6 +359,8 @@
+ 	}
+ }
+ 
++import { validateAesKeys } from "../codeplug/aes_keys.js";
++
+ // --- Radio tab: the radio-wide settings ---
+ 
+ function radioTab() {
+@@ -391,6 +393,24 @@
+ 			field("groupHang", t("editor.general.group_hang"), 3, t("editor.general.hang_help"), num(0, 255)),
+ 			field("privateHang", t("editor.general.private_hang"), 3, t("editor.general.hang_help"), num(0, 255))),
+ 	];
++	parts.push(h("h3", {}, "AES-256"), h("p", { class: "small muted" }, t("editor.aes.help")));
++	const keyRows = (g.aesKeys || Array.from({ length: 4 }, () => ({ kid: 0, key: "" }))).map((slot, i) => {
++		const id = h("input", { type: "number", min: 1, max: 65535, value: slot.kid || "", id: `aes-kid-${i}`, autocomplete: "off" });
++		const key = h("input", { type: "password", value: slot.key, maxlength: 64, id: `aes-key-${i}`, autocomplete: "new-password", spellcheck: "false" });
++		const error = h("span", { class: "small ed-err" });
++		const save = () => {
++			const next = (S.model.general.aesKeys || []).map((x) => ({ ...x }));
++			next[i] = { kid: Number(id.value), key: key.value.trim().toUpperCase() };
++			if (validateAesKeys(next)) { error.textContent = t("editor.problem.aes_keys"); return; }
++			error.textContent = "";
++			change(t("editor.undo.edit"), () => (S.model.general = { ...S.model.general, aesKeys: next }));
++		};
++		id.addEventListener("change", save); key.addEventListener("change", save);
++		return h("div", { class: "form-grid" },
++			h("div", { class: "form-row" }, h("label", { for: `aes-kid-${i}` }, `${i + 1} · ${t("editor.aes.kid")}`), id),
++			h("div", { class: "form-row" }, h("label", { for: `aes-key-${i}` }, t("editor.aes.key")), key, error));
++	});
++	parts.push(...keyRows);
+ 	if (S.conn) {
+ 		const p = S.conn.probe;
+ 		parts.push(h("h3", {}, t("editor.connected_radio")), h("dl", { class: "specs" },
+--- a/site/tests/qdmr.test.mjs
++++ b/site/tests/qdmr.test.mjs
+@@ -223,7 +223,7 @@
+ 	// ch2's "infinite": a channel can't turn its timeout off, so it takes the radio's
+ 	assert.deepEqual(codes, { path_cut: 1, aprs_period: 1, dmr_positioning: 1, tot_off: 1, scan_lists: 1 });
+ 
+-	assert.deepEqual(m.general, { radioName: "N0CALL", dmrId: 1234567, groupHang: 6, privateHang: 10, bootLine1: "Test Radio", bootLine2: "N0CALL" });
++	assert.deepEqual(m.general, { aesKeys: Array.from({ length: 4 }, () => ({ kid: 0, key: "" })), radioName: "N0CALL", dmrId: 1234567, groupHang: 6, privateHang: 10, bootLine1: "Test Radio", bootLine2: "N0CALL" });
+ 	assert.deepEqual(m.contacts.map((c) => [c.number, c.name, c.id, c.type, c.timeslot]),
+ 		[[1, "TG 9", 9, "group", 0], [2, "Echo Test", 9990, "private", 2], [3, "201", 201, "group", 0], [4, "All Call", 0xFFFFFF, "all", 0]]);
+ 	assert.deepEqual(m.dtmfContacts.map((d) => [d.name, d.code]), [["Gate", "123*#A"]]);
+--- a/site/i18n/en.json
++++ b/site/i18n/en.json
+@@ -1873,5 +1873,13 @@
+  "editor.form.dv": "P25 / NXDN",
+  "editor.err.nac": "NAC: hex 000-FFF (TX up to F7D), or any for RX",
+  "editor.err.wacn": "WACN: hex 00000-FFFFF",
+- "editor.err.sysid": "System ID: hex 000-FFF"
++ "editor.err.sysid": "System ID: hex 000-FFF",
++ "editor.aes.slot": "AES key slot",
++ "editor.aes.off": "Off (clear voice)",
++ "editor.aes.invalid": "Invalid slot — TX blocked",
++ "editor.aes.kid": "Key ID",
++ "editor.aes.key": "Key (64 hexadecimal digits)",
++ "editor.aes.help": "Four local AES-256 voice keys. P25 key IDs: 1–65535; DMR: 1–255. Binary backups contain these keys: keep them private. Re-provision keys after a settings reset or full-flash restore. DMR receivers need a PI header; late entry without it is muted.",
++ "editor.problem.aes_keys": "Enter unique key IDs and exactly 64 hexadecimal digits per key. Clear the key to remove a slot.",
++ "editor.problem.aes_slot": "Select a provisioned AES key slot supported by this mode."
+ }
+--- a/site/i18n/es.json
++++ b/site/i18n/es.json
+@@ -1873,5 +1873,13 @@
+  "editor.form.dv": "P25 / NXDN",
+  "editor.err.nac": "NAC: hex 000-FFF (TX hasta F7D), o any en RX",
+  "editor.err.wacn": "WACN: hex 00000-FFFFF",
+- "editor.err.sysid": "ID de sistema: hex 000-FFF"
++ "editor.err.sysid": "ID de sistema: hex 000-FFF",
++ "editor.aes.slot": "Ranura de clave AES",
++ "editor.aes.off": "Desactivado (voz en claro)",
++ "editor.aes.invalid": "Ranura inválida — TX bloqueada",
++ "editor.aes.kid": "ID de clave",
++ "editor.aes.key": "Clave (64 dígitos hexadecimales)",
++ "editor.aes.help": "Cuatro claves locales de voz AES-256. ID P25: 1–65535; DMR: 1–255. Las copias binarias contienen estas claves: guárdalas en privado. Reconfigura las claves tras reiniciar ajustes o restaurar toda la memoria. DMR necesita cabecera PI; sin ella se silencia la entrada tardía.",
++ "editor.problem.aes_keys": "Usa IDs únicos y exactamente 64 dígitos hexadecimales por clave. Borra la clave para quitar una ranura.",
++ "editor.problem.aes_slot": "Selecciona una ranura AES configurada y compatible con este modo."
+ }
+--- a/site/i18n/it.json
++++ b/site/i18n/it.json
+@@ -1873,5 +1873,13 @@
+  "editor.form.dv": "P25 / NXDN",
+  "editor.err.nac": "NAC: hex 000-FFF (TX fino a F7D), o any in RX",
+  "editor.err.wacn": "WACN: hex 00000-FFFFF",
+- "editor.err.sysid": "ID sistema: hex 000-FFF"
++ "editor.err.sysid": "ID sistema: hex 000-FFF",
++ "editor.aes.slot": "Slot chiave AES",
++ "editor.aes.off": "Disattivato (voce in chiaro)",
++ "editor.aes.invalid": "Slot non valido — TX bloccata",
++ "editor.aes.kid": "ID chiave",
++ "editor.aes.key": "Chiave (64 cifre esadecimali)",
++ "editor.aes.help": "Quattro chiavi vocali AES-256 locali. ID P25: 1–65535; DMR: 1–255. I backup binari contengono le chiavi: conservali privatamente. Riconfigura le chiavi dopo il ripristino delle impostazioni o della memoria completa. DMR richiede un header PI; senza, l’ingresso tardivo è silenziato.",
++ "editor.problem.aes_keys": "Usa ID univoci e 64 cifre esadecimali per chiave. Cancella la chiave per rimuovere lo slot.",
++ "editor.problem.aes_slot": "Seleziona uno slot AES configurato e compatibile con questa modalità."
+ }
+--- /dev/null
++++ b/site/tests/aes_keys.test.mjs
+@@ -0,0 +1,38 @@
++// SPDX-License-Identifier: MIT
++// Copyright (c) 2026 The RadioFoundry Authors
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { webcrypto } from "node:crypto";
++if (!globalThis.crypto) globalThis.crypto = webcrypto;
++import { empty, newChannel, encode, decode, validate } from "../static/js/codeplug/model.js";
++import { channelAddr } from "../static/js/codeplug/records.js";
++import { validateAesKeys } from "../static/js/codeplug/aes_keys.js";
++import { exportQdmr } from "../static/js/codeplug/qdmr.js";
++import { channelForm } from "../static/js/editor/views.js";
++const key = "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F";
++test("AES slots and 56-byte channel records preserve keys, KIDs and neighboring bits", () => {
++ const m = empty(); m.general.aesKeys[0] = { kid: 42, key };
++ for (const mode of ["dmr", "p25"]) m.channels.push(newChannel({ name: mode, mode, rxHz: 450000000, txHz: 450000000, aesSlot: 1, talkgroup: 42, nacRx: 1, nacTx: 12500 }));
++ let img = encode(m), back = decode(img);
++ assert.deepEqual(back.general.aesKeys[0], { kid: 42, key });
++ assert.deepEqual(back.channels.map((c) => c.aesSlot), [1,1]);
++ assert.deepEqual(encode(back).bytes, img.bytes);
++ const a = channelAddr(1) + 0x32; img.bytes[a] |= 0xE0;
++ back = decode(img); back.channels[0].aesSlot = 4;
++ const edited = encode(back); assert.equal(edited.bytes[a], 0xF4);
++ assert.deepEqual(edited.bytes.subarray(0x7C00,0x7D90), img.bytes.subarray(0x7C00,0x7D90));
++ back.channels[0].aesSlot = 0; assert.equal(decode(encode(back)).channels[0].aesSlot,0);
++ assert.throws(() => exportQdmr(m), /AES/);
++ for (const mode of ["dmr", "p25"]) assert.ok(channelForm(m,(s)=>s).find((f)=>f.key==="aesSlot"&&f.show({mode})));
++});
++test("AES validation rejects malformed keys, duplicate IDs, missing slots and DMR IDs above 255", () => {
++ for (const keys of [[{kid:1,key:"00"}],[{kid:0,key}],[{kid:65536,key}],[{kid:1,key},{kid:1,key}]]) assert.equal(validateAesKeys(keys),true);
++ const m = empty();m.channels.push(newChannel({name:"secure",mode:"dmr",rxHz:450000000,txHz:450000000,aesSlot:1}));
++ assert.ok(validate(m).some((e)=>e.code==="aes_slot"));
++ m.general.aesKeys[0]={kid:256,key};assert.ok(validate(m).some((e)=>e.code==="aes_slot"));
++ m.general.aesKeys[0].kid=42;assert.ok(!validate(m).some((e)=>e.code.startsWith("aes_")));
++ const img=encode(m);img.bytes[channelAddr(1)+0x32]=31;
++ assert.equal(decode(img).channels[0].aesSlot,255);
++ assert.ok(validate(decode(img)).some((e)=>e.code==="aes_slot"));
++ img.bytes[0x7C00+20]^=1;assert.equal(decode(img).general.aesKeys[0].key,"");
++});

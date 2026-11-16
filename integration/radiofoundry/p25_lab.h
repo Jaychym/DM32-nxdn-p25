@@ -13,6 +13,7 @@ typedef struct {
     uint16_t nac_rx, nac_tx, talkgroup;
     uint32_t unit_id;
     bool hear_all;
+    uint8_t aes_slot;
 } p25_lab_channel;
 typedef struct {
     uint32_t last_frame_ms;  /* hal_millis() of the last valid frame, any NAC */

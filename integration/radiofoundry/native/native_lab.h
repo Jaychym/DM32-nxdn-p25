@@ -42,8 +42,8 @@ typedef struct {
     bool inbound;            /* P25 trunking: an inbound packet is on air (not counted as a call) */
     uint32_t inbound_sent;
 } native_channel_state;
-/* NULL leaves the channel: the session stops and the board is back in FM on
- * return. 0: a bench session or the updater has the modem. */
+/* Radio task only. NULL waits for the session's final audio/mic cleanup and
+ * returns the board in FM. 0: a bench session or the updater has the modem. */
 int native_lab_channel(const native_channel *);
 int native_lab_channel_ptt(bool down);
 #if defined(CONFIG_P25_TRUNK_TX) && CONFIG_P25_TRUNK_TX

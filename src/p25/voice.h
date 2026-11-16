@@ -3,6 +3,10 @@
 #define P25_VOICE_H
 #include "p25.h"
 #include "dm32_imbe.h"
+#include <stdbool.h>
+#if defined(CONFIG_DV_AES) && CONFIG_DV_AES
+#include "voice_aes.h"
+#endif
 
 /* Conventional, clear, group voice; half duplex. All calls and the PCM sink
  * run in ONE worker task, never in an ISR. No dynamic allocation. The sink
@@ -17,6 +21,13 @@ typedef struct {
     uint16_t bytes;
 } p25_voice_packet;
 typedef struct {
+#if defined(CONFIG_DV_AES) && CONFIG_DV_AES
+    voice_aes aes;
+    uint8_t aes_key[32];
+    uint16_t aes_kid, aes_superframes;
+    uint8_t aes_required, aes_phase, aes_tx;
+    bool (*aes_lookup)(uint16_t kid, uint8_t key[32]);
+#endif
     dm32_imbe_context codec; /* RX and TX share it; every direction change resets it */
     p25_rx framer;
     p25_call call;
@@ -50,6 +61,10 @@ void p25_voice_init(p25_voice *v, uint16_t nac, uint16_t group,
 /* Clear RX admission/timing after tuning, a discontinuity, or carrier loss.
  * Caller owns the receive hang timer; no time unit is guessed here. */
 void p25_voice_rx_reset(p25_voice *v);
+#if defined(CONFIG_DV_AES) && CONFIG_DV_AES
+void p25_voice_set_aes(p25_voice *, const uint8_t key[32], uint16_t kid);
+int p25_voice_tx_begin_aes(p25_voice *, const p25_call *, uint64_t mi);
+#endif
 void p25_voice_rx_dibit(p25_voice *v, uint8_t dibit);
 int p25_voice_tx_begin(p25_voice *v, const p25_call *call);
 /* Exactly one 8 kHz / 20 ms microphone block; mutable for the codec.

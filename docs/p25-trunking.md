@@ -2,7 +2,7 @@
 
 A trunk channel (`P25T`) puts the radio on one P25 Phase 1 trunked system.
 - **Listens (always):** finds the system's control channel, follows group calls to FDMA voice channels and back.
-- **Transmits (only in a `CONFIG_P25_TRUNK_TX` build):** registers, affiliates to its talkgroup and asks for a voice
+- **Transmits (only with the channel's Trunk TX switch enabled in a `CONFIG_P25_TRUNK_TX` build):** registers, affiliates to its talkgroup and asks for a voice
   channel on PTT.
 
 Phase 2 (TDMA) voice channels are not followed: see [p25-phase2.md](p25-phase2.md).
@@ -30,6 +30,7 @@ The protocol code has no RTOS and no hardware access. Host tests run it unchange
 | Talkgroup | channel | Affiliated to; PTT talks to it |
 | RX NAC | channel | The control channel's NAC, or any (F7E) |
 | Hear all | channel | Follow every group grant, not only the talkgroup |
+| Trunk TX | channel editor, web CPS, CSV | Explicit permission for registration, affiliation and voice. Disabled on old and newly created channels; RX-only must also be clear |
 
 The logic also follows a priority list of up to 8 talkgroups (`p25t_su_cfg.priority`). The channel record has no
 field for it yet, so on the radio the list is empty.
@@ -77,11 +78,15 @@ the idle slot it waited for. That pipeline latency is not measured on the radio.
 
 | Rule | How |
 |---|---|
-| Transmit off by default | `CONFIG_P25_TRUNK_TX` is off unless built with `--trunk-tx`. Without it the radio core refuses PTT on a trunk channel (`TXDENY_MODE`), the channel layer has no inbound packet path compiled in, and the logic's `tx_enabled` is false. |
+| Transmit off per channel | Old channels and newly selected trunk modes have Trunk TX disabled. The channel must explicitly opt in, with RX-only clear. The release includes `CONFIG_P25_TRUNK_TX` (`--trunk-tx`); without that build option, PTT is refused and no inbound packet path is compiled in. |
 | Only on the configured system | Transmit needs a user-entered WACN (20 bits), System ID (12 bits), unit ID (24 bits) and talkgroup (`p25t_su_init` clears `tx_enabled` otherwise). The control channel must broadcast that WACN and System ID first, and another system's broadcasts send the logic back to hunting. |
 | Our unit ID only | Every inbound packet and our voice carry `cfg.unit_id`. IDs heard on the air are shown, never stored for transmit. No function reads, copies or spoofs other units' IDs. |
 | No transmission without PTT | Except registration, affiliation and de-registration on the configured system, each rate-limited. Leaving the channel sends nothing, because the board is back in FM first. |
 | Out of scope | Emergency, supplementary services, individual calls, data, and encryption. Encrypted calls are muted and never decrypted. |
+
+The radio exposes P25 Trunk in the VFO mode cycle and channel editor. WACN accepts five hex digits and System ID three. Zero is a receive wildcard and cannot enable TX. VFO copy/restart and the CPS VFO overlay preserve the site and explicit TX permission. See [the implementation design](p25-trunking-radio.md).
+
+Trunk TX remains experimental. Protocol simulations do not establish RF timing or interoperability. The initial PlutoSDR control/voice waveform tests receive only; validating transmit needs a duplex site responder.
 
 Test trunked transmit only on a system you are authorized on, or in a lab.
 

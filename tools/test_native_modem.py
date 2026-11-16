@@ -34,6 +34,11 @@ def main():
          'integration/radiofoundry/firstboot/native_tx_gate.c','integration/radiofoundry/firstboot/firstboot.c',
          'tests/native/test_tx_owner.c','-o',OUT/'test_tx_owner'])
     run([OUT/'test_tx_owner'])
+    run(['clang',*owner_flags,'-DCONFIG_P25_NATIVE=1','-DCONFIG_DMR=1',
+         'src/modem/native_test.c','integration/radiofoundry/native/native_lab.c',
+         'tests/native/test_audio_handoff.c',app/'core/dmr/ambe/ambeVoice.c',app/'core/dmr/ambe/ambeFec.c',
+         '-o',OUT/'test_audio_handoff'])
+    run([OUT/'test_audio_handoff'])
     run(["clang",*flags,"-Itests/native/stubs","-I"+str(app/"core"),"-DCONFIG_P25_NATIVE=1","-DCONFIG_DEV_TX=1","src/modem/native_test.c",
          "integration/radiofoundry/native/hrc_native_chip.c","integration/radiofoundry/native/hrc_native_port.c",
          "tests/native/test_port.c","-o",OUT/"test_port"])
