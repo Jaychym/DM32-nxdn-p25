@@ -22,13 +22,11 @@ The radio transmits on 136-174 and 400-480 MHz. It also receives, never transmit
 108-136 MHz (air band, AM) and 174-260, 350-400 and 480-520 MHz, with less sensitivity outside the front-end filters.
 800 MHz trunked systems are out of its range.
 
-## Aviation AM receive
+## Aviation AM regression rollback
 
-Air-band receive uses a dedicated AM filter and automatic receiver gain control. The gain drops as a strong
-signal arrives and recovers gradually after it fades; changing frequency resets it for the new channel. The
-squelch uses the chip's noise reading, independently of gain changes. Returning to FM or DMR restores that mode's
-gain and audio settings. The air band remains receive-only. This firmware change has host validation; the reported
-overhead-aircraft distortion still needs a physical check ([validation](am-strong-signal.md)).
+The AM change in version `527f5229` was withdrawn after a report of worse, crunchy/overloaded audio. The current
+rollback restores the AM behavior from `b736e952`, retaining the DMR PTT fix, boot picture and four-mode VFO.
+It does not establish a fix for the original close-aircraft distortion. See [the investigation](am-regression.md).
 
 ## Setting up channels
 

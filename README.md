@@ -21,19 +21,17 @@ Firmware abierto y multimodo para el **Baofeng DM-32UV**: FM, DMR, **APCO P25 fa
 | APRS y posición GPS | Activados en esta versión; sin probar en el aire |
 | Tono de permiso estilo Motorola | P25/NXDN: TPT ASTRO 25 (3 bips de 910 Hz); DMR: chirp MOTOTRBO |
 | Tema «Rosa» | Tema claro rosa (Ajustes › Pantalla › Tema › Rosa) |
-| AM de aviación (108-136 MHz) | Control automático de ganancia para señales fuertes, filtro y demodulación AM, squelch independiente de la ganancia. Compilado y probado en host; pendiente de comprobar esta versión en la radio |
+| AM de aviación (108-136 MHz) | El squelch abre con los niveles 1-9 (antes solo con 0). Probado en la radio |
 | Recepción ampliada | Solo RX: 174-260, 350-400 y 480-520 MHz, con menos sensibilidad fuera de los filtros. TX sigue en 136-174 / 400-480 |
 
-## Hotfix — AM aviation strong signals
+## AM regression rollback
 
-La recepción AM incorpora ahora el control de ganancia de RadioFoundry para reducir la saturación cuando aumenta
-la señal. También usa el filtro y la salida AM correctos. El squelch toma el indicador de ruido del receptor,
-independiente de los cambios de ganancia; se retira el antiguo ajuste de +20 dB de `0022`. Al volver a FM o DMR
-se restauran los registros de ganancia y audio anteriores. Se conservan los cambios del Hotfix DMR y del VFO.
+El Hotfix AM `527f5229` queda retirado: se reportó audio más áspero y sobrecargado que antes. Se revierte su
+parche AM completo y se recupera el comportamiento de `b736e952`; se conservan las correcciones DMR, la imagen
+de arranque y el VFO FM/DMR/P25/NXDN. La versión retirada deja de ser estable y el instalador ofrece la restauración.
 
-Las pruebas del receptor, el núcleo de radio y los sanitizadores pasan; la imagen con AM y la variante sin AM
-compilan sin avisos y la revisión de pila pasa. **La distorsión reportada con un avión cercano no se ha reproducido
-ni verificado en hardware con esta versión.** Véase [alcance y validación](docs/am-strong-signal.md).
+**Esto revierte el empeoramiento; no da por resuelta la distorsión original con aviones cercanos.** El siguiente
+ajuste de AM necesita una comparación física antes de recomendarlo. Véase [el diagnóstico](docs/am-regression.md).
 
 ## Hotfix — DMR PTT, boot screen, and four-mode VFO
 
@@ -79,12 +77,11 @@ Parches de la serie (`integration/radiofoundry/patches/`):
 | `0019-nxdn-rx-any-ran-and-p25-f7f` | «Cualquier RAN» por canal en la radio: en la fila RAN de un canal NXDN, OK sin escribir alterna RX entre su RAN y todos (RX RAN 0) sin tocar el RAN TX; inicio muestra `RAN n/any`. En P25, escribir F7E o F7F pone RX «cualquiera» y conserva el NAC TX. El editor web y el CSV aceptan `any` en RX RAN; F7F en RX NAC se guarda como F7E |
 | `0020-p25-nxdn-digital-monitor` | Monitor digital como en DMR para P25 y NXDN: una pulsación corta de SK1 (tecla monitor) oye todos los NAC/RAN y grupos del canal sin editarlo; `DMon` en la pantalla. Otra pulsación, Atrás o cambiar de canal lo quita. La TX sigue con el NAC/RAN y grupo del canal. En troncal P25: todos los grupos |
 | `0021-dmr-ras-monitor-and-stock-air-band` | Repetidores DMR con RAS: con el monitor digital (SK1) una supertrama de voz en orden sin LC verificable se reproduce como llamada de grupo desconocida (TG/ID 0). La conversión del codeplug original conserva los canales de banda aérea (también sin frecuencia TX), como solo RX |
-| `0022-dm32-air-band-squelch` | AM de aviación: el DM-32 lee la banda aérea unos 20 dB más baja que la radio con la que se ajustó el squelch AM de RadioFoundry, así que ningún nivel salvo 0 abría. El ajuste original de +20 dB queda sustituido por el AGC y el squelch por ruido de 0028 |
+| `0022-dm32-air-band-squelch` | AM de aviación: el DM-32 lee la banda aérea unos 20 dB más baja que la radio con la que se ajustó el squelch AM de RadioFoundry, así que ningún nivel salvo 0 abría. La radio suma 20 dB a su RSSI en AM; el nivel 5 abre unos 8 dB sobre el ruido |
 | `0023-dm32-rx-only-bands` | Bandas solo RX 174-260, 350-400 y 480-520 MHz (VFO, canales, escaneo). La TX sigue limitada a 136-174 / 400-480. El aviso de bandas muestra rangos unidos («65-260 350-520») y el de TX denegada solo las bandas de TX |
 | `0024-boot-screen-picture` | Custom avatar and NXDN-P25-DM32 boot name; owner boot text preserved |
 | `0025-dmr-ptt-release-recovery` | Bounded DMR release and timeout; immediate HR_C7000 abort and PA timer cancellation |
 | `0026-conventional-digital-vfo` | FM/DMR/P25/NXDN VFO mode cycle, saved mode and NAC/RAN/group, and digital channel copy |
-| `0028-am-strong-signal-agc` | Backport de RadioFoundry ad79ab67: ajuste AM, AGC y squelch por ruido; sustituye el ajuste AM de 0022 |
 
 Fuera de la serie: recepción NXDN corregida (filtros del FD6818 en la ruta plana, FSW en ambas polaridades, ganancia AF) en `integration/radiofoundry/nxdn/` y `src/nxdn/`.
 
