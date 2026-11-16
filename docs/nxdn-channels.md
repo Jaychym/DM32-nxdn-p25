@@ -59,7 +59,7 @@ PTT on an NXDN channel goes through the radio core's `tx_check` like FM, DMR and
 |---|---|
 | TX inhibit, RX only, no TX frequency | Refused, with the reason on screen |
 | Band limits, power, battery | The board's FM transmit entry: band limits, the calibrated power level |
-| Unit ID, group | Refused without a unit ID or group, or with a unit ID above 65519 (set the channel's own ID) |
+| Unit ID, group | Refused without a unit ID or group. A unit ID above 65519 (often the radio's DMR ID) shows "NXDN ID above 65519 / Set channel Unit ID": set the channel's own ID |
 | Busy channel lockout | Settings BCL: `Carrier` refuses while NXDN frames of any RAN are heard; `Wrong tone` (the RAN lockout) while frames of another RAN are heard. Our own RAN's call: talk back |
 | Time-out | The channel's TOT, else the radio's. At the limit the call ends with its release frame, then "TX time-out reached" until PTT is released |
 | PTT release | The current frame is padded with voice silence, the TX_REL frame and a short tail go out, then the carrier drops and receive resumes |

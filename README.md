@@ -88,6 +88,7 @@ Parches de la serie (`integration/radiofoundry/patches/`):
 | `0024-boot-screen-picture` | Custom avatar and NXDN-P25-DM32 boot name; owner boot text preserved |
 | `0025-dmr-ptt-release-recovery` | Bounded DMR release and timeout; immediate HR_C7000 abort and PA timer cancellation |
 | `0026-conventional-digital-vfo` | FM/DMR/P25/NXDN VFO mode cycle, saved mode and NAC/RAN/group, and digital channel copy |
+| `0028-nxdn-id-tx-deny` | NXDN con un ID mayor de 65519 (normalmente el ID DMR) muestra «ID NXDN mayor de 65519 / Fija el ID de unidad» en vez de pedir el ID DMR en qdmr. En P25/NXDN sin ID o sin grupo, la ayuda pide el ID o el grupo del canal |
 
 Fuera de la serie: recepción NXDN corregida (filtros del FD6818 en la ruta plana, FSW en ambas polaridades, ganancia AF) en `integration/radiofoundry/nxdn/` y `src/nxdn/`.
 

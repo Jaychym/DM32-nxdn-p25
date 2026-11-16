@@ -1,0 +1,204 @@
+--- a/core/radio/radio.h
++++ b/core/radio/radio.h
+@@ -30,11 +30,12 @@
+ // access), NO_REPEATER the repeater didn't wake, REJECTED the modem refused, HOTSPOT the radio is a hotspot now,
+ // NO_ID no DMR ID in the codeplug, SFR_RPT the radio is the channel's single frequency repeater. BUSY on FM: busy channel lockout. INHIBIT: transmit is switched off in the
+ // settings. BATTERY: the battery is critical. AM: the channel is received in AM (the air band, CONFIG_AM_RX): receive
+-// only, the radio never transmits there. BCAST: the same for the broadcast band (CONFIG_BCAST_FM)
++// only, the radio never transmits there. BCAST: the same for the broadcast band (CONFIG_BCAST_FM). NXDN_ID: the unit ID
++// an NXDN call would carry is above NXDN's 16-bit range (1-65519), usually the radio's DMR ID on a channel without its own
+ typedef enum {
+ 	TXDENY_NONE, TXDENY_RX_ONLY, TXDENY_BAND, TXDENY_TIMEOUT, TXDENY_NO_FREQ, TXDENY_MODE,
+ 	TXDENY_NO_CODEC, TXDENY_NO_DMR, TXDENY_BUSY, TXDENY_NO_REPEATER, TXDENY_REJECTED, TXDENY_HOTSPOT, TXDENY_NO_ID,
+-	TXDENY_INHIBIT, TXDENY_BATTERY, TXDENY_AM, TXDENY_BCAST, TXDENY_SFR_RPT,
++	TXDENY_INHIBIT, TXDENY_BATTERY, TXDENY_AM, TXDENY_BCAST, TXDENY_SFR_RPT, TXDENY_NXDN_ID,
+ } tx_deny_t;
+ 
+ // Busy channel lockout (FM): CARRIER refuses PTT while anything is heard on the channel; WRONG_TONE only while a
+--- a/core/radio/radio_sm.c
++++ b/core/radio/radio_sm.c
+@@ -956,7 +956,7 @@
+ 			return TXDENY_NO_ID;		// and a trunked one the system's WACN and System ID, as the user entered them
+ 		}
+ 		if (ch->mode == RADIO_MODE_NXDN && dv_unit_id(ch) > NXDN_UNIT_MAX) {
+-			return TXDENY_NO_ID;		// NXDN unit IDs are 16 bits, 1-65519: set the channel's own ID
++			return TXDENY_NXDN_ID;		// NXDN unit IDs are 16 bits, 1-65519: set the channel's own ID
+ 		}
+ 	}
+ #endif
+--- a/core/ui/ui_screens.c
++++ b/core/ui/ui_screens.c
+@@ -1211,6 +1211,7 @@
+ 		sb_str(&b, dv_channel(v) ? (v->ch.talkgroup == 0 ? TR("No talkgroup on channel") : TR("No unit ID in codeplug")) :
+ 			TR("No DMR ID in codeplug"));
+ 		break;
++	case TXDENY_NXDN_ID: sb_str(&b, TR("NXDN ID above 65519")); break;
+ 	case TXDENY_AM: sb_str(&b, TR("Air band: receive only")); break;
+ 	case TXDENY_BCAST: sb_str(&b, TR("Broadcast: receive only")); break;
+ 	case TXDENY_SFR_RPT: sb_str(&b, TR("Repeater channel: PTT off")); break;
+@@ -1230,7 +1231,10 @@
+ 	case TXDENY_REJECTED:
+ 	case TXDENY_NO_DMR: return TR("Release PTT, try again");
+ 	case TXDENY_HOTSPOT: return TR("OK stop hotspot");
+-	case TXDENY_NO_ID: return TR("Set your DMR ID in qdmr");
++	case TXDENY_NO_ID:
++		if (!dv_channel(v)) return TR("Set your DMR ID in qdmr");
++		return v->ch.talkgroup == 0 ? TR("Set channel talkgroup") : TR("Set channel Unit ID");
++	case TXDENY_NXDN_ID: return TR("Set channel Unit ID");
+ 	case TXDENY_AM:
+ 	case TXDENY_BCAST: return v->vfo ? TR("Tune out of the band") : TR("Pick another channel");
+ 	case TXDENY_SFR_RPT: return TR("Pick a user channel to talk");
+--- a/core/ui/lang/es.po
++++ b/core/ui/lang/es.po
+@@ -1733,12 +1733,12 @@
+ msgstr "RAN de 0 a 63"
+ 
+ #: core/ui/ui_menus.c
++msgid "DCS codes use digits 0-7"
++msgstr "Códigos DCS: dígitos 0-7"
++
++#: core/ui/ui_menus.c
+ msgid "NAC goes 000 to F7D"
+ msgstr "NAC de 000 a F7D"
+-
+-#: core/ui/ui_menus.c
+-msgid "DCS codes use digits 0-7"
+-msgstr "Códigos DCS: dígitos 0-7"
+ 
+ #: core/ui/ui_menus.c
+ msgid "Not changed: 0 to 495, steps of 15"
+@@ -3189,6 +3189,10 @@
+ msgstr "todos"
+ 
+ #: core/ui/ui_screens.c
++msgid "DMon"
++msgstr "DMon"
++
++#: core/ui/ui_screens.c
+ msgid "IDLE"
+ msgstr "LIBRE"
+ 
+@@ -3289,6 +3293,10 @@
+ msgstr "Sin ID DMR en codeplug"
+ 
+ #: core/ui/ui_screens.c
++msgid "NXDN ID above 65519"
++msgstr "ID NXDN mayor de 65519"
++
++#: core/ui/ui_screens.c
+ msgid "Air band: receive only"
+ msgstr "Banda aérea: solo RX"
+ 
+@@ -3341,6 +3349,14 @@
+ msgstr "Fija tu ID DMR en qdmr"
+ 
+ #: core/ui/ui_screens.c
++msgid "Set channel talkgroup"
++msgstr "Fija el grupo del canal"
++
++#: core/ui/ui_screens.c
++msgid "Set channel Unit ID"
++msgstr "Fija el ID de unidad"
++
++#: core/ui/ui_screens.c
+ msgid "Tune out of the band"
+ msgstr "Sal de la banda"
+ 
+@@ -3387,10 +3403,6 @@
+ #: core/ui/ui_screens.c
+ msgid "Roam"
+ msgstr "Roam"
+-
+-#: core/ui/ui_screens.c
+-msgid "DMon"
+-msgstr "DMon"
+ 
+ #: core/ui/ui_screens.c
+ msgid "Priv"
+--- a/core/ui/lang/it.po
++++ b/core/ui/lang/it.po
+@@ -1733,12 +1733,12 @@
+ msgstr "RAN da 0 a 63"
+ 
+ #: core/ui/ui_menus.c
++msgid "DCS codes use digits 0-7"
++msgstr "Codici DCS: cifre 0-7"
++
++#: core/ui/ui_menus.c
+ msgid "NAC goes 000 to F7D"
+ msgstr "NAC da 000 a F7D"
+-
+-#: core/ui/ui_menus.c
+-msgid "DCS codes use digits 0-7"
+-msgstr "Codici DCS: cifre 0-7"
+ 
+ #: core/ui/ui_menus.c
+ msgid "Not changed: 0 to 495, steps of 15"
+@@ -3189,6 +3189,10 @@
+ msgstr "tutti"
+ 
+ #: core/ui/ui_screens.c
++msgid "DMon"
++msgstr "DMon"
++
++#: core/ui/ui_screens.c
+ msgid "IDLE"
+ msgstr "IDLE"
+ 
+@@ -3289,6 +3293,10 @@
+ msgstr "Nessun ID DMR nel codeplug"
+ 
+ #: core/ui/ui_screens.c
++msgid "NXDN ID above 65519"
++msgstr "ID NXDN oltre 65519"
++
++#: core/ui/ui_screens.c
+ msgid "Air band: receive only"
+ msgstr "Banda aerea: solo ricezione"
+ 
+@@ -3341,6 +3349,14 @@
+ msgstr "Imposta il tuo ID DMR in qdmr"
+ 
+ #: core/ui/ui_screens.c
++msgid "Set channel talkgroup"
++msgstr "Imposta gruppo canale"
++
++#: core/ui/ui_screens.c
++msgid "Set channel Unit ID"
++msgstr "Imposta ID unità canale"
++
++#: core/ui/ui_screens.c
+ msgid "Tune out of the band"
+ msgstr "Sintonizza fuori banda"
+ 
+@@ -3387,10 +3403,6 @@
+ #: core/ui/ui_screens.c
+ msgid "Roam"
+ msgstr "Roam"
+-
+-#: core/ui/ui_screens.c
+-msgid "DMon"
+-msgstr "DMon"
+ 
+ #: core/ui/ui_screens.c
+ msgid "Priv"
+--- a/tests/host/radioCoreTest.c
++++ b/tests/host/radioCoreTest.c
+@@ -4753,7 +4753,7 @@
+ 	// A DMR ID beyond NXDN's 16-bit range: refused until the channel has its own unit ID
+ 	own_dmr_id = 3101234;
+ 	req(RREQ_PTT, 1);
+-	CHECK(sm.view.state == RS_TX_DENIED && sm.view.tx_deny == TXDENY_NO_ID && dv.downs == 1);
++	CHECK(sm.view.state == RS_TX_DENIED && sm.view.tx_deny == TXDENY_NXDN_ID && dv.downs == 1);
+ 	req(RREQ_PTT, 0);
+ 	chans[3].dmr_id = 65519;
+ 	req(RREQ_ZONE_POS, 0);
+@@ -4772,7 +4772,7 @@
+ 	req(RREQ_ZONE_POS, 2);
+ 	run(30);
+ 	req(RREQ_PTT, 1);
+-	CHECK(sm.view.state == RS_TX_DENIED && sm.view.tx_deny == TXDENY_NO_ID);
++	CHECK(sm.view.state == RS_TX_DENIED && sm.view.tx_deny == TXDENY_NXDN_ID);
+ 	req(RREQ_PTT, 0);
+ 	own_dmr_id = id;
+ 

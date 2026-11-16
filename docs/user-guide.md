@@ -117,6 +117,9 @@ back to 0.
 - `SelfOnly=1` under `[P25]` or `[NXDN]` and your unit ID is not the hotspot's own ID. For NXDN that is your
   NXDN ID (65519 or less), not your DMR ID.
 
+**NXDN ID.** NXDN IDs go up to 65519. A channel without its own Unit ID uses your DMR ID, and a 7-digit DMR ID is
+too large: PTT shows "NXDN ID above 65519". Put your NXDN ID in the channel's Unit ID.
+
 The Pi-Star live log shows where a call stops. If nothing at all appears while you transmit, the hotspot does not
 hear a valid signal. Report it with the radio's version, mode and frequency.
 
