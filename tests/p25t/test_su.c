@@ -704,6 +704,38 @@ static void tdma_calls(void)
     check_isps_are_ours();
 }
 
+/* One control channel, as a radio channel lists: hunting never retunes, so a status broadcast heard just before the
+ * hunt period ends still counts. WACN and System ID 0 (not entered): any system, receive only */
+static void single_control_channel(void)
+{
+    p25t_su su;
+    p25t_su_out o;
+    uint8_t net[P25T_TSBK_BYTES], rfss[P25T_TSBK_BYTES];
+    p25t_osp n = { .opcode = P25T_OSP_NET_STS_BCST, .u.net = { .wacn = WACN, .sysid = SYSID } };
+    p25t_osp f = { .opcode = P25T_OSP_RFSS_STS_BCST, .u.rfss = { .sysid = SYSID, .rfss = 2, .site = 3 } };
+    p25t_osp_build(&n, net);
+    p25t_osp_build(&f, rfss);
+    p25t_su_cfg c = { .wacn = WACN, .sysid = SYSID, .unit_id = 1001, .nac = NAC, .cc_hz = { 460012500 }, .cc_count = 1,
+                      .talkgroup = GROUP };
+    p25t_su_init(&su, &c, 0, 1, &o);
+    p25t_su_tick(&su, P25T_SU_HUNT_MS - 100, &o);
+    p25t_su_tsbk(&su, NAC, net, &o);
+    p25t_su_tick(&su, P25T_SU_HUNT_MS + 100, &o);
+    assert(!o.tune && su.state == P25T_SU_HUNT);
+    p25t_su_tsbk(&su, NAC, rfss, &o);
+    assert(su.state == P25T_SU_CC);
+    p25t_su_cfg any = c;
+    any.wacn = 0;
+    any.sysid = 0;
+    any.tx_enabled = true;
+    p25t_su_init(&su, &any, 0, 1, &o);
+    assert(!su.cfg.tx_enabled);
+    p25t_su_tsbk(&su, NAC, net, &o);
+    p25t_su_tsbk(&su, NAC, rfss, &o);
+    assert(su.state == P25T_SU_CC);
+    fprintf(stderr, "one control channel: no retune while hunting; WACN/System ID 0 hears any system, receive only\n");
+}
+
 int main(void)
 {
     registered_and_affiliated();
@@ -715,6 +747,7 @@ int main(void)
     contention();
     lost_and_leave();
     tdma_calls();
+    single_control_channel();
     fprintf(stderr, "test_su: ok\n");
     return 0;
 }

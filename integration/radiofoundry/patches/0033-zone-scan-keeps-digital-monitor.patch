@@ -1,0 +1,91 @@
+--- a/core/radio/radio_sm.c
++++ b/core/radio/radio_sm.c
+@@ -1625,8 +1625,12 @@
+ 	sm->view.dmr.target_manual = false;
+ 	sm->one_shot = false;
+ 	sm->view.dmr.one_shot = false;
+-	sm->hear_all_latch = false;	// and so does the hear all latch
+-	sm->view.dmr.hear_all_latch = false;
++	bool zone_scan = false;
++#if CONFIG_SCAN
++	zone_scan = sm->scan.kind == SCAN_ZONE;	// a zone scan takes it past FM channels (scan_channel)
++#endif
++	sm->hear_all_latch = sm->hear_all_latch && zone_scan;	// and so does the hear all latch
++	sm->view.dmr.hear_all_latch = sm->hear_all_latch;
+ 	sm->view.dmr.hear_all = sm->view.monitor;
+ 	memset(&sm->view.dmr.call, 0, sizeof(sm->view.dmr.call));
+ 	sm->view.dmr.active = false;
+@@ -2669,6 +2673,17 @@
+ 	}
+ }
+ 
++// A zone scan tunes the channel at pos. Digital monitor goes with the scan (#5): on where it started (or turned on at a
++// stop), it stays on at each channel the scan tunes and where the scan ends, not just on the channel it was latched on
++static void scan_channel(radio_sm_t *sm, uint16_t pos, const channel_t *ch, uint32_t now_ms)
++{
++	set_channel(sm, pos, ch);
++#if CONFIG_DMR
++	sm->latch_ch = sm->view.channel_number;	// read only while the latch is on
++#endif
++	tune(sm, now_ms);
++}
++
+ // End the scan: stay where it is, or (cancel) go back to where it started
+ static void scan_stop(radio_sm_t *sm, bool cancel, uint32_t now_ms)
+ {
+@@ -2695,8 +2710,7 @@
+ 		} else if (sm->view.zone_pos != sc->origin_pos) {
+ 			channel_t ch;
+ 			if (codeplug_channel(sm->zone.channels[sc->origin_pos], &ch)) {
+-				set_channel(sm, sc->origin_pos, &ch);
+-				tune(sm, now_ms);
++				scan_channel(sm, sc->origin_pos, &ch, now_ms);
+ 			}
+ 		}
+ 	}
+@@ -2728,8 +2742,7 @@
+ 			scan_stop(sm, false, now_ms);
+ 			return false;
+ 		}
+-		set_channel(sm, (uint16_t)pos, &ch);
+-		tune(sm, now_ms);
++		scan_channel(sm, (uint16_t)pos, &ch, now_ms);
+ 	}
+ 	scan_tuned(sc, now_ms);
+ 	scan_publish(sm);
+--- a/tests/host/radioFeaturesTest.c
++++ b/tests/host/radioFeaturesTest.c
+@@ -1350,6 +1350,33 @@
+ 	}
+ 	CHECK(!held && max5 > 0 && max5 <= 1300);
+ 	req(RREQ_SCAN, RSCAN_STOP);
++
++	// The same call with digital monitor on where the scan started (#5): the latch goes with the scan, past the FM
++	// channels between, the call holds it, and it stays on where the scan ends. A channel changed by hand ends it
++	start();
++	chans[7].mode = RADIO_MODE_DMR;		// Last: DMR, the others as set up (FM, and DMR at 438.500)
++	chans[7].contact = 1;
++	signal_on(0, 438500000, 30, no_tone);
++	hw.sig[0].tdma = true;
++	air.on = true;
++	air.hz = 438500000;
++	air.t0 = now + 300;
++	air.dst = 99;
++	air.lc_at = 1;
++	req(RREQ_ZONE_POS, 6);
++	req(RREQ_DMR_HEAR_ALL, 1);
++	req(RREQ_SCAN, RSCAN_ZONE);
++	held = false;
++	for (int i = 0; i < 200 && !held; i++) {
++		run(25);
++		held = sm.view.zone_pos == 5 && sm.view.scan_phase == SCAN_PH_HOLD && sm.view.dmr.state == RDMR_RX;
++	}
++	CHECK(held && sm.view.dmr.hear_all_latch);
++	req(RREQ_SCAN, RSCAN_STOP);
++	CHECK(sm.view.scan == SCAN_OFF && sm.view.zone_pos == 5 && sm.view.dmr.hear_all_latch);
++	req(RREQ_ZONE_POS, 6);
++	CHECK(!sm.view.dmr.hear_all_latch);
++	air.on = false;
+ 	hw.sig[0].hz = 0;
+ }
+ 

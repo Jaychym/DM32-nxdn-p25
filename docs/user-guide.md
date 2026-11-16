@@ -40,8 +40,8 @@ between the channel's own NAC/RAN and every NAC/RAN, keeping the TX one.
 | RX RAN / TX RAN | - | 0-63; RX 0 (or `any`) hears every RAN | - |
 | Talkgroup | 1-65535: where PTT talks, and what plays | 1-65519 | 1-65535: affiliated to, PTT talks to it |
 | Hear All Groups | play every talkgroup | play every group | follow every group call on the system |
-| WACN | - | - | 5 hex digits, from the system's administrator |
-| System ID | - | - | 3 hex digits, from the system's administrator |
+| WACN | - | - | 5 hex digits, from the system's administrator (or RadioReference); 0 hears any (receive only) |
+| System ID | - | - | 3 hex digits, from the system's administrator (or RadioReference); 0 hears any (receive only) |
 | Unit ID | the channel's ID, else the radio's DMR ID | the same; NXDN needs 1-65519 | the same: **the ID the administrator assigned you** |
 
 ## DMR repeaters with restricted access (RAS)
@@ -86,8 +86,9 @@ Calls on another talkgroup, NAC or RAN, or encrypted calls, show but do not play
 
 **Digital monitor**, as on DMR: a short press of the monitor key (SK1) plays every talkgroup and every NAC (P25) or
 RAN (NXDN) on this channel; the status row shows `DMon` and a toast confirms it. Another press, Back or a change of
-channel ends it. PTT still talks with the channel's own NAC/RAN and talkgroup, and the channel is not changed. On a P25
-trunk channel it plays every group of the system.
+channel ends it. A zone scan started with digital monitor on keeps it on every channel it scans and where it stops, so
+a call on any talkgroup stops the scan. PTT still talks with the channel's own NAC/RAN and talkgroup, and the channel
+is not changed. On a P25 trunk channel it plays every group of the system.
 
 On P25, the speaker is muted between calls, including after power-on and after releasing PTT. A continuous hiss
 after the hotspot has returned to standby is not an expected transmit tail.
@@ -127,7 +128,7 @@ hear a valid signal. Report it with the radio's version, mode and frequency.
 
 | PTT line | Meaning |
 |---|---|
-| Searching for the site | No control channel with the channel's WACN and System ID is heard yet |
+| Searching for the site | No control channel with the channel's WACN and System ID is heard yet. Check the frequency, set RX NAC to `any`, and WACN/System ID to the system's (or 0 for any) |
 | Listen only | On the system; this firmware does not transmit on trunked systems (the default build) |
 | Not registered | On the system; transmit is built in, but the system has not registered the radio (yet, or it refused) |
 | TG n | Registered: PTT asks for a channel to talk to talkgroup n |

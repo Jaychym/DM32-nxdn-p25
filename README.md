@@ -8,16 +8,16 @@ Firmware abierto y multimodo para el **Baofeng DM-32UV**: FM, DMR, **APCO P25 fa
 
 > Firmware experimental. Úsalo bajo tu responsabilidad, solo en frecuencias en las que tengas licencia y con un respaldo de tu radio.
 
-## Estado (15 de noviembre de 2026)
+## Estado (16 de noviembre de 2026)
 
 | Función | Estado |
 |---|---|
-| FM y DMR | Funcionan (base RadioFoundry) |
+| FM y DMR | Base RadioFoundry; se investiga un fallo intermitente de DMR al cambiar de zona o modo que se recupera al reiniciar (#3) |
 | Mensajes DMR de texto libre | Hasta 140 caracteres desde Contactos; revisión antes de enviar. Compilado y probado en simulador, pendiente de probar en el aire |
 | P25 convencional, RX y TX | Verificado en la radio (voz IMBE en ambos sentidos) |
 | NXDN48, RX | Verificado en la radio (tramas, llamada y voz AMBE sin errores) |
 | NXDN48, TX | El receptor del firmware y dsd-fme decodifican la TX del DM-32 (RAN 1, TG 1, voz), capturada con un Pluto+. Hay reportes de radios Icom, un repetidor Kenwood y hotspots MMDVM que no la decodifican; pendiente medir la desviación. Solo NXDN48 (Icom «VN», 6,25 kHz), no NXDN96 |
-| Troncal P25 | Solo recepción; la TX troncal está desactivada |
+| Troncal P25 | Solo recepción, fase 1, VHF/UHF; aún sin probar en un sistema real. La TX troncal está desactivada. Pon RX NAC «cualquiera» y el WACN/System ID del sistema (o 0) |
 | APRS y posición GPS | Activados en esta versión; sin probar en el aire |
 | Tono de permiso estilo Motorola | P25/NXDN: TPT ASTRO 25 (3 bips de 910 Hz); DMR: chirp MOTOTRBO |
 | Tema «Rosa» | Tema claro rosa (Ajustes › Pantalla › Tema › Rosa) |
@@ -89,6 +89,10 @@ Parches de la serie (`integration/radiofoundry/patches/`):
 | `0025-dmr-ptt-release-recovery` | Bounded DMR release and timeout; immediate HR_C7000 abort and PA timer cancellation |
 | `0026-conventional-digital-vfo` | FM/DMR/P25/NXDN VFO mode cycle, saved mode and NAC/RAN/group, and digital channel copy |
 | `0028-nxdn-id-tx-deny` | NXDN con un ID mayor de 65519 (normalmente el ID DMR) muestra «ID NXDN mayor de 65519 / Fija el ID de unidad» en vez de pedir el ID DMR en qdmr. En P25/NXDN sin ID o sin grupo, la ayuda pide el ID o el grupo del canal |
+| `0032-flasher-stock-channels-not-found` | Web flasher: si al instalar sobre la firmware de fábrica no reconoce su codeplug, lo dice (aviso y enlace de reporte) en vez de terminar en silencio con la zona de codeplug llena de datos de fábrica; el reporte incluye páginas y canales válidos/rotos (#8) |
+| `0033-zone-scan-keeps-digital-monitor` | El monitor digital (SK1) sigue activo durante el escaneo de zona, también al pasar por canales FM, y en el canal donde el escaneo se detiene: una llamada a cualquier grupo detiene el escaneo. Cambiar de canal a mano lo quita, como antes (#5) |
+| `0034-editor-trunk-channel-rx-nac-any` | Editor web: un canal que pasa a «P25 Trunk» desde FM/DMR toma RX NAC «cualquiera», no el 293 que traía (con 293 el canal de control de casi ningún sistema se oía y la radio se quedaba «Buscando el sitio»). Junto con `src/p25t/su.c`: con un solo canal de control la radio ya no se resintoniza cada 3 s perdiendo lo oído, y WACN/System ID 0 aceptan cualquier sistema (solo RX) |
+| `0035-editor-writes-digital-channel-fields` | Editor web: un cambio solo de NAC/RAN, grupo, «Hear All», WACN o System ID ya se escribe en la radio (antes se descartaba como «ya tiene este codeplug»). Mismo arreglo que el 0031 de kgasso en el PR #7 |
 
 Fuera de la serie: recepción NXDN corregida (filtros del FD6818 en la ruta plana, FSW en ambas polaridades, ganancia AF) en `integration/radiofoundry/nxdn/` y `src/nxdn/`.
 

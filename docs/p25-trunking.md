@@ -44,7 +44,7 @@ The radio covers VHF and UHF only. 800 MHz systems are out of band and their cha
 
 | State | Screen (PTT line) | What happens |
 |---|---|---|
-| Hunting | "Searching for the site" | Waits for the configured WACN/System ID in NET_STS/RFSS_STS. A channel without either for 3 s means the next listed control channel. A trunk channel lists one; the logic takes up to 4. |
+| Hunting | "Searching for the site" | Waits for the configured WACN/System ID in NET_STS/RFSS_STS; a WACN or System ID of 0 accepts any (receive only: transmit needs both). With several control channels listed, a channel without either for 3 s means the next one; a trunk channel lists one and stays on it. The logic takes up to 4. |
 | On the site | "TG n", "Listen only" or "Not registered" | Stores the band plan. With transmit on, registers (U_REG_REQ), then affiliates (GRP_AFF_REQ), each at most every 30 s. After a refused registration it waits 60 s. |
 | Following a call | the call (TG, source) | A GRP_V_CH_GRANT or _UPDT for the talkgroup, a priority list entry or (hear all) any group. Tunes to the voice channel and plays it as a P25 channel; encrypted calls are muted. Returns after a terminator or 1.5 s without frames. |
 | Requesting | "Requesting a channel" | PTT sends GRP_V_REQ. ACK_RSP_FNE waits for the answer; QUE_RSP queues (10 s at most); DENY_RSP refuses. A grant for our group and unit ID transmits on the voice channel's inbound frequency. |

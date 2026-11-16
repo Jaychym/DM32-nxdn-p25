@@ -168,11 +168,12 @@ void p25t_su_tsbk(p25t_su *su, uint16_t nac, const uint8_t tsbk[P25T_TSBK_BYTES]
     uint32_t me = su->cfg.unit_id;
     switch (m.opcode) {
     case P25T_OSP_NET_STS_BCST:
-        su->net_ok = m.u.net.wacn == su->cfg.wacn && m.u.net.sysid == su->cfg.sysid;
+        /* WACN or System ID 0 (not entered): any, receive only (p25t_su_init keeps transmit off without them) */
+        su->net_ok = (!su->cfg.wacn || m.u.net.wacn == su->cfg.wacn) && (!su->cfg.sysid || m.u.net.sysid == su->cfg.sysid);
         if (!su->net_ok && su->state != P25T_SU_HUNT) set_state(su, P25T_SU_HUNT);   /* another system here */
         break;
     case P25T_OSP_RFSS_STS_BCST:
-        su->rfss_ok = m.u.rfss.sysid == su->cfg.sysid;
+        su->rfss_ok = !su->cfg.sysid || m.u.rfss.sysid == su->cfg.sysid;
         if (su->rfss_ok) {
             su->rfss = m.u.rfss.rfss;
             su->site = m.u.rfss.site;
@@ -326,7 +327,9 @@ void p25t_su_tick(p25t_su *su, uint32_t now_ms, p25t_su_out *out)
     su->now = now_ms;
     switch (su->state) {
     case P25T_SU_HUNT:
-        if (now_ms - su->state_ms >= P25T_SU_HUNT_MS) {
+        /* the next listed control channel; with one (a radio channel lists one) stay: retuning to the same frequency
+         * would only drop a status broadcast already heard and the frame being received */
+        if (su->cfg.cc_count > 1 && now_ms - su->state_ms >= P25T_SU_HUNT_MS) {
             su->cc_index = (uint8_t)((su->cc_index + 1) % su->cfg.cc_count);
             tune_cc(su, out, true);
         }

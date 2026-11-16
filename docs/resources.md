@@ -7,8 +7,11 @@ and the NXDN receive capture `nxdn_snap` (2,116 B; now behind `CONFIG_P25_BENCH`
 
 | Image | Switches | Flash | RAM | Free RAM |
 |---|---|---:|---:|---:|
-| Release (lean) | `--speed-codec --stack-check --lean` | 550,624 | 206,912 | 4,544 |
+| Release (lean), local issue-fix build | `--speed-codec --stack-check --lean` | 550,960 | 206,912 | 4,544 |
 | Bench | `--speed-codec --stack-check` | 552,684 | 211,440 | 16 |
+
+The local lean build includes patches 0032-0035 and the P25 control-channel hunting fix. The bench figure is the
+earlier build and has not been remeasured with these fixes.
 
 The heap stays at 40.5 KB: the P25 worker still needs its 8 KB stack for live encoding. The static stack check
 passes (least free: idle task, 136 bytes) with zero warnings. Lean polls an empty P25 receive queue every 5 ms

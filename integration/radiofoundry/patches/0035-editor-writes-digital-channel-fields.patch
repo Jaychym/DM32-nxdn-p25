@@ -1,0 +1,30 @@
+--- a/site/static/js/codeplug/model.js
++++ b/site/static/js/codeplug/model.js
+@@ -124,6 +124,7 @@
+ 	"name", "rxHz", "txHz", "mode", "power", "tot", "rxTone", "txTone", "bw", "rxOnly", "allSkip", "zoneSkip", "vox",
+ 	"squelch", "colorCode", "timeslot", "contact", "rxList", "aprs", "dmrId", "noBeep", "noEco", "dmo", "roam",
+ 	"aliasTs1", "aliasTs2", "useLocation", "lat", "lon", "sfr", "sfrA", "sfrB",
++	"nacRx", "nacTx", "talkgroup", "hearAll", "wacn", "sysid",	// P25 / NXDN / trunking (records.js decodeDigital)
+ ];
+ 
+ function flatChannel(c) {
+--- a/site/tests/codeplug.test.mjs
++++ b/site/tests/codeplug.test.mjs
+@@ -172,6 +172,17 @@
+ 	assert.ok(diff.length > 0 && diff.length <= 2, `changed bytes: ${diff.length}`);
+ });
+ 
++test("an edit of only a P25 / trunk channel's NAC, talkgroup, hear all, WACN or System ID is written", () => {
++	const m = empty();
++	m.channels.push(newChannel({ name: "CC", rxHz: 460012500, txHz: 465012500, mode: "p25trunk", wacn: 0xBEE00, sysid: 0x3A5 }));
++	const fields = { nacRx: 0xF7E, nacTx: 0x123, talkgroup: 4321, hearAll: true, wacn: 0xBEE01, sysid: 0x3A6 };
++	for (const [k, v] of Object.entries(fields)) {
++		const back = decode(encode(m));
++		back.channels[0][k] = v;
++		assert.equal(decode(encode(back)).channels[0][k], v, k);
++	}
++});
++
+ test("deleting records clears every reference to them", () => {
+ 	const m = decode(encode(rich()));
+ 	const tg91 = m.contacts.find((c) => c.id === 91);

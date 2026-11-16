@@ -1,0 +1,23 @@
+--- a/site/static/js/editor/views.js
++++ b/site/static/js/editor/views.js
+@@ -72,6 +72,8 @@
+ 	} else if (P25.has(v) && r.mode === "nxdn") {
+ 		r.nacRx = NAC_ANY;
+ 		r.nacTx = NAC_DEFAULT;
++	} else if (v === "p25trunk" && !P25.has(r.mode)) {
++		r.nacRx = NAC_ANY;	// a control channel's NAC is the system's, rarely the conventional 293: RX any hears it
+ 	}
+ 	// the digital voice modes need a talkgroup (1-65535) or the form won't save: talkgroup 1, as the radio's own switch
+ 	if (DIGITAL.has(v) && !r.talkgroup) r.talkgroup = 1;
+--- a/site/tests/editor.test.mjs
++++ b/site/tests/editor.test.mjs
+@@ -81,6 +81,9 @@
+ 		const trunk = { mode: "p25", nacRx: 0x123, nacTx: 0x456 };
+ 		set(trunk, "p25trunk");
+ 		assert.deepEqual([trunk.nacRx, trunk.nacTx], [0x123, 0x456]);	// P25 to P25: kept
++		const cc = { mode: "fm", nacRx: 0x293, nacTx: 0x293 };
++		set(cc, "p25trunk");
++		assert.deepEqual([cc.nacRx, cc.nacTx], [0xF7E, 0x293]);	// into trunking: RX any, not FM's leftover 293
+ 	}
+ });
+ 

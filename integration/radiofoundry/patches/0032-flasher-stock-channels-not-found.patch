@@ -1,0 +1,87 @@
+--- a/site/static/js/flasher/c7000ui.js
++++ b/site/static/js/flasher/c7000ui.js
+@@ -1216,13 +1216,13 @@
+ 	const box = h("div");
+ 	status.append(box);
+ 	const prog = progressBar();
+-	let m, tr, conv;
++	let m, tr, conv, stock;
+ 	const from = c.calArea ? "backup" : "radio";
+ 	try {
+ 		m = await import("./migrate.js");
+ 		const { CpsSerial } = await import("../codeplug/transport.js");
+ 		tr = new CpsSerial(c.stream, { cable: true });
+-		let stock = c.calArea;
++		stock = c.calArea;
+ 		if (!stock) {
+ 			box.append(prog.el);
+ 			const r = await tr.link.cpsDump(1, 0, lay.area, { chunk: tr.chunk, progress: (d, n) => prog.set(d, n, t("flash.channels.reading")) });
+@@ -1237,8 +1237,15 @@
+ 		return;
+ 	}
+ 	prog.el.remove();
+-	diag.note("channels", { from, ...(conv ? conv.counts : { layout: null }) });
+-	if (!conv || left()) return;
++	diag.note("channels", { from, ...(conv ? conv.counts : { layout: null, ...m.pagedFindings(stock) }) });
++	if (left()) return;
++	// A radio installed over its stock firmware always had a codeplug: not finding it is a problem to show, not a quiet
++	// end. Until channels are written, RadioFoundry's codeplug area may still hold the stock firmware's other data there
++	if (!conv) {
++		S().reportResult = "problem";
++		box.append(notice(t(c.backupSaved ? "flash.channels.convert_failed" : "flash.channels.convert_failed_no_backup"), "bad"), reportLine());
++		return;
++	}
+ 	if (!conv.counts.channels) {
+ 		box.append(notice(t("flash.channels.none"), "info"));
+ 		return;
+--- a/site/static/js/flasher/migrate.js
++++ b/site/static/js/flasher/migrate.js
+@@ -15,7 +15,7 @@
+ import { empty, encode, decode } from "../codeplug/model.js";
+ import { CodeplugImage } from "../codeplug/image.js";
+ import { writeRanges, VFOS } from "../codeplug/transport.js";
+-import { DM32_STOCK, detectStock as detectPaged, importStock as importPaged } from "../codeplug/stock_baofeng.js";
++import { DM32_STOCK, detectStock as detectPaged, importStock as importPaged, pageMap, stockEvidence } from "../codeplug/stock_baofeng.js";
+ 
+ // The stock family a memory chip read holds, or null (a RadioFoundry codeplug, a blank one, or one not read here)
+ export function stockLayoutOf(bytes) {
+@@ -108,6 +108,12 @@
+ 	return { image: encode(m), counts, notes };
+ }
+ 
++// Why a data flash read gave no stock codeplug, for the report: the pages in use (null: none, or a block on two pages)
++// and the channel records' evidence (stock_baofeng.js detectStock)
++export function pagedFindings(bytes) {
++	return { pages: (bytes && pageMap(bytes)?.size) || null, ...(bytes ? stockEvidence(bytes) : {}) };
++}
++
+ const countsOf = (img) => {
+ 	try {
+ 		return classify(img.bytes).layout === "openfw" ? imageCounts(img.bytes) : null;
+--- a/site/tests/stock_baofeng.test.mjs
++++ b/site/tests/stock_baofeng.test.mjs
+@@ -14,7 +14,7 @@
+ import { openFile } from "../static/js/editor/files.js";
+ import { makeBundle } from "../static/js/flasher/backup.js";
+ import { detect, convertersFor } from "../static/js/flasher/codeplug.js";
+-import { convertPagedStock, writeConverted } from "../static/js/flasher/migrate.js";
++import { convertPagedStock, pagedFindings, writeConverted } from "../static/js/flasher/migrate.js";
+ import { FakeCpsRadio } from "../static/js/codeplug/fakecps.js";
+ import { CpsSerial } from "../static/js/codeplug/transport.js";
+ 
+@@ -288,6 +288,15 @@
+ 	assert.equal(convertPagedStock(null), null);
+ });
+ 
++test("pagedFindings: what the report says when no stock codeplug converts", () => {
++	assert.deepEqual(pagedFindings(sample().read()), { pages: 8, good: 4, bad: 0 });
++	assert.deepEqual(pagedFindings(new Uint8Array(AREA).fill(0xFF)), { pages: null, good: 0, bad: 0 });
++	const dup = sample().read();
++	dup[0x1FFF] = 0x12;	// a block on two pages
++	assert.deepEqual(pagedFindings(dup), { pages: null, good: 0, bad: 0 });
++	assert.deepEqual(pagedFindings(null), { pages: null });
++});
++
+ test("writeConverted: a blank radio gets the channels at its base; the stock area stays as it was", async () => {
+ 	const stock = sample().read();
+ 	const radio = new FakeCpsRadio({ board: "DM-32UV", base: 0x700000, end: 0xF00000, cable: true });
