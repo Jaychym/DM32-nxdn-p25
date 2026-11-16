@@ -41,6 +41,12 @@ def main():
          RF / "dmr/ambe/ambeVoice.c", RF / "dmr/ambe/ambeFec.c", "-lm", "-o", OUT / "test_radio_nxdn"])
     run([OUT / "test_radio_nxdn"])
     run([OUT / "test_radio_nxdn", "--tx-ram"])
+    # The release (lean) build leaves out the bench capture
+    run(["clang", *[f for f in CFLAGS if f != "-std=c11"], "-std=gnu11", "-Wno-unused-parameter", "-DCONFIG_NXDN=1",
+         "-DCONFIG_DMR=1", "-DCONFIG_P25_BENCH=0", *inc, "tests/nxdn/test_radio_nxdn.c",
+         "integration/radiofoundry/nxdn/radio_nxdn.c", *LIB, RF / "dmr/ambe/ambeVoice.c", RF / "dmr/ambe/ambeFec.c", "-lm",
+         "-o", OUT / "test_radio_nxdn_lean"])
+    run([OUT / "test_radio_nxdn_lean"])
     run(["clang", *CFLAGS, "-Iintegration/radiofoundry/nxdn", "-I" + str(RF.parent / "hal"),
          "-I" + str(RF.parent / "drivers"), "tests/nxdn/test_dm32_nxdn.c",
          RF.parent / "drivers/modem/hrc7000/hrc7000.c", "-o", OUT / "test_dm32_nxdn"])

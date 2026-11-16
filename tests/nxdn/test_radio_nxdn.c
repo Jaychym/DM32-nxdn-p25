@@ -262,6 +262,7 @@ int main(int argc, char **argv)
     assert(n_dec - k >= 60 && !memcmp(dec[k], sent[0], 49));
     for (unsigned i = 0; i < 60; i++) assert(!memcmp(dec[k + i], sent[i], 49));
 
+#if CONFIG_P25_BENCH
     /* The bench capture (nxdn_snap): the samples the demodulator got, from the stream index it names, held whole */
     uint32_t seq0 = nxdn_snap.seq;
     for (unsigned guard = 0; nxdn_snap.seq == seq0 && guard < 300; guard++) step_ms(10);   /* a fresh one */
@@ -277,6 +278,7 @@ int main(int argc, char **argv)
     uint32_t seq = nxdn_snap.seq, held_at = nxdn_snap.t_ms;
     step_ms(NXDN_SNAP_HOLD_MS - 20);
     assert(nxdn_snap.seq == seq && nxdn_snap.t_ms == held_at);   /* held for the host */
+#endif
 
     /* A receiver whose discriminator gives the other sign: a call with every sample negated plays whole */
     unsigned dec0 = n_dec;

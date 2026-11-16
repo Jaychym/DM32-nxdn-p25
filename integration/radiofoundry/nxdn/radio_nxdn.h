@@ -7,6 +7,7 @@
 #ifndef RADIO_NXDN_H
 #define RADIO_NXDN_H
 #include "radio_dv.h"
+#include "config.h"
 
 bool radio_nxdn_select(const radio_dv_cfg_t *cfg);
 bool radio_nxdn_ptt(bool down);
@@ -14,10 +15,11 @@ void radio_nxdn_status(radio_dv_status_t *out, uint32_t now_ms);
 /* Every radio tick (10 ms): receive audio in, transmit ring topped up, voice paced to the speaker */
 void radio_nxdn_service(uint32_t now_ms);
 
-/* The receive audio as the demodulator gets it, for measuring the radio's flat path (docs/nxdn-modem.md "What the
+/* Bench builds only (CONFIG_P25_BENCH; 2.1 KB of RAM): the receive audio as the demodulator gets it, for measuring the radio's flat path (docs/nxdn-modem.md "What the
  * radio must confirm"): NXDN_SNAP_SAMPLES consecutive samples, then held NXDN_SNAP_HOLD_MS so the host reads them whole
  * with the debug link's READ_MEM (main SRAM; work/rx_ram_capture.py finds nxdn_snap in the map), then again. The
  * host takes a capture when seq and n read the same before and after the samples */
+#if CONFIG_P25_BENCH
 #define NXDN_SNAP_MAGIC 0x4E53584Eu   /* "NXSN" */
 #define NXDN_SNAP_SAMPLES 1024u       /* 128 ms: at least one whole FSW, and 6 periods of 50 Hz */
 #define NXDN_SNAP_HOLD_MS 2000u
@@ -31,5 +33,6 @@ typedef struct {
     int16_t pcm[NXDN_SNAP_SAMPLES];
 } nxdn_snap_t;
 extern nxdn_snap_t nxdn_snap;
+#endif
 
 #endif

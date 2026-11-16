@@ -38,7 +38,9 @@ static uint8_t vq[16][9];
 static uint8_t vq_head, vq_tail;
 static bool v_open;
 static uint32_t v_next_ms;
+#if CONFIG_P25_BENCH
 nxdn_snap_t nxdn_snap;   /* bss: magic set at select */
+#endif
 
 static const hal_audio_tap_t *tap(void)
 {
@@ -122,8 +124,10 @@ bool radio_nxdn_select(const radio_dv_cfg_t *c)
     nxdn_link_init(&link, &path, (uint8_t)(cfg.nac_rx & 63u), cfg.hear_all ? 0 : cfg.talkgroup, (uint16_t)cfg.unit_id,
                    slot_in, NULL);
     vq_head = vq_tail = 0;
+#if CONFIG_P25_BENCH
     nxdn_snap.magic = NXDN_SNAP_MAGIC;
     nxdn_snap.n = 0;   /* the link's sample count restarts */
+#endif
     last_frames = 0;
     last_frame_ms = 0;
     if (!rx_start()) return false;
@@ -192,6 +196,7 @@ bool radio_nxdn_ptt(bool down)
     return true;
 }
 
+#if CONFIG_P25_BENCH
 static void snap_take(const int16_t *pcm, uint16_t n, uint32_t now_ms)
 {
     nxdn_snap_t *s = &nxdn_snap;
@@ -224,6 +229,7 @@ static void snap_take(const int16_t *pcm, uint16_t n, uint32_t now_ms)
     s->t_ms = now_ms;
     s->seq++;
 }
+#endif
 
 void radio_nxdn_service(uint32_t now_ms)
 {
@@ -246,7 +252,9 @@ void radio_nxdn_service(uint32_t now_ms)
     for (unsigned guard = 0; guard < 16; guard++) {
         uint16_t n = tap()->fm_rx_read(buf, sizeof buf / sizeof buf[0]);
         if (n == 0) break;
+#if CONFIG_P25_BENCH
         snap_take(buf, n, now_ms);
+#endif
         nxdn_link_rx_audio(&link, buf, n);
     }
     if (link.rx.frames != last_frames) {

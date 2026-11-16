@@ -59,7 +59,7 @@ jobs:
           sh tools/bootstrap_newlib.sh
 
       - name: Build firmware
-        run: python3 tools/build_radiofoundry.py --speed-codec --stack-check
+        run: python3 tools/build_radiofoundry.py --speed-codec --stack-check --lean
 
       - name: Package the image
         id: package
@@ -69,12 +69,12 @@ jobs:
           set -eu
           VERSION="${INPUT_VERSION:-$(date -u +%Y.%m.%d)-${GITHUB_SHA::8}}"
           TREE=build/radiofoundry-p25
-          BUILD=$TREE/build/dm32-p25-native
+          BUILD=$TREE/build/dm32-p25-native-lean
           # The build's own CONFIG_*/CROSS overrides, so the manifest lists the features the image really has
           CFG=$(python3 -c 'import json,sys; print(" ".join(a for a in json.load(open(sys.argv[1]))["command"] if a.startswith(("CONFIG_","CROSS="))))' "$BUILD/rfoundry_dm32.json")
           mkdir -p dist
           (cd "$TREE" && MAKEFLAGS="$CFG" python3 tools/release.py --board dm32 --version "$VERSION" --git "$GITHUB_SHA" \
-            --bin build/dm32-p25-native/rfoundry_dm32.bin --out "$GITHUB_WORKSPACE/dist")
+            --bin build/dm32-p25-native-lean/rfoundry_dm32.bin --out "$GITHUB_WORKSPACE/dist")
           ls -l dist
           cat dist/SHA256SUMS
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"

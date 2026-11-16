@@ -1,6 +1,20 @@
 # Resources of the multi-mode image
 
-## Current image: November 14, 2026
+## Current image: November 16, 2026
+
+Releases are built with `--lean`. The bench tools are left out: the P25 capture replay (2,368 B), the P25 self-test,
+and the NXDN receive capture `nxdn_snap` (2,116 B; now behind `CONFIG_P25_BENCH` too).
+
+| Image | Switches | Flash | RAM | Free RAM |
+|---|---|---:|---:|---:|
+| Release (lean) | `--speed-codec --stack-check --lean` | 550,624 | 206,912 | 4,544 |
+| Bench | `--speed-codec --stack-check` | 552,684 | 211,440 | 16 |
+
+The heap stays at 40.5 KB: the P25 worker still needs its 8 KB stack for live encoding. The static stack check
+passes (least free: idle task, 136 bytes) with zero warnings. Lean polls an empty P25 receive queue every 5 ms
+instead of 1 ms. That setting was checked on the radio on November 6, but this image has not been run on a radio.
+
+## November 14, 2026
 
 The image with Motorola talk-permit tones, the pink theme, APRS/GPS, and typed DMR messages (patch 0016) uses
 **542,456 bytes of flash** and **211,424 of 211,456 bytes of static RAM** (32 bytes unallocated). The RAM figure

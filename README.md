@@ -96,13 +96,13 @@ Fuera de la serie: recepción NXDN corregida (filtros del FD6818 en la ruta plan
 Requiere Linux (o WSL) y el toolchain C-SKY que se construye localmente; ver [docs/build.md](docs/build.md). La imagen de la release se generó con:
 
 ```sh
-python3 tools/build_radiofoundry.py --speed-codec --stack-check --with-local-stock
+python3 tools/build_radiofoundry.py --speed-codec --stack-check --lean --with-local-stock
 python3 tools/rf_patch.py check        # "derivative tree matches the series"
 ```
 
 **Compilación y release automáticas:** cada commit a `main` hace que la acción `Firmware` (`.github/workflows/firmware.yml`) compile la imagen sin códec y publique una release nueva `v<AAAA.MM.DD>-<commit>` con `rfoundry-dm32-<versión>.bin`, su manifiesto `.json` y `SHA256SUMS`. El web flasher la instala solo en unos 15 minutos (su acción `Sync firmware`). También se puede lanzar a mano en Actions › Firmware › Run workflow, con un nombre de versión propio. Nunca descarga el firmware de fábrica ni el AMBE.
 
-`--speed-codec` es obligatorio (el códec IMBE por defecto es ~4× más lento que tiempo real). `--with-local-stock` toma el AMBE de tu propio firmware de fábrica en `research/originals` y genera además `rfoundry_dm32.codec.bin`; esa imagen es solo para uso local y no se publica (la release lleva únicamente `rfoundry_dm32.bin`, que no cambia con esa opción). Pruebas de host: `make -C build/radiofoundry-p25/tests/host run`, `tools/test_nxdn.py`, `test_p25t.py`, `test_voice.py`, `test_native_modem.py`, `test_receive_audio.py`.
+`--lean` deja fuera las herramientas de banco (repetición de capturas P25, autoprueba y captura de recepción NXDN) y libera 4,5 KB de RAM; sin él se compila la imagen de laboratorio. `--speed-codec` es obligatorio (el códec IMBE por defecto es ~4× más lento que tiempo real). `--with-local-stock` toma el AMBE de tu propio firmware de fábrica en `research/originals` y genera además `rfoundry_dm32.codec.bin`; esa imagen es solo para uso local y no se publica (la release lleva únicamente `rfoundry_dm32.bin`, que no cambia con esa opción). Pruebas de host: `make -C build/radiofoundry-p25/tests/host run`, `tools/test_nxdn.py`, `test_p25t.py`, `test_voice.py`, `test_native_modem.py`, `test_receive_audio.py`.
 
 ## Apoya el proyecto
 
