@@ -8,6 +8,9 @@ Editor, in `channels.csv` and on the radio, and the radio core applies the same 
 native 4FSK mode runs at 4800 symbols/s only, so the radio receives and transmits NXDN through its FM paths with a
 software modem at 8 kHz (`docs/nxdn-modem.md` has the simulation that chose this route).
 
+NXDN96 (12.5 kHz, 9600 bps; Icom "N") is not supported, so an NXDN channel has no bandwidth setting. Other radios
+and repeaters must use NXDN48 (Icom "VN", 6.25 kHz) to talk to the DM-32.
+
 Build switch: `CONFIG_NXDN=y` (on in `tools/build_radiofoundry.py`'s presets; `--no-nxdn` turns it off). It needs
 `CONFIG_DMR=y` for the vocoder and the voice bridge.
 

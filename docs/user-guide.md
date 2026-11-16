@@ -95,6 +95,31 @@ after the hotspot has returned to standby is not an expected transmit tail.
 PTT sends a call to the channel's talkgroup with your unit ID. The time-out timer applies. Busy channel lockout
 refuses PTT while another NAC (RAN) is heard, or any traffic, as the setting says.
 
+## Hotspots, repeaters and other radios
+
+If the DM-32 hears a hotspot, repeater or radio but they don't hear it, check these first.
+
+**NXDN is NXDN48 only.** That is the 6.25 kHz, 4800 bps mode: **"VN"** on Icom, "Very Narrow / 6.25 kHz" on
+Kenwood. The DM-32 has no NXDN96 ("N", 12.5 kHz) mode, so the codeplug editor shows no bandwidth setting for NXDN.
+Set the other radios and the repeater's channel to VN / NXDN48.
+
+**The TX NAC or RAN must match.** RX can be set to `any` (NAC F7E, RAN 0), so you can hear a system whose NAC
+or RAN is different from yours. The other side only accepts your **TX** NAC/RAN. Pi-Star / MMDVMHost defaults to
+NAC 293 and RAN 1. Set a RAN on the radio's channel editor (RAN row, type 0-63) or in the editor/CSV's TX RAN column.
+
+**Frequency error.** If the hotspot only works with an RX offset of a few hundred Hz, or DMR/P25 show a high BER,
+correct the radio instead: **Settings › Advanced › Freq trim** (0.1 ppm steps). One ppm is about 145 Hz on 2 m and
+440 Hz on 70 cm. It moves receive and transmit, FM, DMR, P25 and NXDN together. Then set the hotspot's offset
+back to 0.
+
+**MMDVM / Pi-Star.** The hotspot also drops a call when:
+- `[P25] OverrideUIDCheck=0` and your unit ID is not in its DMR ID file. Set it to 1, or use your registered ID.
+- `SelfOnly=1` under `[P25]` or `[NXDN]` and your unit ID is not the hotspot's own ID. For NXDN that is your
+  NXDN ID (65519 or less), not your DMR ID.
+
+The Pi-Star live log shows where a call stops. If nothing at all appears while you transmit, the hotspot does not
+hear a valid signal. Report it with the radio's version, mode and frequency.
+
 ## Using a P25 trunk channel
 
 | PTT line | Meaning |

@@ -16,13 +16,19 @@ Firmware abierto y multimodo para el **Baofeng DM-32UV**: FM, DMR, **APCO P25 fa
 | Mensajes DMR de texto libre | Hasta 140 caracteres desde Contactos; revisión antes de enviar. Compilado y probado en simulador, pendiente de probar en el aire |
 | P25 convencional, RX y TX | Verificado en la radio (voz IMBE en ambos sentidos) |
 | NXDN48, RX | Verificado en la radio (tramas, llamada y voz AMBE sin errores) |
-| NXDN48, TX | Funciona: el receptor del firmware y dsd-fme decodifican la TX del DM-32 (RAN 1, llamada de grupo TG 1, voz), capturada con un Pluto+ |
+| NXDN48, TX | El receptor del firmware y dsd-fme decodifican la TX del DM-32 (RAN 1, TG 1, voz), capturada con un Pluto+. Hay reportes de radios Icom, un repetidor Kenwood y hotspots MMDVM que no la decodifican; pendiente medir la desviación. Solo NXDN48 (Icom «VN», 6,25 kHz), no NXDN96 |
 | Troncal P25 | Solo recepción; la TX troncal está desactivada |
 | APRS y posición GPS | Activados en esta versión; sin probar en el aire |
 | Tono de permiso estilo Motorola | P25/NXDN: TPT ASTRO 25 (3 bips de 910 Hz); DMR: chirp MOTOTRBO |
 | Tema «Rosa» | Tema claro rosa (Ajustes › Pantalla › Tema › Rosa) |
 | AM de aviación (108-136 MHz) | El squelch abre con los niveles 1-9 (antes solo con 0). Probado en la radio |
 | Recepción ampliada | Solo RX: 174-260, 350-400 y 480-520 MHz, con menos sensibilidad fuera de los filtros. TX sigue en 136-174 / 400-480 |
+
+## Hotspots, repetidores y otras radios
+
+NXDN es solo NXDN48 (Icom «VN»). El NAC/RAN de **TX** debe coincidir con el del otro equipo; Pi-Star usa NAC 293
+y RAN 1. Si el hotspot necesita un offset de cientos de Hz, corrige la radio en **Ajustes › Avanzado › Ajuste frec** (Freq trim).
+Véase la [guía de usuario](docs/user-guide.md#hotspots-repeaters-and-other-radios).
 
 ## AM regression rollback
 
