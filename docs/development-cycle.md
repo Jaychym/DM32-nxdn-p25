@@ -11,7 +11,8 @@ then passed boot/cable health. This does not prove RF transmission.
 
 ## Approved RAM entry
 
-Build with `--first-boot --lean --speed-codec --cpu-profile --dev-update`.
+Build with `--first-boot --lean --speed-codec --cpu-profile --dev-update`; add `--diag` for the on-radio diagnostics
+page, which images leave out by default (`docs/resources.md`).
 The first-boot health flags are 15 instead of 31: TX, data writes, cable filtering
 and final PA GPIO guards remain, while the approved runtime helper is available.
 Only its exact length, load/entry address, ordered chunks and CRC are accepted;

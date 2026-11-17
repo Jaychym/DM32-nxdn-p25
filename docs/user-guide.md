@@ -36,6 +36,13 @@ loop in this version is the corrected one. It has been checked on the host and i
 listened to on a radio**. If it still sounds saturated, [am-strong-signal.md](am-strong-signal.md) says what to compare
 and what the next change would be; the history is in [am-regression.md](am-regression.md).
 
+## No diagnostics page
+
+The image is built without the diagnostics page (Tools > Diagnostics), which saves 1.4 KB of RAM and 4 KB of flash. The
+Tools rows after it move up one number. The board's raw readings and the DMR modem counters it showed are not available
+in the image, on the screen or in the debug link's `diag` command (which still gives the radio summary and the DMR call
+lines). To get a build that has them, add `--diag` to `tools/build_radiofoundry.py` ([resources](resources.md)).
+
 ## Setting up channels
 
 Use the codeplug editor or a CSV file. The radio's menu also edits NAC, RAN, talkgroup and unit ID. On the NAC or RAN row, OK with nothing typed switches RX

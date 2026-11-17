@@ -77,4 +77,5 @@ checks; the normal and split HR_C7000 suites also pass, all with ASan/UBSan. The
 covered by the PTT/abort fix; no speculative RF timing or calibration change was added for the new report.
 
 Confirm repeated access, correct CC/TS and frequency pair, and actual RF bursts on the affected repeater before
-claiming that intermittent access is resolved. Record the displayed denial and modem diagnostics if it recurs.
+claiming that intermittent access is resolved. Record the displayed denial if it recurs, and the modem diagnostics from a
+build with `--diag`: the default image has no diagnostics page and no DMR modem counters.

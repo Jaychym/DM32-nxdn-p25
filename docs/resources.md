@@ -1,5 +1,26 @@
 # Resources of the multi-mode image
 
+## November 17, 2026: no diagnostics page in the image
+
+`tools/build_radiofoundry.py` builds with `CONFIG_DIAG=n` unless given `--diag`. The release configuration
+(`--speed-codec --stack-check --lean --trunk-tx`, the series through `0046`), built with the script both ways:
+
+| Build | Image | RAM | Free RAM |
+|---|---:|---:|---:|
+| With the page (`--diag`) | 561,068 | 209,016 | 2,440 |
+| Default, without it | 557,044 | 207,648 | 3,808 |
+
+The page costs 4,024 bytes of flash and 1,368 bytes of RAM. Most of the RAM is `hrc_dmr_stats_line` (960 bytes of code
+the linker places in RAM, called only from the page's lines); the rest is `dm32_diag_line` (968 bytes of flash),
+`ui_draw_diag` (444) and the counters they read. Zero compiler warnings in both; the static stack check passes with
+the same margins (least free: idle task, 136 bytes). Not run on a radio.
+
+What goes with it: Tools > Diagnostics (the rows after it move up one number); the board's raw readings (battery ADC,
+RSSI and noise registers, FD6818 write count, host UART counters, SPI flash holder and ID, calibration source) and the
+DMR modem counters, on the screen and in the debug link's `diag` command, which still gives the radio summary and the
+DMR call lines; the `DIAG` entry of the feature list the radio reports. The measurement that sizes the heap and the
+stacks (`tasks`, `CONFIG_TASK_STACKS`) is a separate switch and stays.
+
 ## November 17, 2026: AM gain loop (patch 0046)
 
 The release configuration (`--speed-codec --stack-check --lean --trunk-tx`, the series through `0045`) measured with and

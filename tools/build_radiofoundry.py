@@ -300,6 +300,9 @@ def main():
                     help="CONFIG_P25_TRUNK_TX=y: trunked registration, affiliation and calls (off by default; "
                          "docs/p25-trunking.md: only on a system you are authorized on)")
     ap.add_argument("--no-phase2", action="store_true", help="build with CONFIG_P25_PHASE2=n")
+    ap.add_argument("--diag", action="store_true",
+                    help="CONFIG_DIAG=y: keep the on-radio diagnostics page (Tools > Diagnostics) with the board's raw readings and "
+                         "the DMR modem counters; images leave them out by default (1.4 KB of RAM, 4 KB of flash)")
     args = ap.parse_args()
     if args.trunk_tx and args.no_trunk: ap.error("--trunk-tx needs trunking")
     if args.tx_bench and not (args.first_boot and args.dev_update):ap.error("tx-bench requires first-boot and dev-update")
@@ -330,7 +333,7 @@ def main():
     identity=suffix
     suffix += ("-lean" if args.lean else "") + ("-cpu" if args.cpu_profile else "") + ("-dev" if args.dev_update else "") + ("-tx" if args.tx_bench else "") + ("-nonxdn" if args.no_nxdn else "") + \
         ("-notrunk" if native and args.no_trunk else "-trunktx" if native and args.trunk_tx else "") + \
-        ("-nop2" if native and args.no_phase2 and not args.no_trunk else "")
+        ("-nop2" if native and args.no_phase2 and not args.no_trunk else "") + ("-diag" if args.diag else "")
     b = f"build/dm32-p25-{suffix}"
     command = ["make", "-j8", "BOARD=dm32", f"CROSS={ROOT}/toolchain/bin/csky-elf-", f"BUILD={b}",
         "CONFIG_P25=" + ("n" if args.disable else "y"), "CONFIG_P25_NATIVE="+("y" if native else "n"), "CONFIG_DMR_IP_GATEWAY=n", "CONFIG_NET_PPP=n",
@@ -339,6 +342,7 @@ def main():
         "CONFIG_P25_TRUNK_TX=" + ("y" if native and args.trunk_tx and not args.no_trunk else "n"),
         "CONFIG_P25_PHASE2=" + ("y" if native and not args.no_trunk and not args.no_phase2 else "n"),
         "CONFIG_SFR=n", "CONFIG_HOTSPOT=n", "CONFIG_ZONE_SHARE=n", "CONFIG_APRS_IGATE=n", "CONFIG_GPS_SKY=n",  # APRS (and with it Tools > Position) on, its iGate and sky plot off for RAM: requested 14-nov
+        "CONFIG_DIAG=" + ("y" if args.diag else "n"),  # no on-radio diagnostics page by default: 1.4 KB of RAM, 4 KB of flash; --diag keeps it
         f"RFOUNDRY_VERSION={git(ROOT, 'rev-parse', '--short=8', 'HEAD')}-p25-{identity}",
         f"RFOUNDRY_GIT_TIME={git(ROOT, 'show', '-s', '--format=%ct', 'HEAD')}",
         "RFOUNDRY_GIT_DIRTY=" + str(int(bool(git(ROOT, 'status', '--porcelain', '--untracked-files=no')))),
