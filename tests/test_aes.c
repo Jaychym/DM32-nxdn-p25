@@ -14,6 +14,9 @@ int main(void)
     unhex("00112233445566778899aabbccddeeff", block, 16);
     unhex("8ea2b7ca516745bfeafc49904b496089", answer, 16);
     AES_init_ctx(&aes, key); AES_ECB_encrypt(&aes, block); assert(!memcmp(block, answer, 16));
+    /* The next-MI steps and the IV below were computed by OP25's own op25_crypt_algs::cycle_p25_mi / expand_mi_to_128
+     * (boatbod/op25 at 3f44d43, the commit sources.lock.json pins); tests/protocol/test_p25.py checks the firmware
+     * against the live OP25 code for random keys and MIs. */
     assert(voice_aes_p25_step(0x1234567890abcdefULL) == 0x6fe2802aa403828bULL);
     assert(voice_aes_p25_step(0x6fe2802aa403828bULL) == 0xff35b1909449b835ULL);
     unhex("0123456789abcdef23456789abcdef01456789abcdef01236789abcdef012345", key, 32);
@@ -21,6 +24,32 @@ int main(void)
     voice_aes_p25_start(&s, key, 0x1234567890abcdefULL);
     unhex("a4a452206523e33bad358af571cb029a", answer, 16); assert(!memcmp(s.stream, answer, 16));
     unhex("93aeff9bdb7b317fb85b09f548d7ce61", answer, 16); assert(!memcmp(s.stream + 16, answer, 16));
+    {
+        /* What OP25 XORs into each of the 18 IMBE frames of the superframe for this key and MI (OP25's AES-256 process() on
+         * all-zero frames: 11 bytes a frame, the 88 bits u0..u7 packed MSB first). Interoperability with other receivers
+         * rests on this table, not on the firmware agreeing with itself. */
+        static const char *const op25_mask[18] = {
+            "f571cb029a93aeff9bdb7b", "317fb85b09f548d7ce6193", "144ce08f62a453abe5e540",
+            "c10a3e2f54f7692d707ebf", "dfe31ccf53509c890c30c3", "3c9dd5d2671c98b57138bf",
+            "05ae2f2250d471b0f2c337", "873be6db55a512f359c9a8", "173eaf102f8aa448c5d899",
+            "b1511bb4e71228410744a3", "89da845232d10771333120", "7577848f2626a4aa396a6f",
+            "b9af2090cf197ceee18570", "d381089575f6fa21aa6247", "8025feceda2a8c8f72f360",
+            "2c95e8a6bc8b450969574c", "e8f7b5321e62fab980355b", "f396bcc07e65b93586017f",
+        };
+        for (unsigned f = 0; f < 18; f++) {
+            uint16_t u[8] = {0};
+            uint8_t packed[11] = {0}, want[11];
+            unsigned bit = 0;
+            voice_aes_p25_frame(&s, f, u);
+            for (unsigned w = 0; w < 8; w++) {
+                unsigned width = w < 4 ? 12 : w < 7 ? 11 : 7;
+                for (unsigned j = 0; j < width; j++, bit++)
+                    packed[bit / 8] |= (uint8_t)(((u[w] >> (width - 1 - j)) & 1u) << (7 - bit % 8));
+            }
+            unhex(op25_mask[f], want, 11);
+            assert(!memcmp(packed, want, 11));
+        }
+    }
     for (unsigned i = 0; i < 18; i++) {
         uint16_t u[8] = {0x123,0x456,0x789,0xabc,0x345,0x678,0x123,0x55}, original[8];
         memcpy(original, u, sizeof u); voice_aes_p25_frame(&s, i, u);
@@ -39,6 +68,13 @@ int main(void)
     assert(!memcmp(frames,d.imbe,sizeof frames)); // ciphertext IMBE sync bit must survive FEC encoding
     assert(!p25_encode_ldu_aes(&call,&sync,P25_DUID_LDU2,frames,lsd,air));
     assert(!p25_decode_frame(air,216,&d)); assert(d.algorithm_id==0x84 && d.key_id==123 && !memcmp(d.message_indicator,sync.message_indicator,9));
+    /* The ninth byte of the 72-bit MI is outside the 64 bits the IV uses; a radio may send it, and the frames carry it as given */
+    sync.message_indicator[8]=0x5a;
+    assert(!p25_encode_hdu_aes(&call,&sync,air)); assert(!p25_decode_frame(air,99,&d));
+    assert(d.metadata_valid && d.message_indicator[8]==0x5a && !memcmp(d.message_indicator,sync.message_indicator,9));
+    assert(!p25_encode_ldu_aes(&call,&sync,P25_DUID_LDU2,frames,lsd,air)); assert(!p25_decode_frame(air,216,&d));
+    assert(d.metadata_valid && d.message_indicator[8]==0x5a && !memcmp(d.message_indicator,sync.message_indicator,9));
+    sync.message_indicator[8]=0;
     voice_aes rx; uint8_t bits[3][49]={{0}}, plain[3][49]={{0}};
     voice_aes_dmr_start(&s,key,0x12345678); voice_aes_dmr_start(&rx,key,0x12345678);
     /* Pinned dmrgo IV expansion + Go crypto/cipher OFB, synthetic key/MI. */

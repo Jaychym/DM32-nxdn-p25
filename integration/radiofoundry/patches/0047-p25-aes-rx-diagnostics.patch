@@ -1,0 +1,346 @@
+--- a/core/radio/radio.h
++++ b/core/radio/radio.h
+@@ -193,6 +193,17 @@
+ 
+ // What a digital voice channel (P25 on the native modem; radio_dv.h) is doing, for the screens
+ typedef enum { RDV_IDLE, RDV_RX, RDV_RX_OTHER, RDV_TX } radio_dv_state_t;
++// Why an encrypted P25 call is muted or played (radio_dv_view_t.enc_state), numbered as the voice layer's P25_ENC_*
++typedef enum {
++	RDV_ENC_NONE,		// a clear call, or nothing heard
++	RDV_ENC_ALGO,		// an algorithm other than AES-256: never decrypted
++	RDV_ENC_OFF,		// AES-256, but the channel has no key slot
++	RDV_ENC_NOKEY,		// AES-256, but no key stored for the call's key ID
++	RDV_ENC_SYNC,		// AES-256 with a key: waiting for an encryption sync
++	RDV_ENC_LC,		// the voice frames' link control refuses the call
++	RDV_ENC_OK,		// decrypting
++	RDV_ENC_BAD		// decrypting, but the vocoder refuses clean frames: the key or keystream is wrong
++} radio_dv_enc_t;
+ typedef struct {
+ 	bool active;		// the channel's receiver runs
+ 	bool built;		// this build carries the channel's digital mode (radio_sm's dv_mode_built)
+@@ -201,7 +212,10 @@
+ 	uint16_t nac;		// NAC of the call (RX) or ours (TX)
+ 	uint16_t talkgroup;	// the call's talkgroup, or ours while transmitting
+ 	uint32_t source;	// the caller's unit ID, or ours while transmitting
+-	bool encrypted;		// the call heard is encrypted: muted, never decrypted
++	bool encrypted;		// the call heard is encrypted: muted unless enc_state says it is decrypted
++	uint8_t enc_state;	// radio_dv_enc_t: where the call stands; the ALGID and key ID of its last encryption sync follow
++	uint8_t enc_algid;
++	uint16_t enc_kid;
+ 	bool emergency;
+ 	uint32_t call_ms;	// hal_millis() when the call (RX or TX) began
+ 	// The last call heard
+--- a/core/radio/radio_sm.c
++++ b/core/radio/radio_sm.c
+@@ -1050,6 +1050,7 @@
+ 	sm->view.dv.talkgroup = sm->view.ch.talkgroup;
+ 	sm->view.dv.source = dv_unit_id(&sm->view.ch);
+ 	sm->view.dv.encrypted = sm->view.dv.emergency = false;
++	sm->view.dv.enc_state = RDV_ENC_NONE;
+ 	sm->view.dv.call_ms = now_ms;
+ 	outputs(sm);
+ 	changed(sm);
+@@ -1135,13 +1136,17 @@
+ 		activity(sm, now_ms);
+ 	}
+ 	if (st != v->state || (s.sync && (s.nac != v->nac || s.talkgroup != v->talkgroup || s.source != v->source ||
+-			s.encrypted != v->encrypted || s.emergency != v->emergency))) {
++			s.encrypted != v->encrypted || s.emergency != v->emergency || s.enc_state != v->enc_state ||
++			s.enc_kid != v->enc_kid))) {
+ 		v->state = st;
+ 		if (s.sync) {
+ 			v->nac = s.nac;
+ 			v->talkgroup = s.talkgroup;
+ 			v->source = s.source;
+ 			v->encrypted = s.encrypted;
++			v->enc_state = s.enc_state;
++			v->enc_algid = s.enc_algid;
++			v->enc_kid = s.enc_kid;
+ 			v->emergency = s.emergency;
+ 		}
+ 		changed(sm);
+--- a/core/ui/ui_screens.c
++++ b/core/ui/ui_screens.c
+@@ -287,6 +287,13 @@
+ 		sb_chr(b, hex[(nac >> s) & 0xFu]);
+ }
+ 
++static void sb_hex8(sbuf_t *b, uint8_t v)
++{
++	static const char hex[] = "0123456789ABCDEF";
++	sb_chr(b, hex[v >> 4]);
++	sb_chr(b, hex[v & 0xFu]);
++}
++
+ static bool dv_channel(const radio_view_t *v)
+ {
+ 	return codeplug_mode_digital_voice(v->ch.mode);
+@@ -385,6 +392,45 @@
+ 	if (src != 0) {
+ 		sb_str(b, "  ID ");
+ 		sb_u32(b, src, 1);
++	}
++}
++
++// Whether an encrypted P25 call has something to say for itself: why it is muted (an algorithm we do not decrypt, no
++// key slot on the channel, no key for its key ID, no sync yet, link control that refuses it), or that the key looks
++// wrong while it plays (the vocoder refuses clean frames of what was decrypted)
++static bool dv_enc_note(const radio_dv_view_t *d)
++{
++	return d->enc_state != RDV_ENC_NONE && d->enc_state != RDV_ENC_OK;
++}
++
++// "ALG 81 not supported", "KID 4660: no key", "AES: waiting for sync": what to tell whoever sets the radio up
++static void sb_dv_enc(sbuf_t *b, const radio_dv_view_t *d)
++{
++	switch (d->enc_state) {
++	case RDV_ENC_ALGO:
++		sb_str(b, "ALG ");
++		sb_hex8(b, d->enc_algid);
++		sb_str(b, TR(" not supported"));
++		break;
++	case RDV_ENC_OFF:
++		sb_str(b, TR("Pick an AES-256 key"));
++		break;
++	case RDV_ENC_NOKEY:
++	case RDV_ENC_BAD:
++		sb_str(b, "KID ");
++		sb_u32(b, d->enc_kid, 1);
++		sb_str(b, d->enc_state == RDV_ENC_BAD ? TR(": wrong key?") : TR(": no key"));
++		break;
++	case RDV_ENC_SYNC:
++		sb_str(b, "AES: ");
++		sb_str(b, TR("waiting for sync"));
++		break;
++	case RDV_ENC_LC:
++		sb_str(b, "AES: ");
++		sb_str(b, TR("bad link control"));
++		break;
++	default:
++		break;
+ 	}
+ }
+ 
+@@ -1681,11 +1727,16 @@
+ 		draw_meter(0, y + big->h / 4, w - tw - big->w, big->h / 2, v->rssi_dbm);
+ 		if (two && dv_channel(v) && v->dv.state == RDV_RX) {
+ 			sb_init(&b, buf, sizeof buf);
+-			if (v->dv.emergency)
+-				sb_str(&b, TR("EMERGENCY "));
+-			sb_dv_call(&b, v->dv.talkgroup, v->dv.source);
++			bool wrong = v->dv.enc_state == RDV_ENC_BAD;	// plays as noise: say so before who is calling
++			if (wrong) {
++				sb_dv_enc(&b, &v->dv);
++			} else {
++				if (v->dv.emergency)
++					sb_str(&b, TR("EMERGENCY "));
++				sb_dv_call(&b, v->dv.talkgroup, v->dv.source);
++			}
+ 			gfx_text_fit(sm, buf, w, fit, sizeof fit);
+-			gfx_text(sm, 0, y2, fit, v->dv.emergency ? ui_col.warn : ui_col.rx);
++			gfx_text(sm, 0, y2, fit, wrong || v->dv.emergency ? ui_col.warn : ui_col.rx);
+ 		} else if (two)
+ 			gfx_text(sm, 0, y2, v->monitor ? TR("Squelch open") : TR("Receiving"), ui_col.rx);
+ 		break;
+@@ -1747,9 +1798,12 @@
+ 		}
+ #endif
+ 		if (dv_channel(v) && v->dv.state == RDV_RX_OTHER) {
+-			// Heard, not played: an encrypted call, another talkgroup, another NAC
+-			if (v->dv.encrypted) {
+-				sb_str(&b, TR("Encrypted "));	// muted: never decrypted
++			// Heard, not played: an encrypted call, another talkgroup, another NAC. A call being decrypted that is not
++			// played is on another talkgroup, whatever it is encrypted with
++			bool decrypting = v->dv.enc_state == RDV_ENC_OK || v->dv.enc_state == RDV_ENC_BAD;
++			bool note = v->dv.encrypted && !decrypting && dv_enc_note(&v->dv) && L->activity_h >= 2 * sm->h;
++			if (v->dv.encrypted && !decrypting) {
++				sb_str(&b, TR("Encrypted "));	// muted: this call is not decrypted
+ 				sb_str(&b, "TG ");
+ 				sb_u32(&b, v->dv.talkgroup, 1);
+ 			} else if (v->ch.mode != RADIO_MODE_NXDN && v->dv.nac != v->ch.nac_rx && v->ch.nac_rx != CODEPLUG_NAC_ANY) {
+@@ -1761,9 +1815,15 @@
+ 			} else {
+ 				sb_dv_call(&b, v->dv.talkgroup, v->dv.source);
+ 			}
+-			y += (L->activity_h - sm->h) / 2;
++			y += (L->activity_h - (note ? 2 : 1) * sm->h) / 2;
+ 			gfx_text_fit(sm, buf, gfx_width(), fit, sizeof fit);
+ 			gfx_text(sm, 0, y, fit, ui_col.warn);
++			if (note) {
++				sb_init(&b, buf, sizeof buf);
++				sb_dv_enc(&b, &v->dv);
++				gfx_text_fit(sm, buf, gfx_width(), fit, sizeof fit);
++				gfx_text(sm, 0, y + sm->h, fit, ui_col.dim);
++			}
+ 			break;
+ 		}
+ 		if (dv_channel(v) && v->dv.last_ms != 0) {
+--- a/core/ui/lang/es.po
++++ b/core/ui/lang/es.po
+@@ -3225,6 +3225,30 @@
+ msgstr "DMon"
+ 
+ #: core/ui/ui_screens.c
++msgid " not supported"
++msgstr " no admitido"
++
++#: core/ui/ui_screens.c
++msgid "Pick an AES-256 key"
++msgstr "Elige clave AES-256"
++
++#: core/ui/ui_screens.c
++msgid ": wrong key?"
++msgstr ": ¿clave errónea?"
++
++#: core/ui/ui_screens.c
++msgid ": no key"
++msgstr ": sin clave"
++
++#: core/ui/ui_screens.c
++msgid "waiting for sync"
++msgstr "esperando sync"
++
++#: core/ui/ui_screens.c
++msgid "bad link control"
++msgstr "LC no válido"
++
++#: core/ui/ui_screens.c
+ msgid "IDLE"
+ msgstr "LIBRE"
+ 
+--- a/core/ui/lang/it.po
++++ b/core/ui/lang/it.po
+@@ -3225,6 +3225,30 @@
+ msgstr "DMon"
+ 
+ #: core/ui/ui_screens.c
++msgid " not supported"
++msgstr " non supportato"
++
++#: core/ui/ui_screens.c
++msgid "Pick an AES-256 key"
++msgstr "Scegli chiave AES-256"
++
++#: core/ui/ui_screens.c
++msgid ": wrong key?"
++msgstr ": chiave errata?"
++
++#: core/ui/ui_screens.c
++msgid ": no key"
++msgstr ": senza chiave"
++
++#: core/ui/ui_screens.c
++msgid "waiting for sync"
++msgstr "attesa sync"
++
++#: core/ui/ui_screens.c
++msgid "bad link control"
++msgstr "LC non valido"
++
++#: core/ui/ui_screens.c
+ msgid "IDLE"
+ msgstr "IDLE"
+ 
+--- a/tests/host/sim/ui_sim.c
++++ b/tests/host/sim/ui_sim.c
+@@ -801,6 +801,8 @@
+ }
+ 
+ uint32_t codeplug_dmr_id(void) { return 3101276; }
++// The web editor's AES keys, as the channel editor's key row cycles through them: slots 1 and 2 hold one
++uint16_t codeplug_aes_kid(uint8_t slot) { return slot == 1 ? 4660 : slot == 2 ? 42 : 0; }
+ 
+ // Contacts the contact editor saved (ui_svc_write_contact): at the numbers past the built-in ones
+ #define SIM_CONTACT_EDITS	4
+@@ -2392,6 +2394,34 @@
+ 			view.dv.encrypted = true;
+ 			view.dv.talkgroup = 200;
+ 			view.dv.source = 5550001;
++		} else if (strncmp(arg, "enc", 3) == 0) {
++			// An encrypted P25 call and what became of it: muted for an algorithm we do not decrypt (encalgo), no key slot
++			// on the channel (encoff), no key for its key ID (encnokey), no sync yet (encsync), link control that refuses it
++			// (enclc); or decrypted, so it plays (encok), though the vocoder refuses its clean frames (encbad)
++			static const struct { const char *name; uint8_t state, algid; } enc[] = {
++				{ "encalgo", RDV_ENC_ALGO, 0x81 }, { "encoff", RDV_ENC_OFF, 0x84 }, { "encnokey", RDV_ENC_NOKEY, 0x84 },
++				{ "encsync", RDV_ENC_SYNC, 0x84 }, { "enclc", RDV_ENC_LC, 0x84 }, { "encok", RDV_ENC_OK, 0x84 },
++				{ "encbad", RDV_ENC_BAD, 0x84 },
++			};
++			for (size_t i = 0; i < sizeof enc / sizeof enc[0]; i++) {
++				if (strcmp(arg, enc[i].name) != 0)
++					continue;
++				bool plays = enc[i].state == RDV_ENC_OK || enc[i].state == RDV_ENC_BAD;
++				view.dv.encrypted = true;
++				view.dv.enc_state = enc[i].state;
++				view.dv.enc_algid = enc[i].algid;
++				view.dv.enc_kid = 4660;
++				view.dv.talkgroup = 200;
++				view.dv.source = 5550001;
++				if (plays) {
++					view.state = RS_RX;
++					view.rssi_dbm = -82;
++					view.dv.state = RDV_RX;
++					view.dv.nac = view.ch.nac_tx;
++				} else {
++					view.dv.state = RDV_RX_OTHER;
++				}
++			}
+ 		} else if (strcmp(arg, "other") == 0) {
+ 			view.dv.state = RDV_RX_OTHER;
+ 			view.dv.nac = nxdn ? 5 : 0x5A5;
+--- a/tests/host/uiSim.c
++++ b/tests/host/uiSim.c
+@@ -43,6 +43,13 @@
+ 	{ "rx_p25", "p25:rx" },
+ 	{ "tx_p25", "p25:tx" },
+ 	{ "home_p25_encrypted", "p25:enc" },
++	{ "home_p25_enc_algo", "p25:encalgo" },	// the encrypted call's reason: muted (an algorithm we do not decrypt, no key slot,
++	{ "home_p25_enc_off", "p25:encoff" },	// no key for its key ID, no sync yet, link control refused)
++	{ "home_p25_enc_nokey", "p25:encnokey" },
++	{ "home_p25_enc_sync", "p25:encsync" },
++	{ "home_p25_enc_lc", "p25:enclc" },
++	{ "rx_p25_aes", "p25:encok" },	// or decrypted and playing, with a key the vocoder rejects
++	{ "rx_p25_aes_wrong", "p25:encbad" },
+ 	{ "home_nxdn", "nxdn:idle" },
+ 	{ "rx_nxdn", "nxdn:rx" },
+ 	{ "tx_nxdn", "nxdn:tx" },
+--- a/tests/host/radioCoreTest.c
++++ b/tests/host/radioCoreTest.c
+@@ -4984,6 +4984,38 @@
+ 	dv_heard(true, false, 200, 7);
+ 	run(30);
+ 	CHECK(sm.view.state == RS_IDLE && sm.view.dv.state == RDV_RX_OTHER && sm.view.dv.talkgroup == 200);
++	CHECK(!sm.view.dv.encrypted && sm.view.dv.enc_state == RDV_ENC_NONE);
++	dv_quiet();
++	run(30);
++	// An encrypted call and what the voice layer says became of it: the view carries the state, the algorithm and the key
++	// ID, and follows them as the call goes on (each is a change worth a redraw even when nothing else moved)
++	dv_heard(true, false, 200, 7);
++	dv.st.encrypted = true;
++	dv.st.enc_state = RDV_ENC_NOKEY;
++	dv.st.enc_algid = 0x84;
++	dv.st.enc_kid = 4660;
++	run(30);
++	CHECK(sm.view.dv.state == RDV_RX_OTHER && sm.view.dv.encrypted && sm.view.dv.enc_state == RDV_ENC_NOKEY &&
++	      sm.view.dv.enc_algid == 0x84 && sm.view.dv.enc_kid == 4660);
++	uint32_t draws = sm.serial;
++	dv.st.enc_state = RDV_ENC_SYNC;
++	run(30);
++	CHECK(sm.view.dv.enc_state == RDV_ENC_SYNC && sm.serial != draws);
++	dv.st.enc_state = RDV_ENC_OK;
++	dv.st.playing = true;
++	run(30);
++	CHECK(sm.view.state == RS_RX && sm.view.dv.state == RDV_RX && sm.view.dv.enc_state == RDV_ENC_OK);
++	dv.st.enc_state = RDV_ENC_BAD;
++	run(30);
++	CHECK(sm.view.state == RS_RX && sm.view.dv.enc_state == RDV_ENC_BAD);
++	dv_quiet();
++	dv.st.encrypted = false;
++	dv.st.enc_state = RDV_ENC_NONE;
++	run(30);
++	// A call that ends, and the next one that is clear, start without the last one's state
++	dv_heard(true, true, 100, 1234567);
++	run(30);
++	CHECK(sm.view.state == RS_RX && !sm.view.dv.encrypted && sm.view.dv.enc_state == RDV_ENC_NONE);
+ 	dv_quiet();
+ 	run(30);
+ 

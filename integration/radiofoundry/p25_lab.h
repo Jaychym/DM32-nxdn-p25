@@ -22,6 +22,9 @@ typedef struct {
     uint16_t nac, talkgroup;
     bool ours;               /* the last frame had our NAC (or the channel hears any) */
     bool playing, encrypted, emergency, ended;
+    /* The encrypted call heard: P25_ENC_* (voice.h) and the ALGID and key ID of its last encryption sync; zero without AES */
+    uint8_t enc_state, enc_algid;
+    uint16_t enc_kid;
 } p25_lab_rx_status;
 void p25_lab_channel_config(const p25_lab_channel *);
 void p25_lab_rx_status_get(p25_lab_rx_status *);

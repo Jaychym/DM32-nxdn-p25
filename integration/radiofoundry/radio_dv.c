@@ -11,6 +11,15 @@
 #if CONFIG_P25_NATIVE
 #include "p25_lab.h"
 #include "native_modem/native_lab.h"
+#if CONFIG_DV_AES
+#include "voice.h"
+/* The voice layer's call states and the radio core's are the same numbers */
+#define SAME_ENC(a, b) ((int)(a) == (int)(b))
+_Static_assert(SAME_ENC(P25_ENC_NONE, RDV_ENC_NONE) && SAME_ENC(P25_ENC_ALGO, RDV_ENC_ALGO) &&
+               SAME_ENC(P25_ENC_OFF, RDV_ENC_OFF) && SAME_ENC(P25_ENC_NOKEY, RDV_ENC_NOKEY) &&
+               SAME_ENC(P25_ENC_SYNC, RDV_ENC_SYNC) && SAME_ENC(P25_ENC_LC, RDV_ENC_LC) &&
+               SAME_ENC(P25_ENC_OK, RDV_ENC_OK) && SAME_ENC(P25_ENC_BAD, RDV_ENC_BAD), "P25_ENC_* and RDV_ENC_* differ");
+#endif
 #endif
 #if CONFIG_NXDN
 #include "radio_nxdn.h"
@@ -45,6 +54,11 @@ static void p25_status(radio_dv_status_t *o, uint32_t now_ms)
     o->sync_ours = recent && rx.ours;
     o->playing = recent && rx.playing && !rx.ended && !ch.transmitting;
     o->encrypted = rx.encrypted;
+    if (recent) {
+        o->enc_state = rx.enc_state;
+        o->enc_algid = rx.enc_algid;
+        o->enc_kid = rx.enc_kid;
+    }
     o->emergency = rx.emergency;
     o->nac = rx.nac;
     o->talkgroup = rx.talkgroup;

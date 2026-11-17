@@ -448,7 +448,8 @@ static void group_lc(const p25_call *call, uint8_t lc[9])
 
 static int valid_crypto(const p25_call *call, const p25_crypto_sync *sync)
 {
-    return call && (sync ? sync->algorithm_id == 0x84 && !sync->message_indicator[8] && (call->service_options & 0x40) : !(call->service_options & 0x40));
+    /* message_indicator[8] is the 72-bit field's ninth byte, outside the 64-bit MI the IV uses: carried as given */
+    return call && (sync ? sync->algorithm_id == 0x84 && (call->service_options & 0x40) : !(call->service_options & 0x40));
 }
 
 int p25_encode_hdu_aes(const p25_call *call, const p25_crypto_sync *sync, uint8_t out[P25_HDU_BYTES])

@@ -40,6 +40,9 @@ typedef struct {
     bool sync_ours;             /* ... the last of them with our NAC (or the channel hears any) */
     bool playing;               /* a call that passed the filters plays */
     bool encrypted, emergency;  /* of the call heard */
+    uint8_t enc_state;          /* P25: why an encrypted call is muted or played (radio_dv_enc_t, core/radio/radio.h) */
+    uint8_t enc_algid;          /* ... the ALGID and key ID of its last encryption sync */
+    uint16_t enc_kid;
     uint16_t nac, talkgroup;    /* of the last frames / call heard (NXDN: the RAN in nac) */
     uint32_t source;
     bool transmitting;          /* PTT's session pending or on air, terminator included */

@@ -73,6 +73,11 @@ static void publish_rx(void)
     rx_status.talkgroup=voice.active_group;
     rx_status.source=voice.active_source;
     rx_status.encrypted=voice.encrypted;
+#if CONFIG_DV_AES
+    rx_status.enc_state=voice.enc_state;
+    rx_status.enc_algid=voice.enc_algid;
+    rx_status.enc_kid=voice.enc_kid;
+#endif
     rx_status.emergency=voice.emergency;
     rx_status.ended=voice.last_duid==P25_DUID_TDU || voice.last_duid==P25_DUID_TDULC;
     taskEXIT_CRITICAL();

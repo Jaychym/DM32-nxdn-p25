@@ -45,6 +45,12 @@
       }
     ]
   },
+  "encrypted_frames": {
+    "op25_encrypted_hdu_ldu1_ldu2_calls": 60
+  },
+  "aes_keystream": {
+    "op25_aes256_keystream_random_cases": 300
+  },
   "stream": {
     "stream_cases": [
       "normal",

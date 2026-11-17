@@ -7,6 +7,8 @@ static void admission_reset(p25_voice *v)
 #if defined(CONFIG_DV_AES) && CONFIG_DV_AES
     voice_aes_wipe(&v->aes, sizeof v->aes);
     v->aes_phase = v->aes_tx = 0;
+    v->enc_state = v->enc_algid = v->enc_nokey = v->enc_seen = v->enc_bad = 0;
+    v->enc_kid = 0;
 #endif
     v->crypto_clear = v->have_group = 0;
     v->playing = v->emergency = v->encrypted = 0;
@@ -58,21 +60,177 @@ static void sync_make(p25_crypto_sync *s, uint64_t mi, uint16_t kid)
     memset(s, 0, sizeof *s); s->algorithm_id = 0x84; s->key_id = kid;
     for (unsigned i = 0; i < 8; i++) s->message_indicator[i] = (uint8_t)(mi >> (56 - i * 8));
 }
+/* The IV is the 64-bit MI and its LFSR expansion. The 72-bit MI field's ninth byte is not part of it: OP25 and other
+ * receivers ignore it, so a radio that sends it nonzero is still heard. */
 static bool sync_matches(const p25_voice *v, const p25_decoded *d)
 {
     return v->aes_required && d->metadata_valid && d->algorithm_id == 0x84 &&
-           d->key_id == v->aes_kid && !d->message_indicator[8] && mi_read(d->message_indicator);
+           d->key_id == v->aes_kid && mi_read(d->message_indicator);
 }
 static bool sync_load(p25_voice *v, const p25_decoded *d)
 {
-    if (!v->aes_required || !d->metadata_valid || d->algorithm_id != 0x84 ||
-        d->message_indicator[8] || !mi_read(d->message_indicator)) return false;
-    if (v->aes_lookup && !v->aes_lookup(d->key_id, v->aes_key)) return false;
-    if (!v->aes_lookup && d->key_id != v->aes_kid) return false;
+    if (!v->aes_required || !d->metadata_valid || d->algorithm_id != 0x84 || !mi_read(d->message_indicator)) return false;
+    v->enc_nokey = 1;
+    if (v->aes_lookup ? !v->aes_lookup(d->key_id, v->aes_key) : d->key_id != v->aes_kid) return false;
+    v->enc_nokey = 0;
     v->aes_kid = d->key_id;
     return true;
 }
+/* Which P25_ENC_* state the call heard is in, for the screen; v->encrypted and enc_* are already current. lc_refused:
+ * the keystream was armed, but this LDU1's link control is unusable and the call has no group to go on with. */
+static void enc_update(p25_voice *v, bool decrypt, bool lc_refused)
+{
+    uint8_t s;
+    if (!v->encrypted || v->enc_algid == 0x80) s = P25_ENC_NONE;
+    else if (v->enc_algid && v->enc_algid != 0x84) s = P25_ENC_ALGO;
+    else if (!v->aes_required) s = P25_ENC_OFF;
+    else if (v->enc_nokey) s = P25_ENC_NOKEY;
+    else if (decrypt) s = v->enc_seen >= 12 && v->enc_bad * 8 >= v->enc_seen ? P25_ENC_BAD : P25_ENC_OK;
+    else if (lc_refused) s = P25_ENC_LC;
+    else s = P25_ENC_SYNC;
+    v->enc_state = s;
+}
 #endif
+
+/* One decoded HDU, LDU, TDU or TDULC in air order, with the channel decoder's verdict already taken. The dibit path
+ * calls it; host tests call it with frames the encoders cannot make (another algorithm, link control of another format,
+ * a ninth MI byte). The IMBE words of a frame that is decrypted are decrypted in place. */
+void p25_voice_rx_decoded(p25_voice *v, p25_decoded *d)
+{
+    uint32_t at, elapsed;
+    if (v->transmitting) return;
+    v->last_nac = d->nid.nac;
+    v->last_duid = d->nid.duid;
+    if (v->nac_filter != P25_NAC_ANY && d->nid.nac != v->nac_filter) {
+        v->foreign_frames++;
+        if (v->active_nac != P25_NAC_ANY) admission_reset(v);
+        return;
+    }
+    v->rx_frames++;
+    if (v->active_nac != d->nid.nac) {
+        admission_reset(v);
+        v->active_nac = d->nid.nac;
+    }
+    if (d->nid.duid == P25_DUID_TDU || d->nid.duid == P25_DUID_TDULC) {
+        admission_reset(v);
+        return;
+    }
+#if defined(CONFIG_DV_AES) && CONFIG_DV_AES
+    /* An armed AES call goes on through an LDU1 whose link control is damaged or of a kind not read here: the keystream
+     * follows the encryption sync alone, as in OP25, and the talkgroup and caller stay those the call began with. */
+    bool armed0 = v->aes_required && v->aes.ready && !v->aes_phase; /* before this frame can disarm it */
+    bool ride = d->nid.duid == P25_DUID_LDU1 && !d->metadata_valid && armed0 && v->have_group;
+    bool lc_refused = false;
+#else
+    const bool ride = false;
+#endif
+    if (ride) {
+        /* no new information: the call's group, caller and keystream stand */
+    } else if (!d->metadata_valid || (d->nid.duid == P25_DUID_HDU && d->manufacturer_id > 1)) {
+        /* Do not reuse permission from a previous good header over damage. */
+        v->crypto_clear = v->have_group = 0;
+#if defined(CONFIG_DV_AES) && CONFIG_DV_AES
+        v->aes.ready = 0;
+#endif
+    } else if (d->nid.duid == P25_DUID_HDU) {
+        admission_reset(v);
+        v->active_nac = d->nid.nac;
+        v->crypto_clear = d->clear_voice;
+        v->active_group = d->talkgroup;
+        v->have_group = d->talkgroup != 0;
+    } else if (d->nid.duid == P25_DUID_LDU1) {
+        if ((v->have_group && v->active_group != d->talkgroup) ||
+            (v->active_source && v->active_source != d->source_id)) {
+            v->crypto_clear = 0;
+#if defined(CONFIG_DV_AES) && CONFIG_DV_AES
+            v->aes.ready = 0;
+#endif
+        }
+        v->active_group = d->talkgroup;
+        v->active_source = d->source_id;
+        /* A unit ID is 24 bits on the air and fleets use all of them: an eight-digit one is heard like any other */
+        v->have_group = d->talkgroup && d->source_id;
+        if (!d->clear_voice) v->crypto_clear = 0;
+        v->emergency = (d->service_options & 0x80u) != 0;
+        /* LC's unprotected bit alone cannot override an encrypted ALGID.
+         * Late entry waits for a valid LDU2 encryption sync. */
+    } else if (d->nid.duid == P25_DUID_LDU2) {
+        v->crypto_clear = d->clear_voice;
+    }
+#if defined(CONFIG_DV_AES) && CONFIG_DV_AES
+    if (d->metadata_valid && (d->nid.duid == P25_DUID_HDU || d->nid.duid == P25_DUID_LDU2)) {
+        v->enc_algid = d->algorithm_id;
+        v->enc_kid = d->key_id;
+    }
+    if (d->nid.duid == P25_DUID_HDU && sync_load(v, d)) {
+        voice_aes_p25_start(&v->aes, v->aes_key, mi_read(d->message_indicator));
+        v->aes_phase = 0;
+    }
+    bool decrypt = false;
+    if (d->nid.duid == P25_DUID_LDU1) {
+        /* The encryption sync decides, not the link control's protected bit: radios agree on the sync, and a call
+         * whose LC says otherwise is the same call. */
+        decrypt = v->aes_required && v->aes.ready && !v->aes_phase && (d->metadata_valid || ride);
+        lc_refused = armed0 && !d->metadata_valid && !ride;
+        if (!decrypt) v->aes.ready = 0;
+        v->aes_phase = decrypt ? 1 : 0;
+    } else if (d->nid.duid == P25_DUID_LDU2) {
+        decrypt = v->aes_required && v->aes.ready && v->aes_phase == 1 && sync_matches(v, d);
+    }
+#endif
+    if (d->nid.duid != P25_DUID_LDU1 && d->nid.duid != P25_DUID_LDU2) return;
+    bool playable = v->crypto_clear;
+#if defined(CONFIG_DV_AES) && CONFIG_DV_AES
+    if (v->aes_required) playable = decrypt;
+#endif
+    int admitted = playable && v->have_group &&
+        (!v->group_filter || v->active_group == v->group_filter || v->active_group == 0xffff);
+    v->playing = (uint8_t)admitted;
+    v->encrypted = d->metadata_valid && !d->clear_voice;
+#if defined(CONFIG_DV_AES) && CONFIG_DV_AES
+    /* The call's last valid encryption sync also says it is encrypted, when this frame's own metadata is damaged. */
+    if (v->enc_algid && v->enc_algid != 0x80) v->encrypted = 1;
+#endif
+    for (unsigned i = 0; i < 9; i++) {
+        int16_t pcm[160] = {0};
+        if (!admitted) v->rx_muted++;
+        /* Conservative implementation policy, not a TIA concealment rule.
+         * Golay/Hamming can miscorrect beyond t; no audio-quality claim. */
+        else {
+#if defined(CONFIG_DV_AES) && CONFIG_DV_AES
+            if (decrypt) voice_aes_p25_frame(&v->aes, i + (d->nid.duid == P25_DUID_LDU2 ? 9 : 0), d->imbe[i]);
+#endif
+            at=v->micros?v->micros():0;
+            int ok=d->voice_u0_corrected_bits[i] <= 3 && d->voice_corrected_bits[i] <= 10 &&
+                   dm32_imbe_decode(&v->codec, d->imbe[i], pcm);
+            elapsed=v->micros?v->micros()-at:0;
+            if(elapsed>v->imbe_max_us)v->imbe_max_us=elapsed;
+#if defined(CONFIG_DV_AES) && CONFIG_DV_AES
+            /* A wrong key or keystream turns clean ciphertext into random bits, and one frame in five then has a
+             * reserved pitch the vocoder refuses; with the right key a clean frame never does. Only frames the
+             * channel decoder had nothing to correct count, so a weak signal cannot raise this. */
+            if (decrypt && !d->voice_u0_corrected_bits[i] && d->voice_corrected_bits[i] <= 1) {
+                if (v->enc_seen == 255) { v->enc_seen >>= 1; v->enc_bad >>= 1; }
+                v->enc_seen++;
+                v->enc_bad = (uint8_t)(v->enc_bad + !ok);
+            }
+#endif
+            if(!ok) {
+                memset(pcm, 0, sizeof pcm);
+                v->rx_erasures++;
+                dm32_imbe_init(&v->codec);
+            }
+        }
+        if (v->sink) v->sink(v->sink_ctx, pcm);
+    }
+#if defined(CONFIG_DV_AES) && CONFIG_DV_AES
+    if (d->nid.duid == P25_DUID_LDU2) {
+        v->aes.ready = 0; v->aes_phase = 0;
+        if (sync_load(v, d)) voice_aes_p25_start(&v->aes, v->aes_key, mi_read(d->message_indicator));
+    }
+    enc_update(v, decrypt, lc_refused);
+#endif
+}
 
 void p25_voice_rx_dibit(p25_voice *v, uint8_t dibit)
 {
@@ -86,103 +244,7 @@ void p25_voice_rx_dibit(p25_voice *v, uint8_t dibit)
         admission_reset(v);
         return;
     }
-    v->last_nac = d.nid.nac;
-    v->last_duid = d.nid.duid;
-    if (v->nac_filter != P25_NAC_ANY && d.nid.nac != v->nac_filter) {
-        v->foreign_frames++;
-        if (v->active_nac != P25_NAC_ANY) admission_reset(v);
-        return;
-    }
-    v->rx_frames++;
-    if (v->active_nac != d.nid.nac) {
-        admission_reset(v);
-        v->active_nac = d.nid.nac;
-    }
-    if (d.nid.duid == P25_DUID_TDU || d.nid.duid == P25_DUID_TDULC) {
-        admission_reset(v);
-        return;
-    }
-    if (!d.metadata_valid || (d.nid.duid == P25_DUID_HDU && d.manufacturer_id > 1)) {
-        /* Do not reuse permission from a previous good header over damage. */
-        v->crypto_clear = v->have_group = 0;
-#if defined(CONFIG_DV_AES) && CONFIG_DV_AES
-        v->aes.ready = 0;
-#endif
-    } else if (d.nid.duid == P25_DUID_HDU) {
-        admission_reset(v);
-        v->active_nac = d.nid.nac;
-        v->crypto_clear = d.clear_voice;
-        v->active_group = d.talkgroup;
-        v->have_group = d.talkgroup != 0;
-    } else if (d.nid.duid == P25_DUID_LDU1) {
-        if ((v->have_group && v->active_group != d.talkgroup) ||
-            (v->active_source && v->active_source != d.source_id)) {
-            v->crypto_clear = 0;
-#if defined(CONFIG_DV_AES) && CONFIG_DV_AES
-            v->aes.ready = 0;
-#endif
-        }
-        v->active_group = d.talkgroup;
-        v->active_source = d.source_id;
-        v->have_group = d.talkgroup && d.source_id && d.source_id <= 9999999u;
-        if (!d.clear_voice) v->crypto_clear = 0;
-        v->emergency = (d.service_options & 0x80u) != 0;
-        /* LC's unprotected bit alone cannot override an encrypted ALGID.
-         * Late entry waits for a valid LDU2 encryption sync. */
-    } else if (d.nid.duid == P25_DUID_LDU2) {
-        v->crypto_clear = d.clear_voice;
-    }
-#if defined(CONFIG_DV_AES) && CONFIG_DV_AES
-    if (d.nid.duid == P25_DUID_HDU && sync_load(v, &d)) {
-        voice_aes_p25_start(&v->aes, v->aes_key, mi_read(d.message_indicator));
-        v->aes_phase = 0;
-    }
-    bool decrypt = false;
-    if (d.nid.duid == P25_DUID_LDU1) {
-        decrypt = v->aes_required && d.metadata_valid && !d.clear_voice && v->aes.ready && !v->aes_phase;
-        if (!decrypt) v->aes.ready = 0;
-        v->aes_phase = decrypt ? 1 : 0;
-    } else if (d.nid.duid == P25_DUID_LDU2) {
-        decrypt = v->aes_required && v->aes.ready && v->aes_phase == 1 && sync_matches(v, &d);
-    }
-#endif
-    if (d.nid.duid != P25_DUID_LDU1 && d.nid.duid != P25_DUID_LDU2) return;
-    bool playable = v->crypto_clear;
-#if defined(CONFIG_DV_AES) && CONFIG_DV_AES
-    if (v->aes_required) playable = decrypt;
-#endif
-    int admitted = playable && v->have_group &&
-        (!v->group_filter || v->active_group == v->group_filter || v->active_group == 0xffff);
-    v->playing = (uint8_t)admitted;
-    v->encrypted = d.metadata_valid && !d.clear_voice;
-    for (unsigned i = 0; i < 9; i++) {
-        int16_t pcm[160] = {0};
-        if (!admitted) v->rx_muted++;
-        /* Conservative implementation policy, not a TIA concealment rule.
-         * Golay/Hamming can miscorrect beyond t; no audio-quality claim. */
-        else {
-#if defined(CONFIG_DV_AES) && CONFIG_DV_AES
-            if (decrypt) voice_aes_p25_frame(&v->aes, i + (d.nid.duid == P25_DUID_LDU2 ? 9 : 0), d.imbe[i]);
-#endif
-            at=v->micros?v->micros():0;
-            int ok=d.voice_u0_corrected_bits[i] <= 3 && d.voice_corrected_bits[i] <= 10 &&
-                   dm32_imbe_decode(&v->codec, d.imbe[i], pcm);
-            elapsed=v->micros?v->micros()-at:0;
-            if(elapsed>v->imbe_max_us)v->imbe_max_us=elapsed;
-            if(!ok) {
-                memset(pcm, 0, sizeof pcm);
-                v->rx_erasures++;
-                dm32_imbe_init(&v->codec);
-            }
-        }
-        if (v->sink) v->sink(v->sink_ctx, pcm);
-    }
-#if defined(CONFIG_DV_AES) && CONFIG_DV_AES
-    if (d.nid.duid == P25_DUID_LDU2) {
-        v->aes.ready = 0; v->aes_phase = 0;
-        if (sync_load(v, &d)) voice_aes_p25_start(&v->aes, v->aes_key, mi_read(d.message_indicator));
-    }
-#endif
+    p25_voice_rx_decoded(v, &d);
 }
 
 static p25_voice_packet *next_packet(p25_voice *v)

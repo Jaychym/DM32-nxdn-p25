@@ -45,6 +45,10 @@ class Decoded(C.Structure):
                 ("voice_u0_corrected_bits", C.c_uint8 * 9), ("imbe", (C.c_uint16 * 8) * 9)]
 
 
+class Sync(C.Structure):
+    _fields_ = [("algorithm_id", C.c_uint8), ("key_id", C.c_uint16), ("message_indicator", C.c_uint8 * 9)]
+
+
 class RX(C.Structure):
     _fields_ = [("sync_shift", C.c_uint64), ("symbols_seen", C.c_uint32),
                 ("sync_acquisitions", C.c_uint32), ("complete_frames", C.c_uint32),
@@ -77,6 +81,8 @@ def configure(lib):
     lib.p25_imbe_decode.argtypes = [C.c_void_p, C.c_void_p, C.c_void_p]
     lib.p25_rx_init.argtypes = [C.POINTER(RX), C.c_uint16, C.c_uint8]
     lib.p25_rx_push_dibit.argtypes = [C.POINTER(RX), C.c_uint8]
+    lib.p25_encode_hdu_aes.argtypes = [C.c_void_p, C.c_void_p, C.c_void_p]
+    lib.p25_encode_ldu_aes.argtypes = [C.c_void_p, C.c_void_p, C.c_uint8, C.c_void_p, C.c_void_p, C.c_void_p]
 
 
 def reference():
@@ -305,6 +311,132 @@ def test_frames(lib, ref):
     return {"full_frame_p25craft_vectors": 250, "fixtures": fixtures}
 
 
+def test_encrypted_frames(lib, ref):
+    """HDU, LDU1 and LDU2 of an AES-256 call (ALGID 0x84, random MI and KID) against OP25's construct_hdu,
+    construct_ldu1 and construct_ldu2: the encryption sync signaling, which test_frames cannot exercise (its MI, ALGID and
+    KID are all zero, so a wrong byte order of the MI or a wrong KID position would pass). What a receiver reads the MI and
+    KID from when the radio transmits."""
+    n = 60
+    for idx in range(n):
+        nac, tg, src = rng.randrange(4096), rng.randrange(1, 65536), rng.randrange(1, 1 << 24)
+        ss, kid = rng.randrange(4), rng.randrange(1, 65536)
+        # a 64-bit MI in the first eight bytes of the 72-bit field; every other call also has a ninth byte, which
+        # the IV does not use but a radio may send and the encoder carries as given
+        mi72 = (rng.randrange(1, 1 << 64) << 8) | (rng.randrange(1, 256) if idx % 2 else 0)
+        call = Call(nac, tg, src, 0, 0x40, ss)
+        sync = Sync(0x84, kid, (C.c_uint8 * 9)(*mi72.to_bytes(9, "big")))
+        hdu = (C.c_uint8 * 99)()
+        assert lib.p25_encode_hdu_aes(C.byref(call), C.byref(sync), hdu) == 0
+        assert bytes(hdu) == make_reference(ref, "construct_hdu", nac, ss, mi72, 0, 0x84, kid, tg), f"HDU {idx}"
+        u = [rng.randrange(1 << (12 if i < 4 else 11 if i < 7 else 7)) for i in range(8)]
+        u[7] &= ~1
+        probe = ((C.c_uint16 * 8) * 9)()
+        for i in range(9):
+            for j in range(8): probe[i][j] = u[j]
+        cw = (C.c_uint8 * 18)()
+        lib.p25_imbe_encode(probe[0], cw)
+        inner = [0] * 144
+        for j, bit in enumerate(bits(cw)): inner[6 * (j % 24) + ((j // 24) ^ (j & 1))] = bit
+        imbe = int.from_bytes(packed(inner), "big")
+        lsd_value = rng.randrange(1 << 32)
+        for duid in (5, 10):
+            # Encrypted, the last bit of each frame is ciphertext and is the caller's; give it the value both sides write
+            frames = ((C.c_uint16 * 8) * 9)()
+            for i in range(9):
+                for j in range(8): frames[i][j] = u[j]
+                frames[i][7] = u[7] | ((i + (duid == 10)) & 1)
+            pair = (C.c_uint8 * 2)(*lsd_value.to_bytes(4, "big")[(0 if duid == 5 else 2):(2 if duid == 5 else 4)])
+            ldu = (C.c_uint8 * 216)()
+            assert lib.p25_encode_ldu_aes(C.byref(call), C.byref(sync), duid, frames, pair, ldu) == 0
+            if duid == 5:
+                expected = make_reference(ref, "construct_ldu1", nac, ss, imbe, lsd_value, 0, 0, 0x40, 0, tg, 0, src)
+            else:
+                expected = make_reference(ref, "construct_ldu2", nac, ss, imbe, lsd_value, mi72, 0x84, kid)
+            assert bytes(ldu) == expected, f"LDU{1 if duid == 5 else 2} {idx}"
+            out = Decoded()
+            assert lib.p25_decode_frame(bytes(ldu), 216, C.byref(out)) == 0 and out.metadata_valid
+            if duid == 10:
+                assert bytes(out.message_indicator) == mi72.to_bytes(9, "big") and out.key_id == kid
+                assert out.algorithm_id == 0x84 and not out.clear_voice
+    return {"op25_encrypted_hdu_ldu1_ldu2_calls": n}
+
+
+def test_aes_keystream(tmp):
+    """The firmware's P25 AES-256 keystream, frame by frame, against OP25's own op25_crypt_aes (the class that decrypts
+    Motorola AES traffic): for random keys and MIs, the 11 bytes it XORs into each of the 18 IMBE frames of a superframe.
+    The firmware's own vectors were computed by the firmware, so on their own they only show that it agrees with itself."""
+    lib_dir = UP / "op25/gr-op25_repeater/lib"
+    stubs = tmp / "stubs" / "gnuradio"
+    stubs.mkdir(parents=True)
+    (stubs / "msg_queue.h").write_text("// stub: OP25's crypto classes include it and do not use it for the keystream\n")
+    (tmp / "op25_masks.cc").write_text(r'''
+#include <cstring>
+#include <vector>
+#include "op25_crypt_aes.h"
+extern "C" int op25_aes_masks(const unsigned char *key, const unsigned char *mi, unsigned short kid, unsigned char *out) {
+    static log_ts lg;
+    static op25_crypt_aes aes(lg, 0, 0);
+    aes.key(kid, ALG_AES_256, std::vector<uint8_t>(key, key + 32));
+    uint8_t MI[9];
+    memcpy(MI, mi, 9);
+    for (int ldu = 0; ldu < 2; ldu++) {
+        if (!aes.prepare(kid, PT_P25_PHASE1, MI)) return -1;
+        for (int i = 0; i < 9; i++) {
+            packed_codeword pcw(11, 0);
+            aes.process(pcw, ldu ? FT_LDU2 : FT_LDU1, i);
+            memcpy(out + (ldu * 9 + i) * 11, pcw.data(), 11);
+        }
+    }
+    return 0;
+}
+''')
+    op25 = tmp / "op25_masks.so"
+    subprocess.run([os.environ.get("CXX", "c++"), "-std=c++14", "-O1", "-w", "-shared", "-fPIC", "-include", "cstdint",
+                    "-include", "cstdio", "-I", str(tmp / "stubs"), "-I", str(lib_dir), str(tmp / "op25_masks.cc"),
+                    *(str(lib_dir / f"op25_crypt_{n}.cc") for n in ("aes", "algs", "des", "adp")), "-o", str(op25)],
+                   check=True)
+    (tmp / "fw_masks.c").write_text(r'''
+#include <string.h>
+#include "voice_aes.h"
+int fw_aes_masks(const unsigned char *key, const unsigned char *mi, unsigned char *out) {
+    uint64_t m = 0;
+    voice_aes s;
+    for (int i = 0; i < 8; i++) m = (m << 8) | mi[i];
+    voice_aes_p25_start(&s, key, m);
+    for (unsigned f = 0; f < 18; f++) {
+        uint16_t u[8] = {0};
+        unsigned bit = 0;
+        memset(out + f * 11, 0, 11);
+        voice_aes_p25_frame(&s, f, u);
+        for (unsigned w = 0; w < 8; w++) {
+            unsigned width = w < 4 ? 12 : w < 7 ? 11 : 7;
+            for (unsigned j = 0; j < width; j++, bit++)
+                out[f * 11 + bit / 8] |= (unsigned char)(((u[w] >> (width - 1 - j)) & 1u) << (7 - bit % 8));
+        }
+    }
+    return 0;
+}
+''')
+    fw = tmp / "fw_masks.so"
+    subprocess.run([os.environ.get("CC", "cc"), "-std=c99", "-O2", "-w", "-shared", "-fPIC", "-I", str(ROOT / "src/crypto"),
+                    str(tmp / "fw_masks.c"), str(ROOT / "src/crypto/aes.c"), str(ROOT / "src/crypto/voice_aes.c"),
+                    "-o", str(fw)], check=True)
+    a, b = C.CDLL(str(op25)), C.CDLL(str(fw))
+    for f in (a.op25_aes_masks, b.fw_aes_masks):
+        f.restype = C.c_int
+    a.op25_aes_masks.argtypes = [C.c_char_p, C.c_char_p, C.c_uint16, C.c_void_p]
+    b.fw_aes_masks.argtypes = [C.c_char_p, C.c_char_p, C.c_void_p]
+    n = 300
+    for idx in range(n):
+        key = bytes(rng.randrange(256) for _ in range(32))
+        # the ninth byte of the 72-bit MI is not part of the AES IV: some of the cases carry a nonzero one
+        mi = bytes(rng.randrange(256) for _ in range(8)) + bytes([rng.randrange(256) if idx % 3 == 0 else 0])
+        want, got = (C.c_uint8 * 198)(), (C.c_uint8 * 198)()
+        assert a.op25_aes_masks(key, mi, 1 + idx, want) == 0 and b.fw_aes_masks(key, mi, got) == 0
+        assert bytes(got) == bytes(want), f"keystream differs from OP25 for key {key.hex()} MI {mi.hex()}"
+    return {"op25_aes256_keystream_random_cases": n}
+
+
 def test_stream(lib):
     path = ROOT / "tests/protocol/vectors/clear-call.bin"
     data = path.read_bytes()
@@ -402,7 +534,9 @@ def main():
         oracle = channel_oracle(tmp)
         for name, function, args in (("nid", test_nid, (lib, ref)), ("rs", test_rs, (lib, ref, oracle)),
                                     ("imbe", test_imbe, (lib, oracle)), ("interleave", test_interleave, ()),
-                                    ("frames", test_frames, (lib, ref)), ("stream", test_stream, (lib,)),
+                                    ("frames", test_frames, (lib, ref)),
+                                    ("encrypted_frames", test_encrypted_frames, (lib, ref)),
+                                    ("aes_keystream", test_aes_keystream, (tmp,)), ("stream", test_stream, (lib,)),
                                     ("damage", test_damage, (lib, ref))):
             results[name] = function(*args)
             print(f"PASS {name}")

@@ -16,6 +16,18 @@
  */
 typedef void (*p25_pcm_sink)(void *ctx, const int16_t pcm[160]);
 enum { P25_VOICE_QUEUE = 3 };
+/* What an encrypted call heard is, and why it is muted or played (p25_voice.enc_state). radio_dv.c turns these into
+ * the radio core's radio_dv_enc_t (core/radio/radio.h), numbered alike. */
+enum {
+    P25_ENC_NONE,   /* a clear call, or nothing heard */
+    P25_ENC_ALGO,   /* an algorithm other than AES-256 (enc_algid): never decrypted */
+    P25_ENC_OFF,    /* AES-256, but the channel has no key slot selected */
+    P25_ENC_NOKEY,  /* AES-256, but no key is stored for the call's key ID (enc_kid) */
+    P25_ENC_SYNC,   /* AES-256 with a key: waiting for an encryption sync (late entry, damaged header) */
+    P25_ENC_LC,     /* the voice frame's link control refuses it: damaged, not group voice, or unprotected */
+    P25_ENC_OK,     /* decrypting */
+    P25_ENC_BAD     /* decrypting, but the vocoder refuses clean frames: the key or the keystream is wrong */
+};
 typedef struct {
     uint8_t data[P25_LDU_BYTES];
     uint16_t bytes;
@@ -27,6 +39,10 @@ typedef struct {
     uint16_t aes_kid, aes_superframes;
     uint8_t aes_required, aes_phase, aes_tx;
     bool (*aes_lookup)(uint16_t kid, uint8_t key[32]);
+    /* For the screen: the last valid encryption sync (HDU or LDU2) of this call, and what became of the call */
+    uint16_t enc_kid;
+    uint8_t enc_state, enc_algid, enc_nokey;
+    uint8_t enc_seen, enc_bad; /* clean decrypted frames given to the vocoder, and those it refused */
 #endif
     dm32_imbe_context codec; /* RX and TX share it; every direction change resets it */
     p25_rx framer;
@@ -66,6 +82,9 @@ void p25_voice_set_aes(p25_voice *, const uint8_t key[32], uint16_t kid);
 int p25_voice_tx_begin_aes(p25_voice *, const p25_call *, uint64_t mi);
 #endif
 void p25_voice_rx_dibit(p25_voice *v, uint8_t dibit);
+/* The same for one frame the channel decoder already decoded without a failure (p25_decode_frame returned 0): the
+ * dibit path ends here. Used by host tests for frames the encoders cannot make. The IMBE words are decrypted in place. */
+void p25_voice_rx_decoded(p25_voice *v, p25_decoded *d);
 int p25_voice_tx_begin(p25_voice *v, const p25_call *call);
 /* Exactly one 8 kHz / 20 ms microphone block; mutable for the codec.
  * Returns 0 on invalid state, codec failure or queue overflow. Abort/unkey.

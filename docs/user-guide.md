@@ -6,7 +6,7 @@ before you install it:
 - Keep a full backup of your radio, including its calibration ([recovery.md](recovery.md)).
 - Transmit only where your license allows.
 - Transmit on a trunked system only if its administrator authorized you and assigned your unit ID.
-- Encrypted calls in any mode are muted. Nothing is ever decrypted.
+- Encrypted calls are muted. Only AES-256 on a conventional P25 or DMR channel with a key is decrypted ([below](#aes-256-conventional-voice)).
 
 ## Channel modes
 
@@ -103,7 +103,7 @@ The screen shows:
 - The NAC or RAN.
 - The caller's talkgroup and unit ID during a call.
 
-Calls on another talkgroup, NAC or RAN, or encrypted calls, show but do not play.
+Calls on another talkgroup, NAC or RAN, or encrypted calls that are not decrypted, show but do not play. An encrypted P25 call shows why on a second line ([AES-256](#aes-256-conventional-voice)).
 
 **Digital monitor**, as on DMR: a short press of the monitor key (SK1) plays every talkgroup and every NAC (P25) or
 RAN (NXDN) on this channel; the status row shows `DMon` and a toast confirms it. Another press, Back or a change of
@@ -189,3 +189,5 @@ Limits:
 In the web CPS **Radio** tab, provision up to four AES-256 slots (64 hex digits per key), each with a unique key ID. Select the slot on a conventional P25 or DMR channel, in the web CPS or on the radio (channel menu, **AES-256** row: OK steps Off, then each slot that has a key); no slot keeps clear voice. Keys are only entered in the web CPS, never on the radio. DMR key IDs must fit 1–255; P25 accepts 1–65535. Keys stay out of CSV/YAML exports, but binary codeplug backups contain them. Keep backups private.
 
 RX looks up the received key ID among the four slots. Missing encryption synchronization or a missing key mutes encrypted voice; TX with an invalid key/configuration is refused. Hardware interoperability is untested. Read the [protocol and sequence limits](aes256.md) before use, especially for DMR shared keys or after a settings/flash restore.
+
+**P25 key IDs are decimal in the CPS.** Motorola's tools and most scanners show the key ID in hex: hex `1234` is `4660`. A P25 channel decrypts only with a slot selected on it. A P25 call that is heard and muted shows why under `Encrypted TG n` (no key slot, no key for that key ID, another algorithm, no sync yet), and one that plays with a wrong key shows `KID n: wrong key?`. [aes256.md](aes256.md) lists each line, what was checked against OP25 and what to report.
