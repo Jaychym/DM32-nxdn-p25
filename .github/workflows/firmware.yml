@@ -63,12 +63,12 @@ jobs:
       - name: Build firmware
         run: python3 tools/build_current.py --jobs 4
 
-      - name: Check AES voice, P25 and NXDN
+      - name: Check AES voice, DMR, P25 and NXDN
         run: |
           set -eu
           T=build/current/tests/host
-          make -C "$T" -j4 voiceCipherTest p25EngineTest p25EngineTestAes nxdnTest nxdnEngineTest nxdnEngineTestAes aesTest
-          for t in voiceCipherTest p25EngineTest p25EngineTestAes nxdnTest nxdnEngineTest nxdnEngineTestAes aesTest; do
+          make -C "$T" -j4 voiceCipherTest dmrAesTest dmrCallTestAes p25EngineTest p25EngineTestAes nxdnTest nxdnEngineTest nxdnEngineTestAes aesTest
+          for t in voiceCipherTest dmrAesTest dmrCallTestAes p25EngineTest p25EngineTestAes nxdnTest nxdnEngineTest nxdnEngineTestAes aesTest; do
             (cd "$T" && ./$t | tail -1)
           done
 
