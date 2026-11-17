@@ -5,7 +5,7 @@
 **¿Quieres firmware para tu radio?** Regálamelo desde mi lista de deseos y lo porto: **<https://throne.com/lyraarsgoetia>** · *Want firmware for your radio? Gift it from my wishlist and I'll port it.*
 
 Firmware abierto y multimodo para el **Baofeng DM-32UV**: FM, AM, DMR (Tier II y **Tier III troncal**), **APCO P25 fase 1**
-y **NXDN48/NXDN96**, con **AES-256** en P25 y NXDN. Desde el 17 de noviembre de 2026 se compila sobre
+y **NXDN48/NXDN96**, con **AES-256** en DMR, P25 y NXDN. Desde el 17 de noviembre de 2026 se compila sobre
 [RadioFoundry](https://github.com/RadioFoundry/RadioFoundry) actual (commit `e89121e9`), que ya trae P25 y NXDN, más
 los cambios de esta rama en [`integration/current/base.patch`](integration/current/base.patch). Deriva de
 [Open25-DM32](https://github.com/tylerwatt12/Open25-DM32) (tylerwatt12). La mantiene **lyra XE1POC**.
@@ -21,10 +21,12 @@ los cambios de esta rama en [`integration/current/base.patch`](integration/curre
 | AM | Tipo de canal AM propio, solo RX, en cualquier frecuencia que sintonice el receptor (p. ej. banda aérea) |
 | Recepción ampliada | Activada por defecto. Solo RX fuera de las bandas de TX |
 | Monitor digital (DMon) | En P25 y NXDN: oye llamadas de cualquier grupo, NAC o RAN del canal |
+| AES-256 DMR | Formato Motorola (PI header FID 0x10, ALG 0x25, KID 1-255). En **Ajustes › Privacidad › Tipo clave: AES-256**, con el ID de la clave; la clave se carga en el editor (pestaña Radio, «DMR AES-256»). El keystream descifra 180 de 180 tramas de una grabación real con clave publicada. **Sin probar contra un Motorola en el aire** |
 | AES-256 P25 | Formato TIA-102.AAAD-A (ALGID `0x84`, KID de 16 bits). El keystream coincide con el de OP25 para una clave y un MI de referencia. **Sin probar contra un Motorola u otra marca** |
 | AES-256 NXDN | Formato del estándar NXDN TS 1-D (cipher 3, KID 0-63, VCALL_IV). Coincide bit a bit con los 32 vectores de prueba del estándar. Entrada tardía: descifra desde la sesión siguiente (hasta 1,3 s). **Sin probar contra Icom o Kenwood** |
 | DMR Tier III | Estación móvil: control channel, registro, llamadas de grupo y privadas, datos cortos (RadioFoundry). Sin probar en un sistema real |
 | P25 troncal | Recepción y seguimiento de llamadas (RadioFoundry). Sin TX |
+| Tonos de permiso estilo Motorola | DMR: el chirp de MOTOTRBO (cuatro notas rápidas). P25 y NXDN: el permiso de ASTRO 25 (tres bips de 910 Hz) antes de transmitir. Se apagan en Ajustes › Sonido › Tono de permiso |
 | APRS, GPS, hotspot | Los de RadioFoundry; sin probar en el aire con esta imagen |
 
 ## Cambio de base: qué se pierde y qué hacer
@@ -34,10 +36,10 @@ pierde, por ahora:
 
 | Antes | Ahora |
 |---|---|
-| AES-256 en **DMR** (descifrado verificado con una grabación real) | No está. Llamadas DMR cifradas: no suenan |
 | Cuatro claves AES en EEPROM (`0x7C00`) y la clave por canal en el byte `0x32` | Las claves van en el llavero del codeplug (CPS web, pestaña Radio). **Vuelve a cargar tus claves** después de actualizar y revisa los canales que tenían AES |
 | P25 fase 2 (TDMA), TX troncal P25 | No están |
-| Tono de permiso estilo Motorola, tema «Rosa», mensajes DMR de texto libre | Los de RadioFoundry: tono de permiso propio y color de acento rosa (Ajustes › Pantalla) |
+| AES-256 en DMR por canal (byte `0x32`) | AES-256 en DMR para toda la radio, en Ajustes › Privacidad (como la privacidad DMR de RadioFoundry) |
+| Tema «Rosa», mensajes DMR de texto libre | Los de RadioFoundry: color de acento rosa (Ajustes › Pantalla) |
 
 En la radio del autor, actualizar desde la versión anterior conservó canales y calibración. Haz siempre el respaldo
 que ofrece el flasher. La serie de parches anterior queda en `integration/radiofoundry/` y `docs/` como historia; ya no se compila.
@@ -81,7 +83,8 @@ También puedes apoyar el desarrollo del firmware y del flasher en Ko-fi: **<htt
 
 - **Open25-DM32** original: tylerwatt12 (KD8ZMM). Puedes apoyar su trabajo en [GitHub Sponsors](https://github.com/sponsors/tylerwatt12?metadata_project=open25-dm32) o [Ko-fi](https://ko-fi.com/kd8zmm).
 - **RadioFoundry**: The RadioFoundry Authors (MIT; avisos conservados en el parche).
-- Fila de modo con AM, recepción ampliada, DMon en P25/NXDN, AES-256 P25/NXDN y la serie anterior: **lyra XE1POC**.
+- Fila de modo con AM, recepción ampliada, DMon en P25/NXDN, AES-256 en DMR/P25/NXDN, tonos de permiso estilo Motorola y la
+  serie anterior: **lyra XE1POC**.
 
 El proyecto se distribuye bajo [GPL-3.0-or-later](LICENSE) salvo que un archivo indique otra cosa (el código de RadioFoundry es MIT). Procedencia de cada fuente: [docs/licenses.md](docs/licenses.md).
 
@@ -90,10 +93,11 @@ El proyecto se distribuye bajo [GPL-3.0-or-later](LICENSE) salvo que un archivo 
 ## English summary
 
 Multi-mode open firmware for the Baofeng DM-32UV: FM, AM, DMR (Tier II and Tier III trunking), P25 Phase 1 and
-NXDN48/NXDN96, with AES-256 voice on P25 (TIA-102.AAAD-A layout, matches OP25's keystream) and NXDN (matches the
+NXDN48/NXDN96, with AES-256 voice on DMR (Motorola layout, decrypts a real recording with a published key), P25
+(TIA-102.AAAD-A layout, matches OP25's keystream) and NXDN (matches the
 NXDN TS 1-D test vectors). Since 2026-11-17 it builds on current [RadioFoundry](https://github.com/RadioFoundry/RadioFoundry)
-(`e89121e9`) plus `integration/current/base.patch`; the old patch series no longer builds. Lost in the switch: DMR AES,
-P25 Phase 2, P25 trunking TX; AES keys must be loaded again. Releases ship the image **without** the proprietary AMBE
+(`e89121e9`) plus `integration/current/base.patch`; the old patch series no longer builds. Motorola-style talk permit tones. Lost
+in the switch: P25 Phase 2, P25 trunking TX; AES keys must be loaded again. Releases ship the image **without** the proprietary AMBE
 codec; the [web flasher](https://donttellmeimcute.github.io/dm32-web-cps-flasher/) takes it from your own radio.
 Interoperability with other makers' encrypted radios is untested. GPL-3.0-or-later, RadioFoundry code MIT.
 

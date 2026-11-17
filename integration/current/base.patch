@@ -679,7 +679,7 @@ index 00000000..f288702d
 +Public License instead of this License.  But first, please read
 +<https://www.gnu.org/licenses/why-not-lgpl.html>.
 diff --git a/Makefile b/Makefile
-index c6496090..e25b53b1 100644
+index c6496090..59b1ec14 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,5 +1,6 @@
@@ -699,6 +699,16 @@ index c6496090..e25b53b1 100644
  ifeq ($(CONFIG_P25),y)
  CORE_DIRS += core/p25
  endif
+@@ -155,6 +159,9 @@ endif
+ # Single files of core/dmr, whose other files belong to other features
+ ifeq ($(CONFIG_DMR_PRIVACY),y)
+ APP_SRC += core/dmr/dmrPrivacy.c
++ifeq ($(CONFIG_AIR_AES),y)
++APP_SRC += core/dmr/dmrAes.c	# DMR AES-256 (the privacy type; docs/spec/air-encryption.md 8)
++endif
+ endif
+ # DMR data (SMS, ARS, LRRP, CSBK signaling)
+ ifeq ($(CONFIG_DMR_DATA_CORE),y)
 diff --git a/config/features.mk b/config/features.mk
 index 8f2f7d3f..db02bc9b 100644
 --- a/config/features.mk
@@ -1129,6 +1139,495 @@ index 00000000..99ff6dd0
 +void air_nonce(const uint8_t key[AES256_KEY_BYTES], uint32_t now_ms, uint8_t out[AES_BLOCK_BYTES]);
 +
 +#endif
+diff --git a/core/dmr/call/dmr_call.c b/core/dmr/call/dmr_call.c
+index b59474f8..d45efed8 100644
+--- a/core/dmr/call/dmr_call.c
++++ b/core/dmr/call/dmr_call.c
+@@ -1,5 +1,6 @@
+ // SPDX-License-Identifier: MIT
+ // Copyright (c) 2026 The RadioFoundry Authors
++// Copyright (c) 2026 lyra XE1POC (changes)
+ // The DMR voice call stack (see dmr_call.h). Two independent halves share this file: the RX side (rx_*: is a call
+ // on our slot, and do we play it) and the TX side (tx_*: from PTT to the modem's tx_done). RX bursts are ignored while
+ // the modem transmits (their status can't be trusted then, docs/spec/dmr-modem.md 6.5).
+@@ -15,6 +16,11 @@
+ #include "dmr/ambe/ambeFec.h"
+ #define SFR_DUALPATH_DEPTH	3	// bursts held: the repeat of the first comes 90 ms later, after the talker's next
+ #endif
++#define DMR_AES_ON	(CONFIG_AIR_AES && CONFIG_DMR_PRIVACY)	// AES-256 voice (dmr_call_config_t.aes_key)
++#if DMR_AES_ON
++#include "dmr/dmrAes.h"
++#include "crypto/air_nonce.h"
++#endif
+ 
+ // RX trace into the debug link's log (see dmr_call.h). Host tests that don't link dlog build with DMR_RX_TRACE=0
+ #ifndef DMR_RX_TRACE
+@@ -183,6 +189,15 @@ static struct {
+ 	void *data_rx_ctx;
+ 	dmr_rx_tap_fn rx_tap;
+ 	void *rx_tap_ctx;
++#if DMR_AES_ON
++	// AES-256: the call's keystream (RX from its PI header, TX from our own), the MI of the PI header that started it,
++	// and on TX our PI header (sent once after the voice LC headers) and whether the staged burst is encrypted already
++	dmr_aes_t aes;
++	uint32_t aes_pi_mi;
++	uint8_t tx_pi[12];
++	bool tx_pi_left;
++	bool stage_enc;
++#endif
+ } s;
+ #if CONFIG_SFR && CONFIG_SFR_DUALPATH_RX
+ // SFR user, dual-path RX: voice bursts taken but not played yet, oldest first (play order; s.vq_n of them). A burst waits
+@@ -670,6 +685,17 @@ static void rx_lc(const uint8_t lc[DMR_LC_BYTES], const dmr_burst_t *b, bool lat
+ 	} else if (c->encrypted && !was_encrypted) {
+ 		stats.rx_encrypted_calls++;
+ 	}
++#if DMR_AES_ON
++	// An AES keystream belongs to one talker's transmission; a call back after a fade keeps it (dmrAesBurst counts
++	// the superframes lost by the slot counter). A PI header held for the late entry starts its own (rx_pi_header)
++	if (resumed && s.aes.ready) {
++		c->pi_header = true;
++		c->encrypted = true;
++	} else if (new_talker && !(s.pi_pending && s.aes.ready)) {
++		dmrAesStop(&s.aes);
++		s.aes_pi_mi = 0;
++	}
++#endif
+ 	s.pi_pending = false;
+ 	// The call's color code and slot as far as this burst tells them; rx_burst fills in the rest from the next ones
+ 	s.rx_cc_known = cc_known(b);
+@@ -738,8 +764,13 @@ static void rx_play(const dmr_burst_t *b, uint32_t now, uint32_t slot)
+ 		stats.rx_encrypted_calls++;
+ 		s.dirty = true;
+ 	}
+-	// No key, or a PI header: an MI-based scheme the static key hook can't undo (docs/spec/gotchas.md 6.4)
+-	if (enc && (!s.cfg.privacy || s.view.caller.pi_header)) {
++	bool aes = false;
++#if DMR_AES_ON
++	aes = enc && s.cfg.aes_key != NULL && s.view.caller.pi_header;
++#endif
++	// No key, or a PI header: an MI-based scheme the static key hook can't undo (docs/spec/gotchas.md 6.4), unless it
++	// is AES-256 with our key (dmrAes.h)
++	if (enc && !aes && (!s.cfg.privacy || s.view.caller.pi_header)) {
+ 		stats.rx_enc_dropped++;
+ 		TR_WHAT('e');
+ 		sink_lost(DMR_AMBE_FRAMES_PER_BURST);	// no key: never play the scrambled voice
+@@ -749,7 +780,16 @@ static void rx_play(const dmr_burst_t *b, uint32_t now, uint32_t slot)
+ 	uint8_t v[DMR_VOICE_BYTES];
+ 
+ 	memcpy(v, b->payload, DMR_VOICE_BYTES);
+-	if (enc)
++#if DMR_AES_ON
++	// (no stream: the PI header named another key ID or algorithm, or too much of the call was lost)
++	if (aes && !dmrAesBurst(&s.aes, v, i, slot, dmr_ambe_silence)) {
++		stats.rx_enc_dropped++;
++		TR_WHAT('e');
++		sink_lost(DMR_AMBE_FRAMES_PER_BURST);
++		return;
++	}
++#endif
++	if (enc && !aes)
+ 		s.cfg.privacy(v, i, false, s.cfg.privacy_ctx);
+ 	stats.rx_voice_bursts++;
+ 	TR_WHAT('p');
+@@ -977,6 +1017,23 @@ static void rx_pi_header(const dmr_burst_t *b, uint32_t now)
+ 	if (!ok || b->len < 2)
+ 		return;
+ 	stats.rx_pi_headers++;
++#if DMR_AES_ON
++	// AES-256 with our key ID: the keystream of its MI (the same header again keeps the running one). Anything else
++	// stops it, so the call is not played
++	if (s.cfg.aes_key != NULL && b->len >= DMR_AES_PI_BYTES) {
++		uint8_t kid;
++		uint32_t mi;
++
++		if (dmrAesPiParse(b->payload, &kid, &mi) && kid == s.cfg.aes_kid) {
++			if (!s.aes.ready || mi != s.aes_pi_mi)
++				dmrAesStart(&s.aes, s.cfg.aes_key, mi);
++			s.aes_pi_mi = mi;
++		} else {
++			dmrAesStop(&s.aes);
++			s.aes_pi_mi = 0;
++		}
++	}
++#endif
+ 	if (s.rx == RXC_NONE) {
+ 		s.pi_pending = true;
+ 		s.pi_pending_ms = now;
+@@ -1301,6 +1358,14 @@ static void tx_fill(uint32_t now)
+ 			s.headers_left--;
+ 			continue;
+ 		}
++#if DMR_AES_ON
++		if (s.tx_pi_left) {	// between the voice LC headers and burst A, as the receivers expect it
++			if (!tx_put(DMR_BURST_PI_HEADER, 0, true, s.tx_pi, sizeof(s.tx_pi)))
++				return;
++			s.tx_pi_left = false;
++			continue;
++		}
++#endif
+ 		if (s.stop_req && s.voice_index == 0) {
+ 			tx_terminate(now, inflight);	// superframe boundary
+ 			return;
+@@ -1319,13 +1384,26 @@ static void tx_fill(uint32_t now)
+ 			tx_superframe_lc();
+ 
+ 		uint8_t v[DMR_VOICE_BYTES];
+-
++		bool aes = false;
++
++#if DMR_AES_ON
++		aes = s.cfg.aes_key != NULL;
++		// Encrypted in place once: the keystream moves on with each burst, so a burst the modem refused is tried
++		// again as it is
++		if (aes && !s.stage_enc) {
++			dmrAesBurst(&s.aes, (uint8_t *)s.stage, s.voice_index, 0, NULL);
++			s.stage_enc = true;
++		}
++#endif
+ 		memcpy(v, s.stage, DMR_VOICE_BYTES);
+-		if (s.cfg.privacy && (s.cfg.tx_svc & DMR_SVC_PRIVACY))
++		if (!aes && s.cfg.privacy && (s.cfg.tx_svc & DMR_SVC_PRIVACY))
+ 			s.cfg.privacy(v, s.voice_index, true, s.cfg.privacy_ctx);
+ 		if (!tx_put(DMR_BURST_VOICE, s.voice_index, false, v, DMR_VOICE_BYTES))
+ 			return;	// keep the staged frames for the next try
+ 		s.stage_n = 0;
++#if DMR_AES_ON
++		s.stage_enc = false;
++#endif
+ 		if (s.voice_index == 0 && s.tx_sf < 255)
+ 			s.tx_sf++;
+ 		s.voice_index = (uint8_t)((s.voice_index + 1) % 6);
+@@ -1346,6 +1424,13 @@ static void tx_start_voice(uint32_t now)
+ 	};
+ 	dmr_timing_t timing;
+ 
++#if DMR_AES_ON
++	// AES-256 asked for and its key not in the keyring: never in the clear instead
++	if (s.cfg.aes_kid != 0 && s.cfg.aes_key == NULL) {
++		tx_deny(DMR_TX_ERR_REJECTED);
++		return;
++	}
++#endif
+ 	if (s.cfg.rmo)
+ 		timing = DMR_TIMING_ALIGNED;
+ 	else	// DMO: answer in step with a station just heard, else on our own timing
+@@ -1381,6 +1466,29 @@ static void tx_start_voice(uint32_t now)
+ #endif
+ 	s.queue_cap = s.modem->tx_queue_space();
+ 	s.headers_left = DMR_CALL_TX_HEADERS;
++#if DMR_AES_ON
++	s.tx_pi_left = false;
++	s.stage_enc = false;
++	if (s.cfg.aes_key != NULL) {
++		// An MI no transmission had before (air_nonce.h), its keystream and the PI header that carries it
++		uint8_t n[AES_BLOCK_BYTES];
++		uint32_t mi = 0;
++
++		while (mi == 0) {
++			air_nonce(s.cfg.aes_key, now, n);
++			mi = (uint32_t)n[0] << 24 | (uint32_t)n[1] << 16 | (uint32_t)n[2] << 8 | n[3];
++		}
++		memset(n, 0, sizeof(n));
++		dmrAesStart(&s.aes, s.cfg.aes_key, mi);
++		dmrAesPiBuild(s.cfg.aes_kid, mi, l.dst, s.tx_pi);
++
++		uint16_t crc = (uint16_t)(dmr_crc_ccitt(s.tx_pi, DMR_AES_PI_BYTES) ^ DMR_CRC_MASK_PI);
++
++		s.tx_pi[10] = (uint8_t)(crc >> 8);
++		s.tx_pi[11] = (uint8_t)crc;
++		s.tx_pi_left = true;
++	}
++#endif
+ 	s.voice_index = 0;
+ 	s.queued = s.started = 0;
+ 	s.stop_req = false;
+diff --git a/core/dmr/call/dmr_call.h b/core/dmr/call/dmr_call.h
+index eaa394d5..1d600e0e 100644
+--- a/core/dmr/call/dmr_call.h
++++ b/core/dmr/call/dmr_call.h
+@@ -1,5 +1,6 @@
+ // SPDX-License-Identifier: MIT
+ // Copyright (c) 2026 The RadioFoundry Authors
++// Copyright (c) 2026 lyra XE1POC (changes)
+ /*
+  * The DMR voice call stack, modem neutral: it talks only to a hal_dmr_modem_t (docs/spec/dmr-modem.md section 6) and
+  * runs at task level.
+@@ -113,6 +114,11 @@ typedef struct {
+ 	uint8_t tx_svc;			// voice LC service options (privacy bit, emergency, priority)
+ 	dmr_privacy_fn privacy;		// NULL = none: bursts with PI set are not played
+ 	void *privacy_ctx;
++	// AES-256 (CONFIG_AIR_AES with CONFIG_DMR_PRIVACY; core/dmr/dmrAes.h), instead of the privacy hook: aes_kid 1-255
++	// is the key ID, aes_key its 32 octets (NULL: not in the keyring, PTT refused). Calls whose PI header names this
++	// key ID are decrypted; TX sends a PI header and encrypts. aes_kid 0: none. (Unconditional fields: no layout per build)
++	const uint8_t *aes_key;
++	uint8_t aes_kid;
+ 	char tx_alias[DMR_TA_TEXT_MAX + 1];	// our talker alias, "" = none (CONFIG_DMR_TALKER_ALIAS)
+ 	uint8_t tx_alias_format;	// DMR_TA_7BIT or DMR_TA_ISO8
+ 	// A user of a single frequency repeater (CONFIG_SFR, docs/spec/sfr.md 4; never with rmo): ts is the inbound slot.
+diff --git a/core/dmr/dmrAes.c b/core/dmr/dmrAes.c
+new file mode 100644
+index 00000000..09f82d8c
+--- /dev/null
++++ b/core/dmr/dmrAes.c
+@@ -0,0 +1,143 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// Copyright (c) 2026 lyra XE1POC
++// DMR AES-256 voice (dmrAes.h)
++#include "config.h"
++#if CONFIG_AIR_AES && CONFIG_DMR_PRIVACY	// the whole file
++#include "dmrAes.h"
++#include "crypto/aes256.h"
++#include "dmr/ambe/ambeFec.h"
++
++#include <string.h>
++
++static uint32_t lfsr_bit(uint32_t m)
++{
++	return ((m >> 31) ^ (m >> 21) ^ (m >> 1) ^ m) & 1u;
++}
++
++uint32_t dmrAesMiNext(uint32_t mi)
++{
++	for (unsigned i = 0; i < 32; i++)
++		mi = (mi << 1) | lfsr_bit(mi);
++	return mi;
++}
++
++// The superframe's keystream: IV = the MI, then 96 bits more of its LFSR
++static void generate(dmr_aes_t *a)
++{
++	uint8_t blk[AES_BLOCK_BYTES] = { 0 };
++	uint32_t m = a->mi;
++
++	for (unsigned i = 0; i < 4; i++)
++		blk[i] = (uint8_t)(a->mi >> (24 - 8 * i));
++	for (unsigned i = 32; i < 128; i++) {
++		uint32_t b = lfsr_bit(m);
++
++		m = (m << 1) | b;
++		blk[i / 8] = (uint8_t)((blk[i / 8] << 1) | b);
++	}
++	aes256_encrypt_block(a->key, blk, blk);	// the first output block only feeds the next one
++	for (unsigned at = 0; at < DMR_AES_SF_BYTES; at += AES_BLOCK_BYTES) {
++		aes256_encrypt_block(a->key, blk, blk);
++		memcpy(&a->ks[at], blk, DMR_AES_SF_BYTES - at < AES_BLOCK_BYTES ? DMR_AES_SF_BYTES - at : AES_BLOCK_BYTES);
++	}
++	memset(blk, 0, sizeof blk);
++}
++
++void dmrAesStart(dmr_aes_t *a, const uint8_t *key, uint32_t mi)
++{
++	memset(a, 0, sizeof *a);
++	a->key = key;
++	a->mi = mi;
++	a->pos = 0xFF;
++	a->ready = key != NULL && mi != 0;
++	if (a->ready)
++		generate(a);
++}
++
++void dmrAesStop(dmr_aes_t *a)
++{
++	volatile uint8_t *p = (volatile uint8_t *)a;
++
++	for (unsigned i = 0; i < sizeof *a; i++)
++		p[i] = 0;
++	a->pos = 0xFF;
++}
++
++bool dmrAesPiParse(const uint8_t pi[DMR_AES_PI_BYTES], uint8_t *kid, uint32_t *mi)
++{
++	*kid = pi[2];
++	*mi = (uint32_t)pi[3] << 24 | (uint32_t)pi[4] << 16 | (uint32_t)pi[5] << 8 | pi[6];
++	return pi[1] == DMR_AES_FID && (pi[0] & 0xDFu) == (DMR_AES_ALG & 0xDFu) && *kid != 0 && *mi != 0;
++}
++
++void dmrAesPiBuild(uint8_t kid, uint32_t mi, uint32_t dst, uint8_t pi[DMR_AES_PI_BYTES])
++{
++	pi[0] = DMR_AES_ALG;
++	pi[1] = DMR_AES_FID;
++	pi[2] = kid;
++	for (unsigned i = 0; i < 4; i++)
++		pi[3 + i] = (uint8_t)(mi >> (24 - 8 * i));
++	pi[7] = (uint8_t)(dst >> 16);
++	pi[8] = (uint8_t)(dst >> 8);
++	pi[9] = (uint8_t)dst;
++}
++
++// Superframe boundaries crossed from the last burst to this one. Bursts come in batches and late, so time is no
++// clock: the slot counter is (a slot's bursts are every other tick), else the index alone (the same index again is a
++// superframe on: the call stack has dropped the repeats)
++static unsigned crossed(const dmr_aes_t *a, uint8_t index, uint32_t slot)
++{
++	if (a->pos > 5)
++		return 0;
++
++	unsigned r = (unsigned)(index + 6 - a->pos) % 6, k = 0;
++
++	if (slot && a->slot) {
++		uint32_t bursts = (slot - a->slot + 1) / 2;
++
++		if (bursts > r)
++			k = (unsigned)((bursts - r + 3) / 6);
++	}
++	if (!r && !k)
++		k = 1;
++	return (a->pos + r + 6 * k) / 6;
++}
++
++bool dmrAesBurst(dmr_aes_t *a, uint8_t ambe27[27], uint8_t index, uint32_t slot, const uint8_t *silence)
++{
++	if (!a->ready || index > 5)
++		return false;
++
++	unsigned n = crossed(a, index, slot);
++
++	if (n > DMR_AES_MAX_GAP) {
++		dmrAesStop(a);
++		return false;
++	}
++	if (n) {
++		while (n--)
++			a->mi = dmrAesMiNext(a->mi);
++		generate(a);
++	}
++	for (unsigned f = 0; f < 3; f++) {
++		uint8_t *fr = &ambe27[9 * f], bits[AMBE_PARAM_BITS];
++		const uint8_t *k = &a->ks[(index * 3u + f) * 7u];
++		ambe_fec_result_t r;
++		bool quiet = silence && !memcmp(fr, silence, 9);
++
++		ambeFecDecode(fr, bits, &r);
++		if (silence && (quiet || r.c0_failed)) {
++			memcpy(fr, silence, 9);
++			continue;
++		}
++		for (unsigned b = 0; b < AMBE_PARAM_BITS; b++)
++			bits[b] ^= (uint8_t)((k[b / 8] >> (7 - b % 8)) & 1u);
++		ambeFecEncode(bits, fr);
++		memset(bits, 0, sizeof bits);
++	}
++	a->pos = index;
++	a->slot = slot;
++	return true;
++}
++
++#endif
+diff --git a/core/dmr/dmrAes.h b/core/dmr/dmrAes.h
+new file mode 100644
+index 00000000..c029be10
+--- /dev/null
++++ b/core/dmr/dmrAes.h
+@@ -0,0 +1,42 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// Copyright (c) 2026 lyra XE1POC
++// DMR AES-256 voice in the Motorola layout (CONFIG_AIR_AES with CONFIG_DMR_PRIVACY; docs/spec/air-encryption.md 8).
++// A PI header (FID 0x10) carries algorithm 0x25, an 8-bit key ID and a 32-bit MI. The MI and the LFSR
++// x^32 + x^22 + x^2 + x + 1 give the 128-bit IV; AES-256 OFB, first block discarded, gives 126 octets a superframe:
++// 7 for each of its 18 frames, the first 49 bits XORed onto the frame's voice bits before their FEC. Each superframe
++// steps the MI 32 times. The IV expansion and keystream order follow dmrgo (github.com/USA-RedDragon/dmrgo, MIT,
++// Copyright 2023-2026 Jacob McSwain); checked against a real recording with a published key (tests/host/dmrAesTest.c).
++#ifndef RFOUNDRY_DMRAES_H
++#define RFOUNDRY_DMRAES_H
++
++#include <stdbool.h>
++#include <stdint.h>
++
++#define DMR_AES_ALG		0x25	// AES-256 in the PI header (0x05 is taken too: what some makers send)
++#define DMR_AES_FID		0x10
++#define DMR_AES_PI_BYTES	10	// the PI header without its CRC
++#define DMR_AES_SF_BYTES	126	// a superframe's keystream: 18 frames of 7 octets
++#define DMR_AES_MAX_GAP		64	// superframes a call may lose and keep its keystream (23 s; a fade ends it sooner)
++
++typedef struct {
++	const uint8_t *key;		// the caller's 32 octets
++	uint32_t mi;			// the MI of the superframe in hand
++	uint32_t slot;			// the modem's slot counter at the last burst, 0: none
++	uint8_t pos;			// the last burst's index (0-5), 0xFF: none yet
++	bool ready;
++	uint8_t ks[DMR_AES_SF_BYTES];
++} dmr_aes_t;
++
++uint32_t dmrAesMiNext(uint32_t mi);
++void dmrAesStart(dmr_aes_t *a, const uint8_t *key, uint32_t mi);
++void dmrAesStop(dmr_aes_t *a);	// wipes the keystream
++// The first 10 octets of a PI header: true for AES-256 in the Motorola layout, with a key ID and an MI
++bool dmrAesPiParse(const uint8_t pi[DMR_AES_PI_BYTES], uint8_t *kid, uint32_t *mi);
++void dmrAesPiBuild(uint8_t kid, uint32_t mi, uint32_t dst, uint8_t pi[DMR_AES_PI_BYTES]);
++// Encrypt or decrypt voice burst index (0 = A .. 5 = F) in place: its 3 frames of 9 octets. The MI steps for each
++// superframe since the last burst (slot: the modem's slot counter, 0 without one: the burst index alone tells). RX
++// passes the silence frame: a frame that is silence on air, or whose first FEC word fails, becomes it. False: no
++// keystream, or more than DMR_AES_MAX_GAP superframes lost (the stream is then stopped)
++bool dmrAesBurst(dmr_aes_t *a, uint8_t ambe27[27], uint8_t index, uint32_t slot, const uint8_t *silence);
++
++#endif
+diff --git a/core/dmr/dmrPrivacy.c b/core/dmr/dmrPrivacy.c
+index 473a8bf7..d3334c73 100644
+--- a/core/dmr/dmrPrivacy.c
++++ b/core/dmr/dmrPrivacy.c
+@@ -1,5 +1,6 @@
+ // SPDX-License-Identifier: MIT AND ISC
+ // Copyright (c) 2026 The RadioFoundry Authors
++// Copyright (c) 2026 lyra XE1POC (changes)
+ // SPDX-FileCopyrightText: 2010 DSD Author (MOTOROLA_BP_KEYS, from DSD-FME include/bp.h, ISC license, see LICENSES/ISC.txt)
+ /*
+  * DMR voice privacy (static keystream "basic privacy" schemes)
+@@ -18,6 +19,7 @@
+  */
+ 
+ #include <string.h>
++#include "config.h"
+ #include "dmr/dmrPrivacy.h"
+ #include "dmr/ambe/ambeFec.h"
+ 
+@@ -71,6 +73,8 @@ bool dmrPrivacyKeyIsValid(dmrPrivacyType_t type, uint16_t key)
+ 			return ((key >= 1) && (key <= 255));
+ 		case DMR_PRIVACY_ANYTONE_BP:
+ 			return true;
++		case DMR_PRIVACY_AES256:	// a key ID; without the AES build there is nothing to run it
++			return CONFIG_AIR_AES && (key >= 1) && (key <= 255);
+ 		default:
+ 			return false;
+ 	}
+@@ -89,6 +93,8 @@ const char *dmrPrivacyTypeName(dmrPrivacyType_t type)
+ 			return "Moto BP";
+ 		case DMR_PRIVACY_ANYTONE_BP:
+ 			return "Anytone BP";
++		case DMR_PRIVACY_AES256:
++			return "AES-256";
+ 		default:
+ 			return "Off";
+ 	}
+@@ -274,7 +280,7 @@ static void applyFrame(dmrPrivacyType_t type, uint16_t key, uint8_t *bits, int f
+ 
+ void dmrPrivacyApplyBurst(dmrPrivacyType_t type, uint16_t key, uint8_t *ambe, uint8_t voiceSequence, bool correctErrors)
+ {
+-	if ((type == DMR_PRIVACY_OFF) || (type >= DMR_PRIVACY_NUM_TYPES) || (voiceSequence >= (FRAMES_PER_SUPERFRAME / DMR_PRIVACY_AMBE_BURST_FRAMES)))
++	if ((type == DMR_PRIVACY_OFF) || (type >= DMR_PRIVACY_AES256) || (voiceSequence >= (FRAMES_PER_SUPERFRAME / DMR_PRIVACY_AMBE_BURST_FRAMES)))
+ 	{
+ 		return;
+ 	}
+diff --git a/core/dmr/dmrPrivacy.h b/core/dmr/dmrPrivacy.h
+index b0ca5ebe..7e80cef9 100644
+--- a/core/dmr/dmrPrivacy.h
++++ b/core/dmr/dmrPrivacy.h
+@@ -1,5 +1,6 @@
+ // SPDX-License-Identifier: MIT
+ // Copyright (c) 2026 The RadioFoundry Authors
++// Copyright (c) 2026 lyra XE1POC (changes)
+ /*
+  * DMR voice privacy (static keystream "basic privacy" schemes)
+  */
+@@ -23,6 +24,8 @@ typedef enum
+ 	DMR_PRIVACY_OFF = 0,
+ 	DMR_PRIVACY_MOTOROLA_BP,  // Motorola Basic Privacy, key 1-255
+ 	DMR_PRIVACY_ANYTONE_BP,   // Anytone 16-bit Basic Privacy, key 0x0000-0xFFFF
++	DMR_PRIVACY_AES256,       // AES-256, Motorola layout: key = key ID 1-255 of the keyring (CONFIG_AIR_AES, dmrAes.h); not
++	                          // a static keystream, so the call stack's AES path runs it, never the privacy hook
+ 	DMR_PRIVACY_NUM_TYPES
+ } dmrPrivacyType_t;
+ 
 diff --git a/core/nxdn/nxdn.h b/core/nxdn/nxdn.h
 index b9beb470..94c62e81 100644
 --- a/core/nxdn/nxdn.h
@@ -2311,6 +2810,73 @@ index c2bdadb7..cb2caa04 100644
  #if CONFIG_P25_TRUNK
  	bool trunk;		// trunking signaling is received too (a control channel, or a voice channel it granted)
  #endif
+diff --git a/core/radio/beep.c b/core/radio/beep.c
+index 350f4119..83a5384c 100644
+--- a/core/radio/beep.c
++++ b/core/radio/beep.c
+@@ -23,8 +23,11 @@
+ // Distinct sounds (radio users tell them apart without looking, docs/ux/survey.md)
+ static const beep_seg_t p_key[] = { { 1000, 25 } };
+ static const beep_seg_t p_error[] = { { 400, 150 } };
+-static const beep_seg_t p_permit[] = { { 1600, 50 }, { 0, 40 }, { 1600, 50 } };
+-static const beep_seg_t p_permit_short[] = { { 1600, 80 } };	// the same pitch, once: it delays keying
++// Talk permits as Motorola radios sound them (hobbyist measurements, no official spec). DMR: the MOTOTRBO chirp, four
++// 40 ms notes G6 C6 G6 E6 without gaps (160 ms; on air, and before keying where a beep can't sound on air). P25 and
++// NXDN: the ASTRO 25 permit, three 910 Hz beeps, before keying
++static const beep_seg_t p_permit[] = { { 1568, 40 }, { 1047, 40 }, { 1568, 40 }, { 1319, 40 } };
++static const beep_seg_t p_permit_dv[] = { { 910, 70 }, { 0, 20 }, { 910, 30 }, { 0, 20 }, { 910, 60 } };
+ static const beep_seg_t p_deny[] = { { 300, 400 } };
+ static const beep_seg_t p_call_end[] = { { 1200, 50 }, { 0, 30 }, { 900, 70 } };
+ static const beep_seg_t p_tot[] = { { 1000, 100 }, { 0, 100 }, { 1000, 100 } };
+@@ -58,9 +61,10 @@ static const struct {
+ 	[BEEP_SCAN_HOLD] = PAT(p_scan_hold),
+ 	[BEEP_EMERGENCY] = PAT(p_emergency),
+ 	[BEEP_MESSAGE] = PAT(p_message),
+-	[BEEP_TX_PERMIT_SHORT] = PAT(p_permit_short),
++	[BEEP_TX_PERMIT_SHORT] = PAT(p_permit),
+ 	[BEEP_SWEEP] = PAT(p_sweep),
+ 	[BEEP_SYSTEM_BACK] = PAT(p_system_back),
++	[BEEP_TX_PERMIT_DV] = PAT(p_permit_dv),
+ };
+ 
+ // One period of a sine, Q15
+@@ -160,6 +164,11 @@ bool beep_busy(void)
+ 	return cb_active || LOAD(req_seq) != cb_seq;
+ }
+ 
++bool beep_streaming(void)
++{
++	return own_stream;
++}
++
+ void beep_play(beep_t b, uint8_t level, bool shared)
+ {
+ 	if (b <= BEEP_NONE || b >= BEEP_COUNT || level == 0) {
+diff --git a/core/radio/beep.h b/core/radio/beep.h
+index eb2730d2..d75c3f94 100644
+--- a/core/radio/beep.h
++++ b/core/radio/beep.h
+@@ -30,9 +30,10 @@ typedef enum {
+ 	BEEP_SCAN_HOLD,		// the scan stopped on a signal (unused by default)
+ 	BEEP_EMERGENCY,		// DMR: someone's emergency heard (alarm or emergency call; core/dmr/dmr_emergency.h)
+ 	BEEP_MESSAGE,		// a text message arrived (the UI, if Settings > Sound > Message tone)
+-	BEEP_TX_PERMIT_SHORT,	// DMR: talk now, played before keying (CAP_BEEP_NOT_ON_AIR): one short tone
++	BEEP_TX_PERMIT_SHORT,	// DMR: talk now, played before keying (CAP_BEEP_NOT_ON_AIR): the same chirp
+ 	BEEP_SWEEP,		// speaker test (debug link only): a 4 s sweep, BEEP_SWEEP_LO_HZ to BEEP_SWEEP_HI_HZ
+ 	BEEP_SYSTEM_BACK,	// a trunked system found again, the radio back on it from its fallback channel
++	BEEP_TX_PERMIT_DV,	// P25 / NXDN: talk now, played before keying (Motorola ASTRO 25 style)
+ 	BEEP_COUNT
+ } beep_t;
+ 
+@@ -77,6 +78,8 @@ bool beep_warm_on(void);
+ bool beep_mix(int16_t *spk);
+ // Whether a pattern is still playing (as last seen by the audio side)
+ bool beep_busy(void);
++// Whether the beep's own stream still runs (radio task). A stream started after it would be stopped by beep_service
++bool beep_streaming(void);
+ // The pattern's segments (for tests and docs); count returned
+ uint8_t beep_pattern(beep_t b, const beep_seg_t **segs);
+ void beep_get_stats(beep_stats_t *out);
 diff --git a/core/radio/radio_am.c b/core/radio/radio_am.c
 index 243f035f..352c1de9 100644
 --- a/core/radio/radio_am.c
@@ -2696,7 +3262,7 @@ index 1abbfb3b..a2c632e6 100644
  bool radio_p25_poll(radio_p25_view_t *v);
  
 diff --git a/core/radio/radio_sm.c b/core/radio/radio_sm.c
-index a7372adc..381d6186 100644
+index a7372adc..3876e1c2 100644
 --- a/core/radio/radio_sm.c
 +++ b/core/radio/radio_sm.c
 @@ -1,5 +1,6 @@
@@ -2735,7 +3301,40 @@ index a7372adc..381d6186 100644
  static bool air_running(void);
  #if CONFIG_SCAN
  static uint8_t air_heard(const radio_sm_t *sm);
-@@ -1581,6 +1590,11 @@ static void set_hear_all_latch(radio_sm_t *sm, bool on)
+@@ -1336,6 +1345,13 @@ static void dmr_load_channel(radio_sm_t *sm)
+ #if CONFIG_DMR_PRIVACY
+ static dmrPrivacyKey_t privacy_key;	// the call stack's privacy hook context (radio task only)
+ #endif
++#if CONFIG_DMR_PRIVACY && CONFIG_AIR_AES
++#include "codeplug/codeplug_tag.h"
++#include "codeplug/codeplug_records.h"
++#include "dmr/dmrAes.h"
++#include "crypto/aes256.h"
++static uint8_t dmr_aes_key[AES256_KEY_BYTES];	// the DMR AES-256 key the call stack points at (radio task only)
++#endif
+ 
+ // Hang time (ms) as the call stack's reply window (whole seconds, rounded up); 0 keeps the stack's default
+ static uint8_t hang_s(uint16_t ms, uint8_t dflt)
+@@ -1450,6 +1466,18 @@ static void dmr_configure(radio_sm_t *sm)
+ 		cfg.tx_fid = dmrPrivacyFID(privacy_key.type, cfg.tx_fid);
+ 		cfg.tx_svc = dmrPrivacyServiceOptions(privacy_key.type, cfg.tx_svc);
+ 	}
++#if CONFIG_AIR_AES
++	// AES-256: the key ID's key from the keyring (system 0xFF, algorithm 0x25). Missing: calls stay silent and PTT is
++	// refused (the call stack never sends in the clear instead)
++	if (privacy && privacy_key.type == DMR_PRIVACY_AES256) {
++		cfg.privacy = NULL;
++		cfg.privacy_ctx = NULL;
++		cfg.aes_kid = (uint8_t)privacy_key.key;
++		if (codeplug_traffic_key(CODEPLUG_SYSTEM_NONE, DMR_AES_ALG, cfg.aes_kid, dmr_aes_key, sizeof(dmr_aes_key)) ==
++		    (int)sizeof(dmr_aes_key))
++			cfg.aes_key = dmr_aes_key;
++	}
++#endif
+ #endif
+ #if CONFIG_DMR_EMERGENCY
+ 	// In emergency: every call carries the emergency service option, goes to the emergency target, and doesn't wait
+@@ -1581,6 +1609,11 @@ static void set_hear_all_latch(radio_sm_t *sm, bool on)
  	sm->latch_vfo = sm->view.vfo;
  	sm->view.dmr.hear_all_latch = on;
  	dmr_reconfigure(sm);
@@ -2747,7 +3346,7 @@ index a7372adc..381d6186 100644
  }
  
  // A timeslot for now (RREQ_DMR_TS). The slot the radio would use without it (a contact's override, else the
-@@ -5767,6 +5781,7 @@ static uint8_t air_heard(const radio_sm_t *sm)
+@@ -5767,6 +5800,7 @@ static uint8_t air_heard(const radio_sm_t *sm)
  static void air_begin(radio_sm_t *sm)
  {
  #if CONFIG_NXDN
@@ -2755,7 +3354,7 @@ index a7372adc..381d6186 100644
  	if (sm->view.ch.mode == RADIO_MODE_NXDN) {
  		radio_nxdn_begin(&sm->view.ch, air_number(sm));
  		radio_nxdn_poll(&sm->view.nxdn);
-@@ -5774,6 +5789,7 @@ static void air_begin(radio_sm_t *sm)
+@@ -5774,6 +5808,7 @@ static void air_begin(radio_sm_t *sm)
  	}
  #endif
  #if CONFIG_P25
@@ -2763,7 +3362,55 @@ index a7372adc..381d6186 100644
  	radio_p25_begin(&sm->view.ch, air_number(sm), p25_own_id(sm));
  	radio_p25_poll(&sm->view.p25);
  #endif
-@@ -5856,12 +5872,14 @@ static void air_key(radio_sm_t *sm, uint32_t now_ms, uint32_t hz)
+@@ -5783,6 +5818,7 @@ static void air_begin(radio_sm_t *sm)
+ // transmission, and the transmitter goes off. Called from dmr_end, so every path that takes the modem stops them too
+ static void air_stop(radio_sm_t *sm)
+ {
++	sm->air_permit_ms = 0;
+ #if CONFIG_P25
+ 	radio_p25_end();
+ #endif
+@@ -5808,6 +5844,39 @@ static void air_stop(radio_sm_t *sm)
+ #endif
+ }
+ 
++// The talk permit before keying a P25 or NXDN channel (BEEP_TX_PERMIT_DV, Motorola ASTRO 25 style): it plays while the
++// channel still receives, then the engine keys. Not on trunked channels (there the permit is the system's grant). The
++// hold also waits for the beep's own stream to stop: transmitting starts the microphone's, which beep_service would
++// stop under it
++#define AIR_PERMIT_MAX_MS	600u	// keys after this long whatever the beep says
++
++static void air_key(radio_sm_t *sm, uint32_t now_ms, uint32_t hz);
++
++// (no engine, or one that only receives: air_key refuses at once, no permit first)
++static bool permit_on_air_mode(const radio_sm_t *sm)
++{
++	const radio_air_ops_t *o = air_ops(sm);
++
++	return CONFIG_BEEP && sm->set.talk_permit && !sm->view.ch.no_beep && o->running() && (o->no_tx == NULL || !o->no_tx());
++}
++
++// Every tick: key once the talk permit is over (PTT let go during it: ptt_release dropped it)
++static void air_permit_poll(radio_sm_t *sm, uint32_t now_ms)
++{
++	if (sm->air_permit_ms == 0 || now_ms - sm->air_permit_ms < PERMIT_HOLD_MIN_MS) {
++		return;
++	}
++#if CONFIG_BEEP
++	if ((permit_busy() || beep_streaming()) && now_ms - sm->air_permit_ms < AIR_PERMIT_MAX_MS) {
++		return;
++	}
++#endif
++	sm->air_permit_ms = 0;
++	if (sm->ptt && !sm->air_tx) {
++		air_key(sm, now_ms, sm->view.ch.tx_hz);
++	}
++}
++
+ // PTT on an air mode's channel, tx_check passed: the header queued, the transmitter keyed at the channel's power, the
+ // provider started (hal_air.h: it keys only inside that). A refusal after the engine began ends at its AIR_TX_DONE
+ // in air_tick, which switches off
+@@ -5856,12 +5925,14 @@ static void air_key(radio_sm_t *sm, uint32_t now_ms, uint32_t hz)
  static void air_apply(radio_sm_t *sm)
  {
  #if CONFIG_NXDN
@@ -2778,7 +3425,37 @@ index a7372adc..381d6186 100644
  	radio_p25_apply(&sm->view.ch, air_number(sm), p25_own_id(sm));
  #endif
  }
-@@ -7671,7 +7689,7 @@ void radio_sm_request(radio_sm_t *sm, const radio_req_t *req, uint32_t now_ms)
+@@ -6125,9 +6196,15 @@ static void ptt_down(radio_sm_t *sm, uint32_t now_ms)
+ 			return;
+ 		}
+ #endif
+-		if (!sm->air_tx) {
+-			air_key(sm, now_ms, sm->view.ch.tx_hz);
+-		}		// else the last transmission is still ending: air_tick keys again once it is done
++		if (sm->air_tx) {
++			return;		// the last transmission is still ending: air_tick keys again once it is done
++		}
++		if (permit_on_air_mode(sm)) {
++			beep(sm, BEEP_TX_PERMIT_DV);	// air_permit_poll keys once it has played
++			sm->air_permit_ms = now_ms != 0 ? now_ms : 1;
++			return;
++		}
++		air_key(sm, now_ms, sm->view.ch.tx_hz);
+ 		return;
+ 	}
+ #endif
+@@ -6180,6 +6257,10 @@ static void ptt_release(radio_sm_t *sm, bool roger, uint32_t now_ms)
+ 	}
+ #endif
+ #if CONFIG_AIR
++	if (sm->air_permit_ms != 0) {
++		sm->air_permit_ms = 0;	// let go during the talk permit: never keyed
++		return;
++	}
+ 	if (sm->air_tx && sm->view.state == RS_TX) {
+ 		const radio_air_ops_t *o = air_ops(sm);
+ 		o->tx_stop();	// the frame on air is finished and the end sent; air_tick ends it at done
+@@ -7671,7 +7752,7 @@ void radio_sm_request(radio_sm_t *sm, const radio_req_t *req, uint32_t now_ms)
  		// arg 1 down, 0 up, 2 up after the key's hold function ran. DMR: a short press toggles digital monitor (the
  		// hear all latch) on its release, so a hold can do something else (#19); FM: the squelch is open while
  		// the key is held. A key held across a change to DMR is still released here
@@ -2787,6 +3464,26 @@ index a7372adc..381d6186 100644
  			if (req->arg == 0) {
  				set_hear_all_latch(sm, !hear_all_on(sm));
  			}
+@@ -8735,6 +8816,7 @@ void radio_sm_tick(radio_sm_t *sm, uint32_t now_ms)
+ #endif
+ #if CONFIG_AIR
+ 	if (air_running()) {
++		air_permit_poll(sm, now_ms);
+ 		air_tick(sm, now_ms);
+ 	}
+ #endif
+diff --git a/core/radio/radio_sm.h b/core/radio/radio_sm.h
+index 195b100c..1d0a6d5a 100644
+--- a/core/radio/radio_sm.h
++++ b/core/radio/radio_sm.h
+@@ -315,6 +315,7 @@ typedef struct {
+ 	// An air-framed mode (P25, NXDN; radio_air.h)
+ 	bool air_tx;			// a transmission runs in the engine (from prepare until it is done and cleared)
+ 	bool air_keyed;			// board.radio->tx() keyed for it (until tx_off)
++	uint32_t air_permit_ms;		// the talk permit before keying started (PTT held, not keyed yet), 0: none
+ #endif
+ #if CONFIG_P25
+ #if CONFIG_P25_TRUNK
 diff --git a/core/settings/settings.c b/core/settings/settings.c
 index b2c2d9a4..117dfd22 100644
 --- a/core/settings/settings.c
@@ -3050,7 +3747,7 @@ index a5334900..ce4bba03 100644
  	}
  	uint32_t key = 0x80000000u | ((uint32_t)v->zone_index << 16) | v->channel_number;
 diff --git a/core/ui/ui_menus.c b/core/ui/ui_menus.c
-index 7b1c44e7..d8f25d62 100644
+index 7b1c44e7..4f326387 100644
 --- a/core/ui/ui_menus.c
 +++ b/core/ui/ui_menus.c
 @@ -1,5 +1,6 @@
@@ -3349,6 +4046,22 @@ index 7b1c44e7..d8f25d62 100644
  	return ced_ch.mode == RADIO_MODE_DMR ? TR(DISCARD_TITLE_DMR, "Save as DMR?") :
  		TR(DISCARD_TITLE_FM, "Save as FM?");
  }
+@@ -6506,9 +6668,15 @@ static const int16_t v_sfrcwid[] = { 0, 1, 2, 3, 4 };	// radio_cwid_interval_ms
+ static const tr_id_t n_sfrcwid[] = { TRN(VALUE_OFF, "Off"), TRN(VALUE_5_MIN, "5 min"), TRN(VALUE_10_MIN, "10 min"),
+ 	TRN(VALUE_15_MIN, "15 min"), TRN(VALUE_30_MIN, "30 min") };
+ #endif
++#if CONFIG_AIR_AES	// AES-256: the key is the key ID of a keyring key (Codeplug Editor, Radio tab)
++static const int16_t v_ptype[] = { 0, 1, 2, 3 };	// dmrPrivacyType_t
++static const tr_id_t n_ptype[] = { TRN(VALUE_OFF, "Off"), TRX(VALUE_MOTOROLA, "Motorola"),
++	TRX(SET_VALUE_KEY_TYPE_ANYTONE, "Anytone"), TRX(SET_VALUE_KEY_TYPE_AES256, "AES-256") };
++#else
+ static const int16_t v_ptype[] = { 0, 1, 2 };	// dmrPrivacyType_t
+ static const tr_id_t n_ptype[] = { TRN(VALUE_OFF, "Off"), TRX(VALUE_MOTOROLA, "Motorola"),
+ 	TRX(SET_VALUE_KEY_TYPE_ANYTONE, "Anytone") };
++#endif
+ 
+ #define TOGGLE(nm, syn_, sid) { nm, syn_, ST_TOGGLE, sid, 0, { { 0, 1, 1, NULL } } }
+ #define NUMBER(nm, syn_, sid, lo, hi, st, u) { nm, syn_, ST_NUMBER, sid, 0, { { lo, hi, st, u } } }
 diff --git a/core/ui/ui_screens.c b/core/ui/ui_screens.c
 index 16ac72e8..c686fc93 100644
 --- a/core/ui/ui_screens.c
@@ -3766,17 +4479,17 @@ index 1a86955a..9d893a8f 100644
  | [settings-store.md](settings-store.md) | Settings store and safe flash writes |
 diff --git a/docs/spec/air-encryption.md b/docs/spec/air-encryption.md
 new file mode 100644
-index 00000000..e9188e77
+index 00000000..dd97d583
 --- /dev/null
 +++ b/docs/spec/air-encryption.md
-@@ -0,0 +1,146 @@
+@@ -0,0 +1,169 @@
 +<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 +<!-- Copyright (c) 2026 lyra XE1POC -->
 +
 +# AES-256 voice encryption of the air modes (`CONFIG_AIR_AES`)
 +
 +P25 and NXDN conventional channels can send their voice encrypted with AES-256 and play calls encrypted with the same
-+key. The cipher is in `core/crypto` (FIPS 197, checked against its vectors), the P25 part in `core/p25/p25_aes.c`
++key; DMR does too, as a privacy key type (8). The cipher is in `core/crypto` (FIPS 197, checked against its vectors), the P25 part in `core/p25/p25_aes.c`
 +and `p25_call.c`, the NXDN part in `core/nxdn/nxdn_aes.c` and `nxdn_call.c`. Where the law forbids encryption (amateur
 +frequencies in most countries) the owner leaves a channel's key off: nothing here is on until a channel says so.
 +
@@ -3877,7 +4590,7 @@ index 00000000..e9188e77
 +| Offset | Size | Field |
 +|---|---|---|
 +| 0 | 1 | System: 0xFF |
-+| 1 | 1 | Algorithm: 0x84 for P25, 3 for NXDN |
++| 1 | 1 | Algorithm: 0x84 for P25, 3 for NXDN, 0x25 for DMR |
 +| 2 | 2 | Key ID, little endian |
 +| 4 | 1 | Flags (0) |
 +| 5 | 32 | The key |
@@ -3913,9 +4626,32 @@ index 00000000..e9188e77
 +| `aesTest` | AES-256 against FIPS 197 C.3 and OFB-AES256 against SP 800-38A F.4.5 |
 +| `voiceCipherTest` | P25: the MI LFSR and the 18 frame masks of a superframe against OP25's. NXDN: the 32 VCH of TS 1-D 7.2.1.3 from the TS 1-A tone pattern, the IV LFSR, a corrected channel error, the VCALL_IV layout |
 +| `p25EngineTestAes` | An encrypted call over many superframes in order; a wrong key; another key id; no key; PTT refused without a key; a late entry |
++| `dmrAesTest` | DMR: the PI header, three superframes of a real AES-256 recording with a published key (only the keystream each frame carries is kept), a superframe lost and told by the slot counter, TX to RX |
++| `dmrCallTestAes` | DMR through the call stack: the PI header after the voice LC headers, encrypted bursts the key decrypts, a receiver with the key ID plays them, another key ID or no key never does, the key ID without its key refuses PTT |
 +| `nxdnEngineTestAes` | The same at 4800 and 9600 bit/s; the late entry decrypts from the next session, every frame right |
 +| `radioCoreTestP25`, `radioCoreTestNxdn` | A stored channel with AES and a keyring: plays, another key id is silent, PTT sends encrypted (a far radio with the key hears it, one without does not), a key missing from the keyring refuses PTT |
 +| `p25CodeplugTest`, `nxdnCodeplugTest`, `site/tests/modes.test.mjs` | The channel block bytes (shared vectors) and the keyring records |
++
++## 8. DMR (Settings > Privacy, key type AES-256)
++
++The Motorola layout, which DMR radios of other makers read too. On the radio it is a privacy key type
++(`DMR_PRIVACY_AES256`, [settings-store.md](settings-store.md) 3.1): the key is a key ID, 1-255, of a keyring key with
++algorithm 0x25. The radio core loads its 32 octets into `dmr_call_config_t.aes_key`; the call stack runs it
++(`core/dmr/dmrAes.c`), not the static privacy hook.
++
++| Item | Rule |
++|---|---|
++| PI header | Data type 0, once after the voice LC headers: algorithm 0x25 (0x05 is taken too), FID 0x10, key ID, 32-bit MI, destination, CRC-CCITT masked 0x6969 |
++| Voice LC | FID 0x10, the privacy service option, as for basic privacy |
++| IV | The MI, then 96 more bits of its LFSR x^32 + x^22 + x^2 + x + 1 |
++| Keystream | AES-256 OFB, the first block discarded; 126 octets a superframe, 7 for each of its 18 frames, the first 49 bits XORed onto the frame's voice bits before their FEC (RX corrects the frame first) |
++| Next superframe | The MI shifted 32 times through the same LFSR |
++| TX MI | From `air_nonce()` (1), never 0 |
++| RX | A PI header with our key ID starts the keystream; another key ID or algorithm stops it, and the call is not played. Superframes lost are counted by the modem's slot counter (up to 64); a call back after a fade keeps its keystream. A frame that is silence on air, or whose C0 word fails, plays as silence. No late entry: a call joined after its PI header is not played |
++| No key | The key ID set and no keyring key for it: calls with that key ID are not played and PTT is refused |
++
++Checked against a public recording (the archive.org item dmr-encrypted-samples_202511, its published key, as dmrgo's
++tests carry it): 180 of 180 frames over 10 superframes. Not tried against another radio on air.
 diff --git a/docs/spec/channel-modes.md b/docs/spec/channel-modes.md
 index e5c2536a..62d9ea9d 100644
 --- a/docs/spec/channel-modes.md
@@ -4040,10 +4776,31 @@ index d84363e9..687660ed 100644
  
  | Test | Covers |
 diff --git a/docs/spec/radio-features.md b/docs/spec/radio-features.md
-index f5de0335..8e57994e 100644
+index f5de0335..f83df998 100644
 --- a/docs/spec/radio-features.md
 +++ b/docs/spec/radio-features.md
-@@ -661,7 +661,7 @@ A board may list receive-only ranges past its rated bands: the last `board_t.rx_
+@@ -37,7 +37,7 @@ quick changes therefore never reads back a value from before its own last change
+ | `dual_delay_ms` | 1000 | dual watch on one receiver: its wait after a signal ends, in place of `scan_delay_ms` (0-10000; section 2.1) |
+ | `beep_level` | 50 | 0 (silent) to 100: the loudest a beep gets (section 4) |
+ | `key_beep` | on | `radio_req_beep(BEEP_KEY)` sounds |
+-| `talk_permit` | on | DMR: the talk permit tone when the voice goes on air, or just before on boards with `CAP_BEEP_NOT_ON_AIR` (4) (stored as `SETTINGS_RS_NO_TALK_PERMIT` in `rs_flags`, 0 = on) |
++| `talk_permit` | on | DMR: the talk permit tone when the voice goes on air, or just before on boards with `CAP_BEEP_NOT_ON_AIR`; P25 and NXDN (conventional): before keying (4) (stored as `SETTINGS_RS_NO_TALK_PERMIT` in `rs_flags`, 0 = on) |
+ | `vox` | off | off, on channels whose codeplug entry allows it, on every FM channel (CONFIG_VOX) |
+ | `vox_level` | 5 | sensitivity 1 (loud voice needed) to 10 |
+ | `vox_tail_ms` | 1500 | stays keyed this long after the voice stops |
+@@ -374,8 +374,9 @@ None of them needs a correction in the driver. The HIL test (`test_fm_tx_dtmf`)
+ |---|---|---|
+ | key | 1000 Hz 25 ms | `radio_req_beep(BEEP_KEY)` from the UI, if `key_beep` |
+ | error | 400 Hz 150 ms | UI errors |
+-| TX permit | 1600 Hz 50 ms twice | DMR: the channel is granted (unless the codeplug channel has "no beep", or `talk_permit` is off: Settings > Sound > Talk permit tone) |
+-| TX permit, before keying | 1600 Hz 80 ms | The TX permit on boards with `CAP_BEEP_NOT_ON_AIR`, whose beeps can't sound while DMR transmits: once the call is admitted, the stack holds the key-up (`dmr_call_config_t.permit_hold_ms`, `permit_busy`) while the radio still receives and this tone plays. It keys once the tone and the driver's buffers have played out (`hal_audio_t.spk_pending`): at least 40 ms, at most 400 ms (`DMR_CALL_PERMIT_MAX_MS`). The same conditions as the TX permit |
++| TX permit | 1568, 1047, 1568, 1319 Hz, 40 ms each, no gaps (the MOTOTRBO chirp) | DMR: the channel is granted (unless the codeplug channel has "no beep", or `talk_permit` is off: Settings > Sound > Talk permit tone) |
++| TX permit, before keying | the same chirp | The TX permit on boards with `CAP_BEEP_NOT_ON_AIR`, whose beeps can't sound while DMR transmits: once the call is admitted, the stack holds the key-up (`dmr_call_config_t.permit_hold_ms`, `permit_busy`) while the radio still receives and this tone plays. It keys once the tone and the driver's buffers have played out (`hal_audio_t.spk_pending`): at least 40 ms, at most 400 ms (`DMR_CALL_PERMIT_MAX_MS`). The same conditions as the TX permit |
++| TX permit, P25 / NXDN | 910 Hz 70 ms, 30 ms, 60 ms with 20 ms gaps (the ASTRO 25 permit) | PTT on a conventional P25 or NXDN channel whose engine can transmit: the tone plays while the channel still receives, then the engine keys (`air_permit_poll`): once the beep, its own stream and the driver's buffers are done, at least 40 ms, at most 600 ms. PTT let go during it: nothing is keyed. The same conditions as the TX permit; never on trunked channels |
+ | TX deny | 300 Hz 400 ms | any TX refusal but a busy channel (3.1), unless Settings > Sound > TX denied tone is off (settings area key 0x0006) |
+ | call end | 1200 Hz 50 ms, 900 Hz 70 ms | DMR: a played call ended (unless "no beep", or Settings > Sound > Call end tone is off: settings area key 0x0003) |
+ | TOT warning | 1000 Hz 100 ms twice | 3.2, unless Settings > Sound > TOT warning tone is off (settings area key 0x0004) |
+@@ -661,7 +662,7 @@ A board may list receive-only ranges past its rated bands: the last `board_t.rx_
  
  | Rule | Detail |
  |---|---|
@@ -4053,7 +4810,7 @@ index f5de0335..8e57994e 100644
  | Transmit | Never: `board_in_band(hz, true)` skips the entries, so PTT gives `TXDENY_BAND`. |
  | Modes | FM only, as in any receive-only band: the channel editor refuses DMR there. |
 diff --git a/docs/spec/settings-store.md b/docs/spec/settings-store.md
-index b2a614fa..81eabfab 100644
+index b2a614fa..6f7fcac8 100644
 --- a/docs/spec/settings-store.md
 +++ b/docs/spec/settings-store.md
 @@ -1,5 +1,6 @@
@@ -4072,6 +4829,16 @@ index b2a614fa..81eabfab 100644
  | crash report | packed into spare bits, so an older record reads as off with no target: the mode (0 off, 1 ask, 2 send at once) in `accent` bits 4-5; the target's codeplug contact number (0 none, else 1..1024, 11 bits) bits 0-5 in `theme` bits 2-7 and bits 6-10 in `updown_home` bits 2-6. `theme` and `updown_home` keep their value in bits 0-1; read and write them through `settings_theme` / `settings_updown_home` and `settings_crash_*` (`settings.h`). Firmware from before reads a `theme` or `updown_home` with these bits as out of range: the dark theme and Up/Down = channel ([crash-log.md](crash-log.md) 5.2) |
  
  All of these are still layout 1: they were appended before any firmware with the settings store shipped. Page 0
+@@ -202,6 +203,9 @@ Today the radio core writes slot 1 when the key is set (the debug link's `RADIO`
+ active slot at boot, checking it with `dmrPrivacyKeyIsValid`. A per-channel choice of key will be a slot number in
+ the native channel record (`codeplug-native.md` 3: 0 = the radio-wide choice, 1 to 4 = that slot). The keys
+ themselves stay in the settings and never go into a codeplug file, so a codeplug can be shared without its keys.
++For the type AES-256 (`DMR_PRIVACY_AES256`, AES builds only) the slot holds a key ID, 1-255; that key is a traffic key
++of the codeplug's keyring, algorithm 0x25 ([air-encryption.md](air-encryption.md) 8), which a shared zone and a file
++saved without keys leave out.
+ 
+ **Open: the keys are stored in plain text in the SPI NOR.** Anyone with the radio and a flash reader, or with the
+ CPS shim's area 1 reads, can see them. The settings area is outside what the open-firmware CPS reads by region, but area 1
 diff --git a/docs/user/05-keys-and-navigation.md b/docs/user/05-keys-and-navigation.md
 index 15839ccc..743dc2df 100644
 --- a/docs/user/05-keys-and-navigation.md
@@ -4086,10 +4853,22 @@ index 15839ccc..743dc2df 100644
  | **Power level** | Home: next power level | Hold 1.5 s: emergency ([Emergency](11-emergency.md)) |
  | **PTT** | Transmit | |
 diff --git a/docs/user/09-dmr.md b/docs/user/09-dmr.md
-index 2d7e6465..4bc7c940 100644
+index 2d7e6465..d6d12fbb 100644
 --- a/docs/user/09-dmr.md
 +++ b/docs/user/09-dmr.md
-@@ -261,6 +261,8 @@ when it differs from the channel's ("TS2 CC7"). To talk to them, set the channel
+@@ -238,8 +238,9 @@ enough: let go of **PTT** and the radio keeps trying, up to the usual number of
+ The talk permit tone tells you the radio has the channel and you can talk. Turn it off for every channel in
+ **Settings > Sound > Talk permit tone**, or for one channel with the channel's **Talk permit beeps** field.
+ 
+-Most radios play two short beeps as your voice goes on air. A radio whose beeps would be transmitted plays one short
+-beep just before it transmits instead ([the radio's notes](23-radios.md)):
++The tone is the MOTOTRBO-style chirp, four quick notes, as your voice goes on air. A radio whose beeps would be
++transmitted plays it just before it transmits instead ([the radio's notes](23-radios.md)). P25 and NXDN channels play
++three short 910 Hz beeps (ASTRO 25 style) before they transmit; the same setting turns them off:
+ 
+ | Screen | What happens |
+ |---|---|
+@@ -261,6 +262,8 @@ when it differs from the channel's ("TS2 CC7"). To talk to them, set the channel
  - Press **Monitor** on a DMR channel (a short press; it acts when you let go). The radio shows "Digital monitor on" and
    the chips show "DMon". Press it again to turn it off. On an FM channel the same key opens the squelch while you hold it.
  - Or **\***, **5**.
@@ -4098,8 +4877,74 @@ index 2d7e6465..4bc7c940 100644
  
  Digital monitor stays on until you turn it off, change the channel or the mode, or press **Back** on Home. A
  [scan](12-scan.md) started with it on keeps it on at every channel. While it
+@@ -274,16 +277,25 @@ RadioFoundry has two kinds of basic privacy: Motorola basic privacy (keys 1 to 2
+ privacy is a fixed scrambling of the voice. It keeps casual listeners out but isn't encryption. The scrambling hasn't
+ been checked against another radio yet ([Radio reference](23-radios.md)).
+ 
++On a radio with AES-256 voice, the key type can also be **AES-256**: real encryption in the Motorola layout (the call
++sends a PI header with the key ID and a new message indicator). The key itself is loaded with the Codeplug Editor
++(Radio tab, AES-256 keys, DMR AES-256, the key ID and 64 hex digits); on the radio you only choose the key ID. Its
++keystream was checked against a public recording made with a published key; it hasn't been tried against another
++radio on air yet.
++
+ - The radio plays an encrypted call only when it has the matching key. Without the key the call shows as
+   "Encrypted: not played".
+-- Calls with stronger encryption (they send a PI header) are never played.
++- Calls with stronger encryption (they send a PI header) are played only with the key type AES-256, when the call's
++  key ID is yours and its key is in the codeplug. Others are never played.
++- With AES-256 and its key missing from the codeplug, **PTT** is refused: the radio never sends in the clear instead.
+ - **\***, **6** turns privacy on for your calls ("Privacy on for now"). Home shows "Priv". **Back** on Home turns it
+   off again.
+ 
+ To set the key on the radio, open **Settings > Privacy** (**OK**, **7**, **4**).
+ 
+-1. On **Key type**, press **OK** until it shows Motorola or Anytone.
+-2. On **Key**, press **OK**. Type the key in decimal with the number keys (Motorola 1 to 255, Anytone 0 to 65535).
++1. On **Key type**, press **OK** until it shows Motorola, Anytone or AES-256.
++2. On **Key**, press **OK**. Type the key in decimal with the number keys (Motorola 1 to 255, Anytone 0 to 65535, AES-256
++   the key ID, 1 to 255).
+    Press **OK** again.
+ 
+ The radio keeps the key across restarts. Setting the type back to Off removes the key and turns privacy off. The codeplug
+diff --git a/docs/user/17-settings.md b/docs/user/17-settings.md
+index c7a98828..93547c67 100644
+--- a/docs/user/17-settings.md
++++ b/docs/user/17-settings.md
+@@ -38,7 +38,7 @@ Some settings are on the menu before the feature behind them exists, or don't ap
+ | Key tones | On, Off | On | A short beep on each key press | Works |
+ | Volume | 0 to 16 | 8 | The speaker volume, on radios without a volume knob only (the row is not shown on the others). 0 is mute. The **Volume** key opens a screen that changes it faster ([Radio reference](23-radios.md#key-roles)) | Works |
+ | Tone volume | 0 to 10 | 5 | The loudest the radio's beeps get. Beeps follow the speaker volume up to this level, so turning the volume down makes them quieter too | Works |
+-| Talk permit tone | On, Off | On | The beep when a DMR transmission starts ([DMR](09-dmr.md)) | Works |
++| Talk permit tone | On, Off | On | The tone when a DMR transmission starts (MOTOTRBO-style chirp), and before a P25 or NXDN one (three 910 Hz beeps) ([DMR](09-dmr.md#the-talk-permit-tone)) | Works |
+ | Call end tone | On, Off | On | The two-note beep when a DMR call you heard ends | Works |
+ | TOT warning tone | On, Off | On | The beep a few seconds before the transmit time-out cuts a transmission | Works |
+ | Battery tone | On, Off | On | The beeps for a low and a critical battery | Works |
+@@ -86,8 +86,8 @@ Some settings are on the menu before the feature behind them exists, or don't ap
+ 
+ | Setting | Values | Default | What it does | Status |
+ |---|---|---|---|---|
+-| Key type | Off, Motorola, Anytone | Off | The kind of basic privacy key ([DMR](09-dmr.md#privacy)). Off removes the key | Works |
+-| Key | Motorola 1 to 255, Anytone 0 to 65535 | | The key value, typed with the number keys. Dimmed until a type is chosen | Works |
++| Key type | Off, Motorola, Anytone, AES-256 | Off | The kind of privacy key ([DMR](09-dmr.md#privacy)). AES-256 only on radios with AES voice. Off removes the key | Works |
++| Key | Motorola 1 to 255, Anytone 0 to 65535, AES-256 1 to 255 | | The key value, typed with the number keys; for AES-256 the key ID of a key loaded with the Codeplug Editor. Dimmed until a type is chosen | Works |
+ 
+ ### Location (key 5)
+ 
+diff --git a/docs/user/23-radios.md b/docs/user/23-radios.md
+index b62b9b84..8e6d74af 100644
+--- a/docs/user/23-radios.md
++++ b/docs/user/23-radios.md
+@@ -465,7 +465,7 @@ A 240 x 320 color screen. RadioFoundry uses its full resolution, with smooth (an
+ - No VOX yet: the board code that reads the microphone level isn't written.
+ - Audio linking (USRP) carries DMR only: the FM transmit path from the processor isn't written.
+ - No beeps while transmitting: the radio's beep path would put them on the air. A beep still playing when the
+-  transmission ends is heard from then on. The DMR talk permit tone is a single short beep played just before the
++  transmission ends is heard from then on. The DMR talk permit tone (the chirp) is played just before the
+   radio transmits, while the screen shows ADMITTED ([DMR](09-dmr.md#the-talk-permit-tone)).
+ - The signal strength in dBm is uncalibrated: strong signals read high.
+ - No vibration alerts: RadioFoundry doesn't drive a vibration motor on it, and **Settings > Sound > Vibrate** isn't in the
 diff --git a/site/i18n/en.json b/site/i18n/en.json
-index f9fb4d54..e15c3bd8 100644
+index f9fb4d54..bf3eebdc 100644
 --- a/site/i18n/en.json
 +++ b/site/i18n/en.json
 @@ -1653,6 +1653,7 @@
@@ -4130,7 +4975,7 @@ index f9fb4d54..e15c3bd8 100644
   "editor.nxdn.ran_any": "0 receives every RAN.",
   "editor.nxdn.unit_id": "NXDN unit ID",
   "editor.nxdn.unit_id_help": "Leave blank to use the DMR ID (1 if it is above 65519). An ID set on the channel takes priority.",
-@@ -2019,6 +2026,18 @@
+@@ -2019,6 +2026,19 @@
   "editor.problem.mode_no_control": "The system has no control channel: the radio can't use it.",
   "editor.problem.mode_no_secret": "The system needs its key and has none: the radio can't use it.",
   "editor.problem.mode_secret_bad": "The system's key is not valid.",
@@ -4138,9 +4983,10 @@ index f9fb4d54..e15c3bd8 100644
 + "editor.problem.key_id_range": "A key ID goes up to {max}.",
 + "editor.problem.key_duplicate": "Two keys have the same algorithm and key ID.",
 + "editor.keys.title": "AES-256 keys",
-+ "editor.keys.intro": "Keys for the encrypted channels of P25 and NXDN. A channel names its key by key ID; both radios need the same key under the same ID. Keys are not shared with a zone and are left out of a file saved without keys.",
++ "editor.keys.intro": "Keys for the encrypted channels of P25 and NXDN, and for DMR AES-256 (on the radio: Settings > Privacy, key type AES-256 and the key ID). A channel names its key by key ID; both radios need the same key under the same ID. Keys are not shared with a zone and are left out of a file saved without keys.",
 + "editor.keys.alg.p25": "P25 AES-256",
 + "editor.keys.alg.nxdn": "NXDN AES-256",
++ "editor.keys.alg.dmr": "DMR AES-256",
 + "editor.keys.id": "key ID",
 + "editor.keys.key": "Key (64 hex digits)",
 + "editor.keys.show": "Show",
@@ -4150,7 +4996,7 @@ index f9fb4d54..e15c3bd8 100644
   "editor.problem.mode_fallback_kind": "The fallback channel must be a plain FM or DMR channel.",
   "editor.problem.mode_same_identity": "The same system as {other}: a share or the radio may take either.",
 diff --git a/site/i18n/es.json b/site/i18n/es.json
-index 55d16628..8c44a28e 100644
+index 55d16628..de5d9e0d 100644
 --- a/site/i18n/es.json
 +++ b/site/i18n/es.json
 @@ -1653,6 +1653,7 @@
@@ -4181,7 +5027,7 @@ index 55d16628..8c44a28e 100644
   "editor.nxdn.ran_any": "0 recibe todos los RAN.",
   "editor.nxdn.unit_id": "ID de unidad NXDN",
   "editor.nxdn.unit_id_help": "Déjelo en blanco para usar el ID DMR (1 si es mayor que 65519). Un ID del canal tiene prioridad.",
-@@ -2019,6 +2026,18 @@
+@@ -2019,6 +2026,19 @@
   "editor.problem.mode_no_control": "El sistema no tiene canal de control: la radio no puede usarlo.",
   "editor.problem.mode_no_secret": "El sistema necesita su clave y no la tiene: la radio no puede usarlo.",
   "editor.problem.mode_secret_bad": "La clave del sistema no es válida.",
@@ -4189,9 +5035,10 @@ index 55d16628..8c44a28e 100644
 + "editor.problem.key_id_range": "Un ID de clave llega hasta {max}.",
 + "editor.problem.key_duplicate": "Dos claves tienen el mismo algoritmo y el mismo ID.",
 + "editor.keys.title": "Claves AES-256",
-+ "editor.keys.intro": "Claves de los canales cifrados de P25 y NXDN. Un canal nombra su clave por ID; ambos radios necesitan la misma clave con el mismo ID. Las claves no se comparten con una zona y se omiten al guardar un archivo sin claves.",
++ "editor.keys.intro": "Claves de los canales cifrados de P25 y NXDN, y de AES-256 en DMR (en la radio: Ajustes › Privacidad, tipo de clave AES-256 y el ID de la clave). Un canal nombra su clave por ID; ambos radios necesitan la misma clave con el mismo ID. Las claves no se comparten con una zona y se omiten al guardar un archivo sin claves.",
 + "editor.keys.alg.p25": "P25 AES-256",
 + "editor.keys.alg.nxdn": "NXDN AES-256",
++ "editor.keys.alg.dmr": "DMR AES-256",
 + "editor.keys.id": "ID de clave",
 + "editor.keys.key": "Clave (64 dígitos hex)",
 + "editor.keys.show": "Mostrar",
@@ -4201,7 +5048,7 @@ index 55d16628..8c44a28e 100644
   "editor.problem.mode_fallback_kind": "El canal de respaldo debe ser un canal FM o DMR normal.",
   "editor.problem.mode_same_identity": "El mismo sistema que {other}: un envío compartido o la radio pueden tomar cualquiera.",
 diff --git a/site/i18n/it.json b/site/i18n/it.json
-index efeb4f79..687d653c 100644
+index efeb4f79..4c6ae92b 100644
 --- a/site/i18n/it.json
 +++ b/site/i18n/it.json
 @@ -1653,6 +1653,7 @@
@@ -4232,7 +5079,7 @@ index efeb4f79..687d653c 100644
   "editor.nxdn.ran_any": "0 riceve ogni RAN.",
   "editor.nxdn.unit_id": "ID unità NXDN",
   "editor.nxdn.unit_id_help": "Lascia vuoto per usare l'ID DMR (1 se supera 65519). Un ID impostato sul canale ha la precedenza.",
-@@ -2019,6 +2026,18 @@
+@@ -2019,6 +2026,19 @@
   "editor.problem.mode_no_control": "Il sistema non ha un canale di controllo: la radio non può usarlo.",
   "editor.problem.mode_no_secret": "Il sistema richiede la sua chiave e non ce l'ha: la radio non può usarlo.",
   "editor.problem.mode_secret_bad": "La chiave del sistema non è valida.",
@@ -4240,9 +5087,10 @@ index efeb4f79..687d653c 100644
 + "editor.problem.key_id_range": "Un ID chiave arriva fino a {max}.",
 + "editor.problem.key_duplicate": "Due chiavi hanno lo stesso algoritmo e lo stesso ID.",
 + "editor.keys.title": "Chiavi AES-256",
-+ "editor.keys.intro": "Chiavi dei canali cifrati di P25 e NXDN. Un canale indica la sua chiave con l'ID; entrambe le radio devono avere la stessa chiave con lo stesso ID. Le chiavi non si condividono con una zona e non finiscono in un file salvato senza chiavi.",
++ "editor.keys.intro": "Chiavi dei canali cifrati di P25 e NXDN, e di AES-256 in DMR (sulla radio: Impostazioni > Privacy, tipo di chiave AES-256 e l'ID della chiave). Un canale indica la sua chiave con l'ID; entrambe le radio devono avere la stessa chiave con lo stesso ID. Le chiavi non si condividono con una zona e non finiscono in un file salvato senza chiavi.",
 + "editor.keys.alg.p25": "P25 AES-256",
 + "editor.keys.alg.nxdn": "NXDN AES-256",
++ "editor.keys.alg.dmr": "DMR AES-256",
 + "editor.keys.id": "ID chiave",
 + "editor.keys.key": "Chiave (64 cifre esadecimali)",
 + "editor.keys.show": "Mostra",
@@ -4252,7 +5100,7 @@ index efeb4f79..687d653c 100644
   "editor.problem.mode_fallback_kind": "Il canale di ripiego deve essere un normale canale FM o DMR.",
   "editor.problem.mode_same_identity": "Lo stesso sistema di {other}: una condivisione o la radio possono prendere l'uno o l'altro.",
 diff --git a/site/i18n/zh.json b/site/i18n/zh.json
-index 2997a281..f479b2b8 100644
+index 2997a281..c31b6b66 100644
 --- a/site/i18n/zh.json
 +++ b/site/i18n/zh.json
 @@ -1653,6 +1653,7 @@
@@ -4283,7 +5131,7 @@ index 2997a281..f479b2b8 100644
   "editor.nxdn.ran_any": "0 接收所有 RAN。",
   "editor.nxdn.unit_id": "NXDN 单元 ID",
   "editor.nxdn.unit_id_help": "留空则使用 DMR ID（若大于 65519 则为 1）。信道上设置的 ID 优先。",
-@@ -2019,6 +2026,18 @@
+@@ -2019,6 +2026,19 @@
   "editor.problem.mode_no_control": "该系统没有控制信道：电台无法使用。",
   "editor.problem.mode_no_secret": "该系统需要密钥但没有：电台无法使用。",
   "editor.problem.mode_secret_bad": "该系统的密钥无效。",
@@ -4291,9 +5139,10 @@ index 2997a281..f479b2b8 100644
 + "editor.problem.key_id_range": "密钥 ID 最大为 {max}。",
 + "editor.problem.key_duplicate": "两个密钥的算法和密钥 ID 相同。",
 + "editor.keys.title": "AES-256 密钥",
-+ "editor.keys.intro": "P25 和 NXDN 加密信道的密钥。信道按密钥 ID 指定密钥；两台电台须在同一 ID 下使用同一密钥。密钥不会随区域共享，保存为不含密钥的文件时也会省略。",
++ "editor.keys.intro": "P25 和 NXDN 加密信道的密钥，以及 DMR AES-256 的密钥（电台上：设置 > 加密，密钥类型 AES-256 及密钥 ID）。信道按密钥 ID 指定密钥；两台电台须在同一 ID 下使用同一密钥。密钥不会随区域共享，保存为不含密钥的文件时也会省略。",
 + "editor.keys.alg.p25": "P25 AES-256",
 + "editor.keys.alg.nxdn": "NXDN AES-256",
++ "editor.keys.alg.dmr": "DMR AES-256",
 + "editor.keys.id": "密钥 ID",
 + "editor.keys.key": "密钥（64 位十六进制）",
 + "editor.keys.show": "显示",
@@ -4303,7 +5152,7 @@ index 2997a281..f479b2b8 100644
   "editor.problem.mode_fallback_kind": "备用信道必须是普通 FM 或 DMR 信道。",
   "editor.problem.mode_same_identity": "与 {other} 是同一系统：共享或电台可能使用其中任一个。",
 diff --git a/site/static/js/codeplug/channelmodes.js b/site/static/js/codeplug/channelmodes.js
-index bac97a71..74a2318c 100644
+index bac97a71..fc7be1f6 100644
 --- a/site/static/js/codeplug/channelmodes.js
 +++ b/site/static/js/codeplug/channelmodes.js
 @@ -1,5 +1,6 @@
@@ -4368,7 +5217,7 @@ index bac97a71..74a2318c 100644
  	if (!m.base) return;
  	const state = decodeArea(m.base.bytes).state;
  	const any = systems.length || m.channels.some((c) => c.kind);
-@@ -452,6 +487,26 @@ export function validateModes(m, err, warn, { features = null, baseNames } = {})
+@@ -452,6 +487,27 @@ export function validateModes(m, err, warn, { features = null, baseNames } = {})
  	if (used > max) err(S, null, null, "settings_area_full", { used, max });
  }
  
@@ -4380,6 +5229,7 @@ index bac97a71..74a2318c 100644
 +export const KEY_ALGS = [
 +	{ alg: 0x84, token: "p25", idMax: 0xFFFF, hex: true },
 +	{ alg: 3, token: "nxdn", idMax: 63, hex: false },
++	{ alg: 0x25, token: "dmr", idMax: 255, hex: false },	// DMR AES-256, Motorola layout (Settings > Privacy, key ID 1-255)
 +];
 +export const keyAlg = (alg) => KEY_ALGS.find((a) => a.alg === alg) ?? null;
 +const hexToBytes = (s) => Uint8Array.from(s.match(/../g) ?? [], (x) => parseInt(x, 16));
@@ -4859,7 +5709,7 @@ index cbc2ae9f..f85ed716 100644
  switch = "DMR"
  spec = "docs/spec/dmr-voice.md"
 diff --git a/tests/host/Makefile b/tests/host/Makefile
-index 620197b7..a30c018c 100644
+index 620197b7..85d0899a 100644
 --- a/tests/host/Makefile
 +++ b/tests/host/Makefile
 @@ -1,5 +1,6 @@
@@ -4913,6 +5763,15 @@ index 620197b7..a30c018c 100644
  	./p25TrunkTest
  	./p25VoiceTest
  	./hrc6000AirTest
+@@ -270,7 +281,7 @@ RFEAT   := $(CORE)/radio/scan.c $(CORE)/radio/beep.c $(CORE)/radio/battery.c $(C
+            $(CORE)/radio/radio_sfr.c $(CORE)/radio/radio_cwid.c $(CORE)/radio/tx_limit.c $(T3RADIO)
+ RCORE   := radioCoreTest.c $(CORE)/radio/radio_sm.c $(CORE)/codeplug/codeplug_keys.c $(CORE)/radio/tones.c $(RFEAT) $(CORE)/dmr/call/dmr_call.c $(CORE)/dmr/fec/dmrCach.c \
+            $(CORE)/dmr/call/dmr_lc.c $(CORE)/dmr/fec/dmrFec.c $(CORE)/dmr/ambe/ambeVoice.c $(CORE)/dmr/ambe/ambeFec.c \
+-           $(CORE)/dmr/dmrPrivacy.c sim/dmr_sim_modem.c $(CORE)/dmr/dmrData.c $(CORE)/dmr/dmrDataService.c \
++           $(CORE)/dmr/dmrPrivacy.c $(CORE)/dmr/dmrAes.c sim/dmr_sim_modem.c $(CORE)/dmr/dmrData.c $(CORE)/dmr/dmrDataService.c \
+            $(CORE)/dmr/dmrLrrp.c $(CORE)/dmr/dmr_emergency.c $(CORE)/radio/morse.c $(CORE)/dmr/zoneShare.c $(CORE)/dmr/zoneShareSvc.c $(CORE)/dmr/dmrAirQueue.c \
+            $(CORE)/settings/settings.c $(CORE)/storage/storage.c \
+            $(CORE)/radio/radio_hotspot.c $(CORE)/hotspot/mmdvm.c $(CORE)/hotspot/hotspot.c \
 @@ -296,7 +307,8 @@ radioCoreTestNoVfoDmr: $(RCORE) $(wildcard $(CORE)/radio/*.h) $(wildcard $(CORE)
  # end is a second P25 engine, and a vocoder that lends its memory as the HR_C7000 platform's does
  TESTS   += radioCoreTestP25
@@ -4944,6 +5803,15 @@ index 620197b7..a30c018c 100644
  radioCoreTestP25Nxdn: $(RCP25NX) $(wildcard $(CORE)/radio/*.h) $(wildcard $(CORE)/dmr/call/*.h) $(CORE)/dmr/dmrDataService.h \
                        $(CORE)/ui/ui_svc.h $(wildcard $(CORE)/nxdn/*.h) $(wildcard $(CORE)/p25/*.h) $(wildcard $(CORE)/air/*.h) \
                        $(wildcard $(CORE)/dmr/ambe/*.h)
+@@ -349,7 +363,7 @@ radioCoreTestAprsDmr: $(RCAPRSD) $(wildcard $(CORE)/radio/*.h) $(wildcard $(CORE
+ TESTS   += radioFeaturesTest
+ RFTEST  := radioFeaturesTest.c $(CORE)/radio/radio_sm.c $(CORE)/codeplug/codeplug_keys.c $(CORE)/radio/tones.c $(RFEAT) $(CORE)/dmr/call/dmr_call.c $(CORE)/dmr/fec/dmrCach.c \
+            $(CORE)/dmr/call/dmr_lc.c $(CORE)/dmr/fec/dmrFec.c $(CORE)/dmr/ambe/ambeVoice.c $(CORE)/dmr/ambe/ambeFec.c \
+-           $(CORE)/dmr/dmrPrivacy.c sim/dmr_sim_modem.c $(CORE)/dmr/dmrData.c $(CORE)/dmr/dmrDataService.c \
++           $(CORE)/dmr/dmrPrivacy.c $(CORE)/dmr/dmrAes.c sim/dmr_sim_modem.c $(CORE)/dmr/dmrData.c $(CORE)/dmr/dmrDataService.c \
+            $(CORE)/dmr/dmrLrrp.c $(CORE)/dmr/dmr_emergency.c $(CORE)/radio/morse.c $(CORE)/dmr/zoneShare.c $(CORE)/dmr/zoneShareSvc.c $(CORE)/dmr/dmrAirQueue.c \
+            $(CORE)/settings/settings.c $(CORE)/storage/storage.c $(CORE)/usbaudio/audio_mux.c \
+            $(CORE)/usbaudio/pcm_slip.c $(CORE)/dmr/sfrRunner.c $(CORE)/dmr/sfr.c $(POSLIB)
 @@ -445,6 +459,14 @@ resampleTest: resampleTest.c $(ROOT)/drivers/audio/resample/resample.h
  TESTS   += batteryTest
  batteryTest: batteryTest.c $(ROOT)/drivers/power/battery/battery.h
@@ -4977,6 +5845,28 @@ index 620197b7..a30c018c 100644
  .PHONY: run-core
  
  # The read-only codeplug (open-firmware layout and built-in channels), on fake flash images
+@@ -830,10 +854,20 @@ TESTS   += dmrCallTest
+ 
+ dmrCallTest: $(CALL) $(wildcard $(CORE)/dmr/call/*.h sim/*.h)
+ 	$(CC) $(CFLAGS) -I$(ROOT)/hal -I. -Wshadow -DHAS_SFR -DDMR_RX_TRACE=0 -o $@ $(CALL)
++# The same with DMR AES-256 (CONFIG_AIR_AES, which needs an air mode: P25 stands in), and the keystream alone against
++# a real recording (dmrAesTest)
++AESCALL := $(CORE)/dmr/dmrAes.c $(CORE)/crypto/aes256.c $(CORE)/crypto/air_nonce.c
++TESTS   += dmrCallTestAes dmrAesTest
++dmrCallTestAes: $(CALL) $(AESCALL) $(wildcard $(CORE)/dmr/call/*.h $(CORE)/dmr/dmrAes.h sim/*.h)
++	$(CC) $(CFLAGS) -I$(ROOT)/hal -I. -Wshadow -DHAS_SFR -DDMR_RX_TRACE=0 -DCONFIG_P25=1 -DCONFIG_AIR_AES=1 -o $@ $(CALL) $(AESCALL)
++dmrAesTest: dmrAesTest.c $(CORE)/dmr/dmrAes.c $(CORE)/dmr/dmrAes.h $(CORE)/crypto/aes256.c $(CORE)/dmr/ambe/ambeFec.c
++	$(CC) $(CFLAGS) -Wshadow -DCONFIG_P25=1 -DCONFIG_AIR_AES=1 -o $@ dmrAesTest.c $(CORE)/dmr/dmrAes.c $(CORE)/crypto/aes256.c $(CORE)/dmr/ambe/ambeFec.c
+ 
+ run: run-call
+-run-call: dmrCallTest
++run-call: dmrCallTest dmrCallTestAes dmrAesTest
+ 	./dmrCallTest
++	./dmrCallTestAes
++	./dmrAesTest
+ .PHONY: run-call
+ 
+ # The HR_C6000 DMR modem: register sequences, burst status decode, RX de-duplication, TX queue and slot scheduling
 diff --git a/tests/host/aesTest.c b/tests/host/aesTest.c
 new file mode 100644
 index 00000000..f62b6410
@@ -5063,6 +5953,348 @@ index 00000000..f62b6410
 +	printf("# aesTest: %d checks, %s\n", checks, failures ? "FAILED" : "PASSED");
 +	return failures != 0;
 +}
+diff --git a/tests/host/beepReel.c b/tests/host/beepReel.c
+index d6d6b18a..3ab6ab3e 100644
+--- a/tests/host/beepReel.c
++++ b/tests/host/beepReel.c
+@@ -80,7 +80,8 @@ typedef struct {
+ //
+ // Nothing ties these steps to the radio core. If you change when core/radio/radio_sm.c plays a beep, update the
+ // matching step here. The calls are in dmr_follow() (TX_PERMIT, TX_PERMIT_SHORT, CALL_END), tx_timer() (TOT_WARN), deny() (TX_DENY),
+-// battery_poll() (BATTERY_CRIT), scan_service() (SCAN_HOLD), emergency_tick() (EMERGENCY) and t3_tick() (SYSTEM_BACK).
++// battery_poll() (BATTERY_CRIT), scan_service() (SCAN_HOLD), emergency_tick() (EMERGENCY), t3_tick() (SYSTEM_BACK) and
++// ptt_down() (TX_PERMIT_DV, on a P25 or NXDN channel).
+ static const step_t steps[] = {
+ 	{ "Browse the menu", "ok down down back", NULL, true, false, 0 },
+ 	{ "Group call heard", "rx:9991234,91,g,Q1AAA_Joe", NULL, false, true, 700 },
+@@ -107,6 +108,7 @@ static const step_t steps[] = {
+ 	{ "Back on the trunked system after its fallback channel", NULL, "SYSTEM_BACK", false, false, 0 },
+ 	{ "Emergency heard", "emergency:3105678", "EMERGENCY", false, false, 0 },
+ 	{ NULL, "back", NULL, false, false, 500 },
++	{ "P25 / NXDN: permit before keying (Motorola ASTRO 25)", NULL, "TX_PERMIT_DV", false, false, 0 },
+ };
+ #define STEPS	((int)(sizeof steps / sizeof steps[0]))
+ 
+diff --git a/tests/host/dmrAesTest.c b/tests/host/dmrAesTest.c
+new file mode 100644
+index 00000000..c76b3ca0
+--- /dev/null
++++ b/tests/host/dmrAesTest.c
+@@ -0,0 +1,145 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// Copyright (c) 2026 lyra XE1POC
++// DMR AES-256 voice (core/dmr/dmrAes.c) against a real recording: the archive.org item dmr-encrypted-samples_202511
++// (Public Domain Mark 1.0), AES-256.wav, whose key the item publishes, as dmrgo's tests carry its frames (v2/privacy
++// testdata/aes256.txt, MIT). Kept here: its PI header and, per frame, only what the cipher XORed onto the 49 voice
++// bits (the frame as received XOR as decrypted with the key): the keystream, not the voice.
++#include <assert.h>
++#include <stdio.h>
++#include <string.h>
++#include "dmr/dmrAes.h"
++#include "dmr/ambe/ambeFec.h"
++
++static void unhex(const char *s, uint8_t *out, unsigned n)
++{
++	for (unsigned i = 0; i < n; i++) {
++		unsigned x;
++		assert(sscanf(s + 2 * i, "%2x", &x) == 1);
++		out[i] = (uint8_t)x;
++	}
++}
++
++// Three superframes of the capture, 18 frames each (bursts A-F, three frames a burst)
++static const char *const masks[54] = {
++	"BC0985CCA8FA80", "8FC2EA1D167D80", "FE9BD71FFF2480", "E2C4DDE336FD00", "D2399152105380", "3176CE8D355880",
++	"2E05DEB27AC280", "553BD72EBEA600", "92165F922E9800", "249D55C523E880", "DF22AED5246880", "6F379514519000",
++	"BD51AC7B925C80", "DBE0BCBC7F4200", "3079D55181E100", "2FCAC374AEC200", "6993E6262EF500", "629051C1DAB880",
++	"A795CF7C842180", "E5EA5B873B0000", "BE9C4A8E1F5A00", "E6582C2EAF4500", "B552921CE2C100", "1608AF925F3100",
++	"840165CFA5AE80", "A67CD9C06B3080", "BD9013EFC6C780", "90E323D7FA0680", "8BB6B8DFB95D80", "C4852B6067A080",
++	"B69FC45AE7BC00", "11FB0F0880A680", "A2AD1519305D80", "3060E97AB55B80", "52E6DA8EC3F880", "CB62B3D0BCF380",
++	"04D09258543C80", "8B536804E27300", "78599360A04600", "0EDEF02227D280", "F25E245F61E480", "9E8508A99B9300",
++	"B54F76CAB80100", "DC7FD1321B0580", "B16EB914776880", "89FDD18CDFE880", "49BF4B648DCF00", "3CF329C8B3B980",
++	"172CD579B45280", "BB0E10D71C7680", "0DD68D12129580", "A238BB0A0A9080", "A63C0190225600", "F9970EC8B04D00",
++};
++
++// A burst whose frames carry the mask of frames n..n+2 as their voice bits: decrypting it must give all-zero bits
++static void masked_burst(unsigned n, uint8_t v[27])
++{
++	for (unsigned f = 0; f < 3; f++) {
++		uint8_t m[7], bits[AMBE_PARAM_BITS];
++
++		unhex(masks[n + f], m, 7);
++		for (unsigned b = 0; b < AMBE_PARAM_BITS; b++)
++			bits[b] = (uint8_t)((m[b / 8] >> (7 - b % 8)) & 1u);
++		ambeFecEncode(bits, &v[9 * f]);
++	}
++}
++
++static unsigned zero_frames(const uint8_t v[27])
++{
++	unsigned z = 0;
++
++	for (unsigned f = 0; f < 3; f++) {
++		uint8_t bits[AMBE_PARAM_BITS], zero[AMBE_PARAM_BITS] = { 0 };
++
++		ambeFecDecode(&v[9 * f], bits, NULL);
++		z += memcmp(bits, zero, sizeof bits) == 0;
++	}
++	return z;
++}
++
++int main(void)
++{
++	static const uint8_t silence[9] = { 0xB9, 0xE8, 0x81, 0x52, 0x61, 0x73, 0x00, 0x2A, 0x6B };
++	uint8_t key[32], pi[12], v[27], kid;
++	uint32_t mi;
++	dmr_aes_t a;
++
++	unhex("3AF8C96E21BEFDE927EE1D03DF53CFA701516B0642AC7B38643549E2BE79840E", key, 32);
++	unhex("25100E05D30BF20000013D0C", pi, 12);	// the capture's PI header (CRC included)
++	assert(dmrAesPiParse(pi, &kid, &mi) && kid == 14 && mi == 0x05D30BF2u);
++	{
++		uint8_t again[DMR_AES_PI_BYTES];
++
++		dmrAesPiBuild(kid, mi, 1, again);
++		assert(memcmp(again, pi, DMR_AES_PI_BYTES) == 0);
++		again[0] = 0x05;	// AES-256 as some makers number it
++		assert(dmrAesPiParse(again, &kid, &mi));
++		again[0] = 0x24;	// AES-128: not ours
++		assert(!dmrAesPiParse(again, &kid, &mi));
++		again[0] = 0x25;
++		again[1] = 0x68;	// another maker's layout
++		assert(!dmrAesPiParse(again, &kid, &mi));
++	}
++
++	// Three superframes in order, without a slot counter: the index wrap steps the MI
++	dmrAesStart(&a, key, mi);
++	for (unsigned n = 0; n < 54; n += 3) {
++		masked_burst(n, v);
++		assert(dmrAesBurst(&a, v, (uint8_t)(n / 3 % 6), 0, silence));
++		assert(zero_frames(v) == 3);
++	}
++
++	// The second superframe lost whole: the slot counter (a burst every other tick) tells, the third still decrypts
++	dmrAesStart(&a, key, mi);
++	for (unsigned n = 0; n < 18; n += 3) {
++		masked_burst(n, v);
++		assert(dmrAesBurst(&a, v, (uint8_t)(n / 3), 100 + 2 * n / 3, silence));
++	}
++	for (unsigned n = 36; n < 54; n += 3) {
++		masked_burst(n, v);
++		assert(dmrAesBurst(&a, v, (uint8_t)(n / 3 % 6), 100 + 2 * n / 3, silence));
++		assert(zero_frames(v) == 3);
++	}
++
++	// A frame that is silence on air stays silence; a channel error in C0 is corrected before decrypting
++	dmrAesStart(&a, key, mi);
++	masked_burst(0, v);
++	memcpy(&v[9], silence, 9);
++	v[0] ^= 0x80;
++	assert(dmrAesBurst(&a, v, 0, 0, silence));
++	assert(memcmp(&v[9], silence, 9) == 0 && zero_frames(v) == 2);
++
++	// TX then RX with the same key and MI: the frames come back
++	{
++		dmr_aes_t tx, rx;
++		uint8_t plain[27], air[27];
++
++		for (unsigned i = 0; i < 27; i++)
++			plain[i] = (uint8_t)(i * 37 + 5);
++		for (unsigned f = 0; f < 3; f++) {	// whole FEC words, as the encoder makes them
++			uint8_t bits[AMBE_PARAM_BITS];
++
++			ambeFecDecode(&plain[9 * f], bits, NULL);
++			ambeFecEncode(bits, &plain[9 * f]);
++		}
++		dmrAesStart(&tx, key, 0x12345678u);
++		dmrAesStart(&rx, key, 0x12345678u);
++		for (unsigned b = 0; b < 20; b++) {
++			memcpy(air, plain, 27);
++			assert(dmrAesBurst(&tx, air, (uint8_t)(b % 6), 0, NULL));
++			assert(memcmp(air, plain, 27) != 0);
++			assert(dmrAesBurst(&rx, air, (uint8_t)(b % 6), 0, silence));
++			assert(memcmp(air, plain, 27) == 0);
++		}
++	}
++
++	// No key or MI: no stream; a gap too long stops it
++	dmrAesStart(&a, key, 0);
++	assert(!dmrAesBurst(&a, v, 0, 0, silence));
++	dmrAesStart(&a, key, mi);
++	assert(dmrAesBurst(&a, v, 0, 10, silence));
++	assert(!dmrAesBurst(&a, v, 0, 10 + 12 * (DMR_AES_MAX_GAP + 1), silence) && !a.ready);
++	puts("dmrAesTest: PI header, 3 superframes of a real AES-256 recording, a lost superframe, TX/RX passed");
++	return 0;
++}
+diff --git a/tests/host/dmrCallTest.c b/tests/host/dmrCallTest.c
+index c507d05b..93e7a59b 100644
+--- a/tests/host/dmrCallTest.c
++++ b/tests/host/dmrCallTest.c
+@@ -14,6 +14,10 @@
+ #include "dmr/dmrPrivacy.h"
+ #include "dmr/ambe/ambeFec.h"
+ #include "dmr/fec/dmrFec.h"
++#include "config.h"
++#if CONFIG_AIR_AES
++#include "dmr/dmrAes.h"
++#endif
+ 
+ static int failures;
+ static int checks;
+@@ -2816,6 +2820,143 @@ static void test_basic_privacy(void)
+ }
+ 
+ 
++#if CONFIG_AIR_AES
++// AES-256 end to end (core/dmr/dmrAes.h): TX sends its voice LC headers, a PI header with the key ID and a fresh MI,
++// then encrypted bursts. Those bursts decrypt to the encoder's frames; a receiver with the key and key ID plays them,
++// one with another key ID or without the key never does. The key ID without its key refuses PTT
++static void test_aes(void)
++{
++	static uint8_t key[32];
++	static uint8_t air_v[40][27], air_i[40], pi[12];
++	dmr_call_config_t c = base_cfg();
++	unsigned nv = 0, at_pi = 0, at_voice = 0;
++
++	for (int i = 0; i < 32; i++)
++		key[i] = (uint8_t)(i * 7 + 1);
++	c.aes_key = key;
++	c.aes_kid = 14;
++	c.tx_fid = 0x10;
++	c.tx_svc = DMR_SVC_PRIVACY;
++	setup(&c);
++	dmr_call_ptt(true);
++	run_ms(800);
++	dmr_call_ptt(false);
++	run_ms(800);
++	for (unsigned i = 0; i < sim.air_count; i++) {
++		sim_air_t *a = &sim.air[i];
++
++		if (a->kind == DMR_BURST_PI_HEADER && !at_pi) {
++			at_pi = i;
++			memcpy(pi, a->payload, 12);
++		}
++		if (a->kind == DMR_BURST_VOICE && nv < 40) {
++			if (!at_voice)
++				at_voice = i;
++			memcpy(air_v[nv], a->payload, 27);
++			air_i[nv++] = a->voice_index;
++		}
++	}
++	// The PI header: after the LC headers, before burst A; FID 0x10, AES-256, key ID 14, an MI, CRC masked 0x6969
++	uint8_t kid;
++	uint32_t mi;
++	uint16_t crc = (uint16_t)(dmr_crc_ccitt(pi, 10) ^ DMR_CRC_MASK_PI);
++
++	CHECK(at_pi > 0 && at_pi < at_voice && sim.air[at_pi - 1].kind == DMR_BURST_VOICE_LC_HEADER);
++	CHECK(dmrAesPiParse(pi, &kid, &mi) && kid == 14 && mi != 0 && pi[10] == (uint8_t)(crc >> 8) && pi[11] == (uint8_t)crc);
++	CHECK(sim.air[0].payload[1] == 0x10 && sim.air[0].payload[2] == DMR_SVC_PRIVACY);
++	CHECK(nv >= 12 && air_i[0] == 0);
++
++	// Decrypted with the key and the PI header's MI: the encoder's frames (compared after the FEC decode, as the
++	// source's frames are not valid FEC words)
++	dmr_aes_t rx;
++	unsigned same = 0;
++	uint8_t first[9] = { 0 }, last[9] = { 0 };
++
++	dmrAesStart(&rx, key, mi);
++	for (unsigned v = 0; v < nv; v++) {
++		uint8_t back[27];
++
++		memcpy(back, air_v[v], 27);
++		CHECK(dmrAesBurst(&rx, back, air_i[v], 0, dmr_ambe_silence));
++		for (int f = 0; f < 3; f++) {
++			unsigned n = v * 3 + (unsigned)f;
++			uint8_t src_frame[9], p[49], q[49];
++
++			src_frame[0] = (uint8_t)(n + 1);
++			for (int k = 1; k < 9; k++)
++				src_frame[k] = (uint8_t)(0xA0 + k);
++			ambeFecDecode(src_frame, p, NULL);
++			ambeFecDecode(&back[f * 9], q, NULL);
++			same += memcmp(p, q, 49) == 0;
++		}
++		CHECK(memcmp(back, air_v[v], 27) != 0);	// encrypted on air
++		if (v == 0)
++			memcpy(first, back, 9);
++		memcpy(last, &back[18], 9);
++	}
++	CHECK(same == nv * 3);
++
++	// The same bursts into a receiver: the key and key ID play them all; another key ID or no key, none
++	for (int pass = 0; pass < 3; pass++) {
++		uint8_t lc[9];
++
++		c = base_cfg();
++		c.aes_kid = pass == 1 ? 15 : 14;
++		c.aes_key = pass == 2 ? NULL : key;
++		setup(&c);
++		mk_lc(lc, 0, TG_TALK, 9997030);
++		lc[1] = 0x10;
++		lc[2] = DMR_SVC_PRIVACY;
++		rx_header(lc, 1, 0, DMR_SYNC_MS, false);
++		run_ms(30);
++
++		dmr_burst_t b;
++
++		memset(&b, 0, sizeof(b));
++		b.kind = DMR_BURST_PI_HEADER;
++		b.cc = 1;
++		b.crc_ok = true;
++		b.in_step = true;
++		b.len = 12;
++		memcpy(b.payload, pi, 12);
++		sim_rx(&b);
++		run_ms(30);
++		for (unsigned v = 0; v < nv; v++) {
++			memset(&b, 0, sizeof(b));
++			b.kind = DMR_BURST_VOICE;
++			b.voice_index = air_i[v];
++			b.sync = air_i[v] == 0 ? DMR_SYNC_MS : DMR_SYNC_NONE;
++			b.cc = 1;
++			b.crc_ok = true;
++			b.in_step = true;
++			b.len = 27;
++			memcpy(b.payload, air_v[v], 27);
++			sim_rx(&b);
++			run_ms(60);
++		}
++		CHECK(V()->caller.encrypted && V()->caller.pi_header);
++		if (pass == 0)
++			CHECK(sink_log.frames == nv * 3 && sink_log.losts == 0 && memcmp(sink_log.first, first, 9) == 0 &&
++			      memcmp(sink_log.last, last, 9) == 0);
++		else
++			CHECK(sink_log.frames == 0);
++	}
++
++	// The key ID set and its key missing: PTT refused, nothing on air
++	c = base_cfg();
++	c.aes_kid = 14;
++	setup(&c);
++	dmr_call_ptt(true);
++	run_ms(400);
++	unsigned voice = 0;
++	for (unsigned i = 0; i < sim.air_count; i++)
++		voice += sim.air[i].kind == DMR_BURST_VOICE;
++	CHECK(voice == 0 && V()->tx_error == DMR_TX_ERR_REJECTED);
++	dmr_call_ptt(false);
++	run_ms(200);
++}
++#endif
++
+ // GPS Info LC (TS 102 361-2 7.1.1, FLCO 8): vectors built by hand from the field layout
+ static void test_gps_lc(void)
+ {
+@@ -3330,6 +3471,9 @@ int main(void)
+ 	test_pi_header_and_emergency();
+ 	test_private_calls();
+ 	test_basic_privacy();
++#if CONFIG_AIR_AES
++	test_aes();
++#endif
+ 	test_gps_lc();
+ 	test_gps_call();
+ 	test_sfr_user();
 diff --git a/tests/host/nxdnCodeplugTest.c b/tests/host/nxdnCodeplugTest.c
 index 244e8175..342742bb 100644
 --- a/tests/host/nxdnCodeplugTest.c
@@ -5487,7 +6719,7 @@ index 0466ad21..f633d6ba 100644
  	return failures ? 1 : 0;
  }
 diff --git a/tests/host/radioCoreTest.c b/tests/host/radioCoreTest.c
-index 931f5a51..e01139fb 100644
+index 931f5a51..616cfb02 100644
 --- a/tests/host/radioCoreTest.c
 +++ b/tests/host/radioCoreTest.c
 @@ -1,5 +1,6 @@
@@ -5497,7 +6729,30 @@ index 931f5a51..e01139fb 100644
  // The radio core's state machine (core/radio/radio_sm.c) against a fake board and a fake codeplug
  #include "input/input.h"
  #include "input/keyassign.h"
-@@ -6094,8 +6095,25 @@ static void far_start(const p25_call_t *c, void *ctx) { (void)ctx; far_heard.sta
+@@ -784,8 +785,13 @@ static void add(uint16_t n, const char *name, uint32_t hz, uint8_t mode, bool rx
+ 	used[n] = true;
+ }
+ 
++// P25 and NXDN tests that check keying as PTT goes down turn the talk permit off (it plays before keying there):
++// setup_codeplug_p25 / setup_codeplug_nxdn set it, start() applies it, test_air_permit has the permit itself
++static bool air_permit_off;
++
+ static void setup_codeplug(void)
+ {
++	air_permit_off = false;
+ 	memset(used, 0, sizeof(used));
+ 	add(1, "Simplex", 146520000, RADIO_MODE_FM, false, CODEPLUG_POWER_DEFAULT);
+ 	add(2, "Weather", 162550000, RADIO_MODE_FM, true, CODEPLUG_POWER_DEFAULT);
+@@ -872,6 +878,8 @@ static void start(void)
+ 	rx_signal(120, true);
+ 	now = 1000;
+ 	radio_sm_init(&sm, now);
++	if (air_permit_off)
++		sm.set.talk_permit = false;
+ }
+ 
+ static void test_startup(void)
+@@ -6094,8 +6102,25 @@ static void far_start(const p25_call_t *c, void *ctx) { (void)ctx; far_heard.sta
  static void far_update(const p25_call_t *c, void *ctx) { (void)ctx; far_heard.call = *c; }
  static void far_voice(const uint8_t imbe[P25_IMBE_BYTES], uint8_t errs, void *ctx) { (void)imbe; (void)errs; (void)ctx; far_heard.voice++; }
  static void far_end(void *ctx) { (void)ctx; far_heard.ends++; }
@@ -5524,7 +6779,7 @@ index 931f5a51..e01139fb 100644
  
  static void far_step(void)
  {
-@@ -6110,6 +6128,11 @@ static void far_begin(uint16_t nac, uint32_t unit, bool unit_call, uint32_t dst)
+@@ -6110,6 +6135,11 @@ static void far_begin(uint16_t nac, uint32_t unit, bool unit_call, uint32_t dst)
  {
  	p25_engine_cfg_t c = { .rx_nac = P25_NAC_ANY, .tx_nac = nac, .unit_id = unit, .silence = imbe_silence,
  			       .talkaround = true };
@@ -5536,7 +6791,15 @@ index 931f5a51..e01139fb 100644
  	if (unit_call) {
  		c.tx_lc.lcf = P25_LCF_UNIT;
  		c.tx_lc.dst = dst;
-@@ -6290,6 +6313,76 @@ static void test_p25_rx(void)
+@@ -6158,6 +6188,7 @@ static void p25_view_text(char *buf, size_t cap)
+ static void setup_codeplug_p25(void)
+ {
+ 	setup_codeplug();
++	air_permit_off = true;
+ 	add(3, "P25 simp", 446100000, RADIO_MODE_P25, false, 2);	// zone Local, position 2
+ 	radio_p25_reset_stats();
+ 	p25VoiceResetStats();
+@@ -6290,6 +6321,76 @@ static void test_p25_rx(void)
  	aud.feed = false;
  }
  
@@ -5613,7 +6876,44 @@ index 931f5a51..e01139fb 100644
  static void test_p25_tx(void)
  {
  	radio_p25_stats_t st;
-@@ -6813,6 +6906,100 @@ static void test_p25_dual(void)
+@@ -6380,6 +6481,36 @@ static void test_p25_tx(void)
+ 	far_stop();
+ }
+ 
++#if CONFIG_BEEP
++// The talk permit on a P25 channel (Motorola ASTRO 25: three 910 Hz beeps): PTT plays it with the channel still
++// receiving and nothing keyed, then keys; let go during it, nothing is keyed at all
++static void test_air_permit(void)
++{
++	const beep_seg_t *segs;
++
++	CHECK(beep_pattern(BEEP_TX_PERMIT_DV, &segs) == 5 && segs[0].hz == 910 && segs[2].hz == 910 && segs[4].hz == 910);
++	setup_codeplug_p25();
++	start();
++	sm.set.talk_permit = true;
++	p25_defaults();
++	req(RREQ_ZONE_POS, 2);
++	run(100);
++	req(RREQ_PTT, 1);
++	CHECK(sm.view.state != RS_TX && !hw.keyed && hw.tx_calls == 0 && sm.air_permit_ms != 0 && !hw.led[LED_RED]);
++	run(700);
++	CHECK(sm.view.state == RS_TX && hw.keyed && hw.tx_calls == 1 && sm.air_permit_ms == 0);
++	req(RREQ_PTT, 0);
++	run(600);
++	CHECK(sm.view.state == RS_IDLE && !hw.keyed);
++	req(RREQ_PTT, 1);
++	run(50);
++	req(RREQ_PTT, 0);
++	run(800);
++	CHECK(sm.view.state == RS_IDLE && !hw.keyed && hw.tx_calls == 1 && sm.air_permit_ms == 0);
++	p25_defaults();
++}
++#endif
++
+ static void test_p25_denied(void)
+ {
+ 	radio_p25_stats_t st;
+@@ -6813,6 +6944,100 @@ static void test_p25_dual(void)
  #endif
  #endif
  
@@ -5714,18 +7014,21 @@ index 931f5a51..e01139fb 100644
  // A P25 conventional channel in the codeplug (kind 2, docs/spec/p25-codeplug.md 2): the radio runs it on its own
  // parameters, the debug link's unit ID overrides for a session, and it is parked where the board can't carry P25
  static void test_p25_stored(void)
-@@ -7503,6 +7690,10 @@ static void test_p25(void)
+@@ -7503,6 +7728,13 @@ static void test_p25(void)
  	test_p25_trunk_tx();
  #endif
  	test_p25_rx();
 +	test_p25_monitor();
++#if CONFIG_BEEP
++	test_air_permit();
++#endif
 +#if CONFIG_AIR_AES
 +	test_p25_aes();
 +#endif
  	test_p25_stored();
  #if CONFIG_SCAN
  	test_p25_scan();
-@@ -7572,7 +7763,25 @@ static bool nf_tx(uint8_t ehr[NXDN_EHR_BYTES], void *ctx)
+@@ -7572,7 +7804,25 @@ static bool nf_tx(uint8_t ehr[NXDN_EHR_BYTES], void *ctx)
  	ambeFecEncode(bits, ehr);
  	return true;
  }
@@ -5752,7 +7055,7 @@ index 931f5a51..e01139fb 100644
  
  // The decoder's frames: how many came in the far radio's order (a repeat to conceal a gap is not counted)
  static uint8_t dec_next;
-@@ -7607,6 +7816,11 @@ static void nfar_begin(bool rate9600, uint8_t ran, uint16_t unit, bool unit_call
+@@ -7607,6 +7857,11 @@ static void nfar_begin(bool rate9600, uint8_t ran, uint16_t unit, bool unit_call
  				.silence = dmr_ambe_silence };
  	uint8_t zero[VOCODER_BITS] = { 0 };
  
@@ -5764,7 +7067,15 @@ index 931f5a51..e01139fb 100644
  	ambeFecEncode(zero, zero_frame);
  	if (nfar_running) {
  		nxdn_engine_end(&nfar);
-@@ -7745,6 +7959,56 @@ static void test_nxdn_rx(void)
+@@ -7648,6 +7903,7 @@ static void nxdn_view_text(char *buf, size_t cap)
+ static void setup_codeplug_nxdn(void)
+ {
+ 	setup_codeplug();
++	air_permit_off = true;
+ 	add(3, "NXDN", 446100000, RADIO_MODE_NXDN, false, 2);	// zone Local, position 2
+ 	radio_nxdn_reset_stats();
+ 	air_nofit = false;
+@@ -7745,6 +8001,56 @@ static void test_nxdn_rx(void)
  	nxdn_defaults();
  }
  
@@ -5821,7 +7132,7 @@ index 931f5a51..e01139fb 100644
  static void test_nxdn_tx(void)
  {
  	radio_nxdn_stats_t st;
-@@ -8088,6 +8352,93 @@ static void test_nxdn_dual(void)
+@@ -8088,6 +8394,93 @@ static void test_nxdn_dual(void)
  
  // An NXDN conventional channel in the codeplug (kind 4, docs/spec/nxdn-codeplug.md 2): the radio runs it on its own
  // parameters, not the settings; saved from the VFO it becomes one; parked where the board can't carry NXDN
@@ -5915,7 +7226,7 @@ index 931f5a51..e01139fb 100644
  static void test_nxdn_stored(void)
  {
  	static char buf[4096];
-@@ -8298,6 +8649,10 @@ static void test_nxdn_stored(void)
+@@ -8298,6 +8691,10 @@ static void test_nxdn_stored(void)
  static void test_nxdn(void)
  {
  	test_nxdn_rx();
@@ -5926,6 +7237,21 @@ index 931f5a51..e01139fb 100644
  	test_nxdn_tx();
  	test_nxdn_mode();
  	test_nxdn_stored();
+diff --git a/tests/host/radioFeaturesTest.c b/tests/host/radioFeaturesTest.c
+index 01b6ffd2..77693d63 100644
+--- a/tests/host/radioFeaturesTest.c
++++ b/tests/host/radioFeaturesTest.c
+@@ -856,8 +856,8 @@ static void test_beep_module(void)
+ 	}
+ 	CHECK(beep_mix(blk));
+ 	CHECK(blk[0] == 1000 && blk[20] != 1000);
+-	// 50+40+50 ms = 1120 samples = 7 blocks; the eighth is quiet
+-	for (int i = 0; i < 6; i++) {
++	// The MOTOTRBO chirp: 4 x 40 ms = 1280 samples = 8 blocks; the ninth is quiet
++	for (int i = 0; i < 7; i++) {
+ 		CHECK(beep_mix(blk));
+ 	}
+ 	CHECK(!beep_mix(blk));
 diff --git a/tests/host/radioListenBandsTest.c b/tests/host/radioListenBandsTest.c
 index 36d5d88a..018c7a64 100644
 --- a/tests/host/radioListenBandsTest.c
@@ -6146,15 +7472,15 @@ index 3e380ac9..b9d090e8 100644
  	{ "K call back: the last talkgroup", CALLER, "cbkey ptt", "txid=91 txpriv=0", 2, false },
 diff --git a/tests/host/voiceCipherTest.c b/tests/host/voiceCipherTest.c
 new file mode 100644
-index 00000000..00826ff7
+index 00000000..b36fd8b0
 --- /dev/null
 +++ b/tests/host/voiceCipherTest.c
 @@ -0,0 +1,109 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// Copyright (c) 2026 lyra XE1POC
 +// AES-256 voice keystreams against vectors this firmware did not make: P25 (TIA-102.AAAD-A layout) against the masks
-+// OP25 computes for one key and MI (as the DM32-nxdn-p25 tests carry them), NXDN against the standard's own test
-+// vectors (TS 1-D 7.2.1.3 frames, TS 1-A 7.2.1.1 tone, TS 1-A 6.4.1.2 VCALL_IV).
++// OP25 computes for one key and MI (as this fork's earlier patch series carried them), NXDN against the standard's
++// own test vectors (TS 1-D 7.2.1.3 frames, TS 1-A 7.2.1.1 tone, TS 1-A 6.4.1.2 VCALL_IV).
 +#include <assert.h>
 +#include <stdio.h>
 +#include <string.h>
