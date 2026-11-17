@@ -22,11 +22,19 @@ The radio transmits on 136-174 and 400-480 MHz. It also receives, never transmit
 108-136 MHz (air band, AM) and 174-260, 350-400 and 480-520 MHz, with less sensitivity outside the front-end filters.
 800 MHz trunked systems are out of its range.
 
-## Aviation AM regression rollback
+## Aviation AM receive
 
-The AM change in version `527f5229` was withdrawn after a report of worse, crunchy/overloaded audio. The current
-rollback restores the AM behavior from `b736e952`, retaining the DMR PTT fix, boot picture and four-mode VFO.
-It does not establish a fix for the original close-aircraft distortion. See [the investigation](am-regression.md).
+Air band (108-136 MHz) is received in AM with a dedicated filter and an automatic gain loop that keeps the AM
+demodulator out of overload. The gain drops within a few polls (25 ms each) of a strong carrier starting and comes back
+in about a second or two after it ends, so a station that keys up right after a loud one can start a little quiet.
+Changing frequency resets the gain. The squelch uses the chip's noise reading, not the signal level, so its levels
+(1-9) open on a carrier and stay shut on an empty channel whatever the gain is. FM and DMR keep their own settings.
+The air band is receive-only.
+
+Earlier AM versions were saturated: the one in `527f5229` (withdrawn) and the fixed-gain one that replaced it. The
+loop in this version is the corrected one. It has been checked on the host and in a closed-loop model, **not yet
+listened to on a radio**. If it still sounds saturated, [am-strong-signal.md](am-strong-signal.md) says what to compare
+and what the next change would be; the history is in [am-regression.md](am-regression.md).
 
 ## Setting up channels
 

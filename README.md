@@ -8,7 +8,7 @@ Firmware abierto y multimodo para el **Baofeng DM-32UV**: FM, DMR, **APCO P25 fa
 
 > Firmware experimental. Úsalo bajo tu responsabilidad, solo en frecuencias en las que tengas licencia y con un respaldo de tu radio.
 
-## Estado (16 de noviembre de 2026)
+## Estado (17 de noviembre de 2026)
 
 | Función | Estado |
 |---|---|
@@ -23,7 +23,7 @@ Firmware abierto y multimodo para el **Baofeng DM-32UV**: FM, DMR, **APCO P25 fa
 | APRS y posición GPS | Activados en esta versión; sin probar en el aire |
 | Tono de permiso estilo Motorola | P25/NXDN: TPT ASTRO 25 (3 bips de 910 Hz); DMR: chirp MOTOTRBO |
 | Tema «Rosa» | Tema claro rosa (Ajustes › Pantalla › Tema › Rosa) |
-| AM de aviación (108-136 MHz) | El squelch abre con los niveles 1-9 (antes solo con 0). Probado en la radio |
+| AM de aviación (108-136 MHz) | `0046`: ganancia automática corregida para que el demodulador AM no sature, y squelch por ruido. Probado en host y con un modelo de lazo cerrado; **pendiente de oírlo en la radio** (véase abajo) |
 | Recepción ampliada | Solo RX: 174-260, 350-400 y 480-520 MHz, con menos sensibilidad fuera de los filtros. TX sigue en 136-174 / 400-480 |
 
 ## Hotspots, repetidores y otras radios
@@ -32,14 +32,26 @@ NXDN es solo NXDN48 (Icom «VN»). El NAC/RAN de **TX** debe coincidir con el de
 y RAN 1. Si el hotspot necesita un offset de cientos de Hz, corrige la radio en **Ajustes › Avanzado › Ajuste frec** (Freq trim).
 Véase la [guía de usuario](docs/user-guide.md#hotspots-repeaters-and-other-radios).
 
-## AM regression rollback
+## AM de aviación: saturación
 
-El Hotfix AM `527f5229` queda retirado: se reportó audio más áspero y sobrecargado que antes. Se revierte su
-parche AM completo y se recupera el comportamiento de `b736e952`; se conservan las correcciones DMR, la imagen
-de arranque y el VFO FM/DMR/P25/NXDN. La versión retirada deja de ser estable y el instalador ofrece la restauración.
+El Hotfix AM `527f5229` se retiró porque sonaba áspero y sobrecargado, y la reversión (`7558e84`) dejó un AM sin
+control de ganancia, que seguía saturado. **`0046` vuelve a poner el receptor AM con el lazo de ganancia corregido**
+(RadioFoundry `dc1140bf`), que es lo que le faltaba al hotfix retirado.
 
-**Esto revierte el empeoramiento; no da por resuelta la distorsión original con aviones cercanos.** El siguiente
-ajuste de AM necesita una comparación física antes de recomendarlo. Véase [el diagnóstico](docs/am-regression.md).
+El demodulador AM del FD6818 se sobrecarga cuando la lectura de RSSI (0x67) pasa de unos 143. En un modelo de lazo
+cerrado del driver, sobre las 186 señales que la tabla de ganancia puede alcanzar:
+
+| Versión | Señales que deja sobrecargadas | Recuperación de la ganancia tras una portadora fuerte |
+|---|---|---|
+| Sin lazo (antes de `527f5229` y tras la reversión) | 162 | n/a |
+| `527f5229` (retirado) | 42, las débiles a moderadas | 12-28 s |
+| `0046` | 0 | 1,1-1,6 s |
+
+Una prueba de lazo cerrado nueva, que falla con el lazo retirado, queda en el parche. **Nadie ha oído esta versión: no
+hay grabación del audio de esta radio, y el modelo y las cifras de asentamiento son de RadioFoundry (medidas en su
+DM-32UV) aplicadas aquí, no una medición en tu radio.** El squelch por ruido tampoco se ha probado en esta radio (el de
+`0022`, sí). Qué cambia, qué no se verificó y qué probar si aún satura: [am-strong-signal.md](docs/am-strong-signal.md);
+la historia, en [am-regression.md](docs/am-regression.md).
 
 ## Hotfix — DMR PTT, boot screen, and four-mode VFO
 
@@ -85,7 +97,7 @@ Parches de la serie (`integration/radiofoundry/patches/`):
 | `0019-nxdn-rx-any-ran-and-p25-f7f` | «Cualquier RAN» por canal en la radio: en la fila RAN de un canal NXDN, OK sin escribir alterna RX entre su RAN y todos (RX RAN 0) sin tocar el RAN TX; inicio muestra `RAN n/any`. En P25, escribir F7E o F7F pone RX «cualquiera» y conserva el NAC TX. El editor web y el CSV aceptan `any` en RX RAN; F7F en RX NAC se guarda como F7E |
 | `0020-p25-nxdn-digital-monitor` | Monitor digital como en DMR para P25 y NXDN: una pulsación corta de SK1 (tecla monitor) oye todos los NAC/RAN y grupos del canal sin editarlo; `DMon` en la pantalla. Otra pulsación, Atrás o cambiar de canal lo quita. La TX sigue con el NAC/RAN y grupo del canal. En troncal P25: todos los grupos |
 | `0021-dmr-ras-monitor-and-stock-air-band` | Repetidores DMR con RAS: con el monitor digital (SK1) una supertrama de voz en orden sin LC verificable se reproduce como llamada de grupo desconocida (TG/ID 0). La conversión del codeplug original conserva los canales de banda aérea (también sin frecuencia TX), como solo RX |
-| `0022-dm32-air-band-squelch` | AM de aviación: el DM-32 lee la banda aérea unos 20 dB más baja que la radio con la que se ajustó el squelch AM de RadioFoundry, así que ningún nivel salvo 0 abría. La radio suma 20 dB a su RSSI en AM; el nivel 5 abre unos 8 dB sobre el ruido |
+| `0022-dm32-air-band-squelch` | AM de aviación: el DM-32 lee la banda aérea unos 20 dB más baja que la radio con la que se ajustó el squelch AM de RadioFoundry, así que ningún nivel salvo 0 abría. La radio sumaba 20 dB a su RSSI en AM; `0046` lo sustituye por el lazo de ganancia y el squelch por ruido |
 | `0023-dm32-rx-only-bands` | Bandas solo RX 174-260, 350-400 y 480-520 MHz (VFO, canales, escaneo). La TX sigue limitada a 136-174 / 400-480. El aviso de bandas muestra rangos unidos («65-260 350-520») y el de TX denegada solo las bandas de TX |
 | `0024-boot-screen-picture` | Custom avatar and NXDN-P25-DM32 boot name; owner boot text preserved |
 | `0025-dmr-ptt-release-recovery` | Bounded DMR release and timeout; immediate HR_C7000 abort and PA timer cancellation |
@@ -105,6 +117,7 @@ Parches de la serie (`integration/radiofoundry/patches/`):
 | `0044-aes-channel-menu-and-feature` | AES-256: la radio informa `DV_AES` en su lista de funciones, sin la cual el editor web se negaba a escribir canales con AES. Fila **AES-256** en el menú de canal DMR y P25 convencional (Apagado o una clave cargada; las claves se siguen cargando solo desde el editor web) |
 | `0045-dmr-monitor-any-cc-ts-and-ras` | Monitor digital DMR como escáner: cualquier código de color y ambos slots (#12), y voz de repetidores con RAS. El HR_C7000 nunca entregaba esa voz: sin cabecera ni LC embebido válidos nada le daba al slot la marca de acceso de voz, y las ráfagas llegaban sin número. Ahora la marca sale de la forma de la voz (sync o EMB válido). El escaneo de CC se queda en el código que trae esa voz. La TX sale siempre en el CC del canal, aunque el monitor esté escaneando códigos |
 | `0035-editor-writes-digital-channel-fields` | Editor web: un cambio solo de NAC/RAN, grupo, «Hear All», WACN o System ID ya se escribe en la radio (antes se descartaba como «ya tiene este codeplug»). Mismo arreglo que el 0031 de kgasso en el PR #7 |
+| `0046-am-air-band-gain-loop` | AM de aviación: filtro, salida AF y ganancia propios de AM con el lazo de ganancia corregido (RadioFoundry `ad79ab67` y `dc1140bf`), squelch por ruido en lugar del RSSI con +20 dB de `0022`, y una prueba de lazo cerrado. Véase [docs/am-strong-signal.md](docs/am-strong-signal.md) |
 
 Fuera de la serie: recepción NXDN corregida (filtros del FD6818 en la ruta plana, FSW en ambas polaridades, ganancia AF) en `integration/radiofoundry/nxdn/` y `src/nxdn/`.
 

@@ -1,6 +1,21 @@
 # Resources of the multi-mode image
 
-## Current image: November 16, 2026
+## November 17, 2026: AM gain loop (patch 0046)
+
+The release configuration (`--speed-codec --stack-check --lean --trunk-tx`, the series through `0045`) measured with and
+without `0046-am-air-band-gain-loop`:
+
+| Build | Image | RAM | Free RAM |
+|---|---:|---:|---:|
+| Series through `0045` | 560,340 | 209,008 | 2,448 |
+| With `0046` | 561,068 | 209,016 | 2,440 |
+| With `0046`, `CONFIG_AM_RX=n` | 559,768 | 209,008 | 2,448 |
+
+`0046` costs 728 bytes of flash and 8 bytes of RAM (the AM state and gain loop in `fd6818_t`). Zero compiler warnings in all
+three; the static stack check passes on the first (least free: idle task, 136 bytes). These figures are not comparable with
+the November 16 ones below, which are without `--trunk-tx` and before patches `0036`-`0045`. Not run on a radio.
+
+## November 16, 2026
 
 Releases are built with `--lean`. The bench tools are left out: the P25 capture replay (2,368 B), the P25 self-test,
 and the NXDN receive capture `nxdn_snap` (2,116 B; now behind `CONFIG_P25_BENCH` too).
