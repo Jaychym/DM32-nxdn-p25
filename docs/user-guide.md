@@ -165,6 +165,6 @@ Limits:
 
 ## AES-256 conventional voice
 
-In the web CPS **Radio** tab, provision up to four AES-256 slots (64 hex digits per key), each with a unique key ID. Select the slot on a conventional P25 or DMR channel; no slot keeps clear voice. DMR key IDs must fit 1–255; P25 accepts 1–65535. Keys stay out of CSV/YAML exports, but binary codeplug backups contain them. Keep backups private.
+In the web CPS **Radio** tab, provision up to four AES-256 slots (64 hex digits per key), each with a unique key ID. Select the slot on a conventional P25 or DMR channel, in the web CPS or on the radio (channel menu, **AES-256** row: OK steps Off, then each slot that has a key); no slot keeps clear voice. Keys are only entered in the web CPS, never on the radio. DMR key IDs must fit 1–255; P25 accepts 1–65535. Keys stay out of CSV/YAML exports, but binary codeplug backups contain them. Keep backups private.
 
 RX looks up the received key ID among the four slots. Missing encryption synchronization or a missing key mutes encrypted voice; TX with an invalid key/configuration is refused. Hardware interoperability is untested. Read the [protocol and sequence limits](aes256.md) before use, especially for DMR shared keys or after a settings/flash restore.

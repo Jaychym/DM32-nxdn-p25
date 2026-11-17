@@ -1,0 +1,211 @@
+--- a/core/hostlink/build_info.c
++++ b/core/hostlink/build_info.c
+@@ -27,6 +27,9 @@
+ #if CONFIG_DMR_PRIVACY
+ 	"DMR_PRIVACY,"
+ #endif
++#if CONFIG_DV_AES
++	"DV_AES,"	// the web editor writes AES channels only to a build that says so
++#endif
+ #if CONFIG_DMR_TALKER_ALIAS
+ 	"DMR_TALKER_ALIAS,"
+ #endif
+--- a/core/codeplug/codeplug.h
++++ b/core/codeplug/codeplug.h
+@@ -13,6 +13,7 @@
+ #include <stdbool.h>
+ // AES slots: 0 clear, 1-4 enabled, 255 invalid (TX denied).
+ bool codeplug_aes_key(uint8_t slot, uint8_t key[32], uint16_t *kid);
++uint16_t codeplug_aes_kid(uint8_t slot);	// the slot's key ID, 0 = no key; the key itself stays inside
+ bool codeplug_aes_lookup(uint16_t kid, uint8_t key[32]);
+ bool codeplug_aes_reserve(uint8_t slot, uint64_t *p25_mi, uint32_t *dmr_mi);
+ #include <stdbool.h>
+--- a/core/codeplug/codeplug.c
++++ b/core/codeplug/codeplug.c
+@@ -127,6 +127,15 @@
+     voice_aes_wipe(e, sizeof e);
+     return ok;
+ }
++uint16_t codeplug_aes_kid(uint8_t slot)
++{
++    static uint8_t e[AES_ENTRY];	// static: the UI task asks, short of stack; the storage lock guards it
++    storage_lock();
++    uint16_t kid = aes_entry(slot, e) ? (uint16_t)(e[2] | (e[3] << 8)) : 0;
++    voice_aes_wipe(e, sizeof e);
++    storage_unlock();
++    return kid;
++}
+ bool codeplug_aes_lookup(uint16_t kid, uint8_t key[32])
+ {
+     bool found = false;
+@@ -199,6 +208,8 @@
+ #else
+ bool codeplug_aes_key(uint8_t slot, uint8_t key[32], uint16_t *kid)
+ { (void)slot; (void)key; (void)kid; return false; }
++uint16_t codeplug_aes_kid(uint8_t slot)
++{ (void)slot; return 0; }
+ bool codeplug_aes_lookup(uint16_t kid, uint8_t key[32])
+ { (void)kid; (void)key; return false; }
+ bool codeplug_aes_reserve(uint8_t slot, uint64_t *p25_mi, uint32_t *dmr_mi)
+--- a/core/ui/ui_menus.c
++++ b/core/ui/ui_menus.c
+@@ -1738,7 +1738,7 @@
+ // Without CONFIG_CHANNEL_EDIT the rows are read only and OK goes to the channel
+ 
+ enum { CE_NAME, CE_NUMBER, CE_MODE, CE_RX, CE_TX, CE_POWER, CE_RX_ONLY, CE_BW, CE_RX_TONE, CE_TX_TONE, CE_VOX,
+-       CE_NAC, CE_TG, CE_WACN, CE_SYSID, CE_TRUNK_TX, CE_CC, CE_TS, CE_CONTACT, CE_LIST, CE_ID, CE_DMO, CE_BEEP, CE_ALIAS1, CE_ALIAS2, CE_TOT, CE_SCAN, CE_ECO,
++       CE_NAC, CE_TG, CE_AES, CE_WACN, CE_SYSID, CE_TRUNK_TX, CE_CC, CE_TS, CE_CONTACT, CE_LIST, CE_ID, CE_DMO, CE_BEEP, CE_ALIAS1, CE_ALIAS2, CE_TOT, CE_SCAN, CE_ECO,
+        CE_ZONES, CE_GO, CE_SHARE, CE_SAVE, CE_SAVE_NEW, CE_COUNT, CE_NONE = 0xFF };
+ 
+ static channel_t ced_ch;		// what the screen shows (the working copy when editing)
+@@ -1775,7 +1775,7 @@
+ 	[CE_POWER] = CE_FIELD(power), [CE_RX_ONLY] = CE_FIELD(rx_only), [CE_BW] = CE_FIELD(bw),
+ 	[CE_RX_TONE] = CE_FIELD(rx_tone), [CE_TX_TONE] = CE_FIELD(tx_tone), [CE_VOX] = CE_FIELD(vox),
+ 	[CE_NAC] = { offsetof(channel_t, nac_rx), 2 * sizeof(uint16_t), 0 },	// nac_rx and nac_tx, side by side
+-	[CE_TG] = CE_FIELD(talkgroup),
++	[CE_TG] = CE_FIELD(talkgroup), [CE_AES] = CE_FIELD(aes_slot),
+ 	[CE_WACN] = CE_FIELD(wacn), [CE_SYSID] = CE_FIELD(sysid), [CE_TRUNK_TX] = CE_FIELD(trunk_tx),
+ 	[CE_CC] = CE_FIELD(color_code), [CE_TS] = CE_FIELD(timeslot), [CE_CONTACT] = CE_FIELD(contact),
+ 	[CE_LIST] = CE_FIELD(listen_list), [CE_ID] = CE_FIELD(dmr_id), [CE_DMO] = CE_FIELD(dmo),
+@@ -1856,6 +1856,7 @@
+ 		bool dv_only = r == CE_NAC || r == CE_TG;
+ 		if ((r == CE_WACN || r == CE_SYSID || r == CE_TRUNK_TX) && ced_ch.mode != RADIO_MODE_P25_TRUNK) continue;
+ 		if (r == CE_RX_ONLY && ced_ch.mode == RADIO_MODE_P25_TRUNK) continue;
++		if (r == CE_AES && !(CONFIG_DV_AES && (dmr || ced_ch.mode == RADIO_MODE_P25))) continue;	// conventional voice only
+ 		if ((fm_only && (dmr || dv)) || (dmr_only && !dmr && !(dv && r == CE_ID)) || (dv_only && !dv) ||
+ 		    (r == CE_MODE && !CONFIG_DMR))
+ 			continue;
+@@ -1996,7 +1997,7 @@
+ static void chinfo_item(uint16_t i, ui_item_t *it)
+ {
+ 	static const char *const labels[CE_COUNT] = { TRN("Name"), TRN("Number"), TRN("Mode"), "RX", "TX", TRN("Power"),
+-		TRN("RX only"), TRN("Bandwidth"), TRN("RX CTCSS/DCS"), TRN("TX CTCSS/DCS"), "VOX", "NAC", TRN("Talkgroup"), "WACN", TRN("System ID"), TRN("Trunk TX"),
++		TRN("RX only"), TRN("Bandwidth"), TRN("RX CTCSS/DCS"), TRN("TX CTCSS/DCS"), "VOX", "NAC", TRN("Talkgroup"), "AES-256", "WACN", TRN("System ID"), TRN("Trunk TX"),
+ 		TRN("Color code"),
+ 		TRN("Timeslot"), TRN("TX contact"), TRN("RX group list"), TRN("Own ID"), TRN("Direct mode"),
+ 		TRN("Talk permit beeps"), TRN("Talker alias TS1"), TRN("Talker alias TS2"), TRN("TX time-out"), TRN("Scan"),
+@@ -2077,6 +2078,17 @@
+ 	case CE_TRUNK_TX:
+ 		sb_str(&b, ch->trunk_tx && !ch->rx_only ? TR("On") : TR("Off"));
+ 		break;
++	case CE_AES:
++		if (ch->aes_slot == 0) {
++			sb_str(&b, TR("Off"));
++		} else if (ch->aes_slot <= 4) {
++			sb_str(&b, TR("Key"));
++			sb_chr(&b, ' ');
++			sb_u32(&b, ch->aes_slot, 1);
++		} else {
++			sb_str(&b, TR("Invalid"));	// the editor's "invalid": TX refused
++		}
++		break;
+ 	case CE_TG:
+ #if CONFIG_CHANNEL_EDIT
+ 		if (editing && ced_len > 0)
+@@ -2576,6 +2588,8 @@
+ 		else
+ 			c->mode = RADIO_MODE_FM;
+ 		c->trunk_tx = false;
++		if (c->mode != RADIO_MODE_DMR && c->mode != RADIO_MODE_P25)
++			c->aes_slot = 0;	// AES is conventional DMR and P25 voice only (a trunk refuses TX with it)
+ 		if (c->mode == RADIO_MODE_P25_TRUNK) { c->rx_only = true; c->nac_rx = CODEPLUG_NAC_ANY; }
+ 		if (c->mode == RADIO_MODE_NXDN) {
+ 			if (c->nac_tx > 63)
+@@ -2622,6 +2636,19 @@
+ 		if (!CONFIG_P25_TRUNK_TX) { ui_toast(TR("Trunk TX: not in this build")); break; }
+ 		c->trunk_tx = !c->trunk_tx; c->rx_only = !c->trunk_tx;
+ 		break;
++	case CE_AES: {
++		// Off, then each slot with a key (the keys come from the web editor, never typed here), then off again
++		uint8_t s = c->aes_slot > 4 ? 0 : c->aes_slot;
++		do {
++			s = s >= 4 ? 0 : (uint8_t)(s + 1);
++		} while (s != 0 && codeplug_aes_kid(s) == 0);
++		if (s == 0 && c->aes_slot == 0) {
++			ui_toast(TR("Load AES keys with the web editor"));
++			break;
++		}
++		c->aes_slot = s;
++		break;
++	}
+ 	case CE_RX_ONLY: c->rx_only = !c->rx_only; break;
+ 	case CE_BW: c->bw = c->bw == RADIO_BW_25K ? RADIO_BW_12K5 : RADIO_BW_25K; break;
+ 	case CE_RX_TONE:
+--- a/core/ui/lang/es.po
++++ b/core/ui/lang/es.po
+@@ -1677,6 +1677,14 @@
+ msgstr ", RX otro"
+ 
+ #: core/ui/ui_menus.c
++msgid "Key"
++msgstr "Clave"
++
++#: core/ui/ui_menus.c
++msgid "Invalid"
++msgstr "Inválida"
++
++#: core/ui/ui_menus.c
+ msgid "Yes"
+ msgstr "Sí"
+ 
+@@ -1773,6 +1781,10 @@
+ msgstr "TX troncal: no incluida en esta compilación"
+ 
+ #: core/ui/ui_menus.c
++msgid "Load AES keys with the web editor"
++msgstr "Carga las claves AES con el editor web"
++
++#: core/ui/ui_menus.c
+ msgid "Tones: not in this build"
+ msgstr "Tonos: no disponible"
+ 
+@@ -2837,10 +2849,6 @@
+ msgstr "Tipo clave"
+ 
+ #: core/ui/ui_menus.c
+-msgid "Key"
+-msgstr "Clave"
+-
+-#: core/ui/ui_menus.c
+ msgid "Auto lock"
+ msgstr "Bloqueo auto"
+ 
+--- a/core/ui/lang/it.po
++++ b/core/ui/lang/it.po
+@@ -1677,6 +1677,14 @@
+ msgstr ", RX altro"
+ 
+ #: core/ui/ui_menus.c
++msgid "Key"
++msgstr "Chiave"
++
++#: core/ui/ui_menus.c
++msgid "Invalid"
++msgstr "Non valida"
++
++#: core/ui/ui_menus.c
+ msgid "Yes"
+ msgstr "Sì"
+ 
+@@ -1773,6 +1781,10 @@
+ msgstr "TX trunking: non presente in questa build"
+ 
+ #: core/ui/ui_menus.c
++msgid "Load AES keys with the web editor"
++msgstr "Carica le chiavi AES con l'editor web"
++
++#: core/ui/ui_menus.c
+ msgid "Tones: not in this build"
+ msgstr "Toni: non in questa build"
+ 
+@@ -2837,10 +2849,6 @@
+ msgstr "Tipo chiave"
+ 
+ #: core/ui/ui_menus.c
+-msgid "Key"
+-msgstr "Chiave"
+-
+-#: core/ui/ui_menus.c
+ msgid "Auto lock"
+ msgstr "Blocco auto"
+ 

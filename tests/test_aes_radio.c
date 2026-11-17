@@ -37,6 +37,10 @@ static void test_store(void)
     sim_flash_create(0x40000,&map);boot();provision();
     uint8_t key[32];uint16_t kid;uint64_t p[4];uint32_t d[4];
     assert(codeplug_aes_key(1,key,&kid)&&kid==42);assert(!codeplug_aes_key(5,key,&kid));
+    /* The channel menu's check: the key ID only, 0 for an empty, missing or damaged slot. */
+    assert(codeplug_aes_kid(1)==42&&codeplug_aes_kid(2)==0&&codeplug_aes_kid(0)==0&&codeplug_aes_kid(5)==0);
+    table[16+92]^=1;assert(storage_write(0x7c00,table,sizeof table));assert(codeplug_aes_kid(1)==0);
+    table[16+92]^=1;assert(storage_write(0x7c00,table,sizeof table));assert(codeplug_aes_kid(1)==42);
     assert(codeplug_aes_reserve(1,p,d));boot();assert(codeplug_aes_reserve(1,p+1,d+1));
     // A stale CPS read uploaded after a transmission cannot roll back the settings reservation.
     assert(storage_write(0x7c00,table,sizeof table));boot();assert(codeplug_aes_reserve(1,p+2,d+2));

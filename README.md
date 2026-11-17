@@ -18,7 +18,7 @@ Firmware abierto y multimodo para el **Baofeng DM-32UV**: FM, DMR, **APCO P25 fa
 | NXDN48, RX | Verificado en la radio (tramas, llamada y voz AMBE sin errores) |
 | NXDN48, TX | El receptor del firmware y dsd-fme decodifican la TX del DM-32 (RAN 1, TG 1, voz), capturada con un Pluto+. Hay reportes de radios Icom, un repetidor Kenwood y hotspots MMDVM que no la decodifican; pendiente medir la desviación. Solo NXDN48 (Icom «VN», 6,25 kHz), no NXDN96 |
 | Troncal P25 | Modo P25 Trunk en canal y VFO, fase 1, VHF/UHF. WACN/System ID editables en la radio. RX por defecto; TX experimental con permiso explícito por canal y sistema/ID completos. Sin registro, el PTT registra y luego pide canal; la pantalla dice si el sistema rechazó o no respondió. Sin validar en un sistema real |
-| AES-256 P25/DMR | Cuatro claves configurables en el CPS web para voz convencional; pruebas de protocolo y persistencia. Interoperabilidad con otras radios pendiente; véanse los [límites](docs/aes256.md) |
+| AES-256 P25/DMR | Cuatro claves configurables en el CPS web para voz convencional. La clave de cada canal se elige en el CPS o en el menú de canal de la radio. Hasta `0044` el editor web rechazaba los canales con AES porque la radio no informaba `DV_AES`. Pruebas de protocolo y persistencia. Interoperabilidad con otras radios pendiente; véanse los [límites](docs/aes256.md) |
 | Tono de fin de llamada DMR | Interruptor independiente en Ajustes › Sonidos; habilitado por defecto |
 | APRS y posición GPS | Activados en esta versión; sin probar en el aire |
 | Tono de permiso estilo Motorola | P25/NXDN: TPT ASTRO 25 (3 bips de 910 Hz); DMR: chirp MOTOTRBO |
@@ -102,6 +102,7 @@ Parches de la serie (`integration/radiofoundry/patches/`):
 | `0041-dm32-mic-route-before-tx` | DMR: `transmitting` se marca antes de rutear el micrófono (RadioFoundry 9e1f7209), y cada ráfaga DMR/P25 reafirma micrófono→códec |
 | `0042-p25-trunk-system-deny-reasons` | Troncal P25: «El sistema rechazó», «El sistema no respondió» o «Buscando el sitio» en vez de «El módem rechazó el envío» |
 | `0043-dmr-voice-takes-speaker-route` | Corrige el primer PTT DMR sin voz al entrar en DMR (desde P25, NXDN o FM). El tono de permiso dejaba encendidos la ruta de altavoz y el amplificador al pasarle el audio a la voz, y el micrófono llegaba plano al códec (medido en la radio: 3 dB contra 39 dB). La voz ahora reenvía su ruta en su primer bloque |
+| `0044-aes-channel-menu-and-feature` | AES-256: la radio informa `DV_AES` en su lista de funciones, sin la cual el editor web se negaba a escribir canales con AES. Fila **AES-256** en el menú de canal DMR y P25 convencional (Apagado o una clave cargada; las claves se siguen cargando solo desde el editor web) |
 | `0035-editor-writes-digital-channel-fields` | Editor web: un cambio solo de NAC/RAN, grupo, «Hear All», WACN o System ID ya se escribe en la radio (antes se descartaba como «ya tiene este codeplug»). Mismo arreglo que el 0031 de kgasso en el PR #7 |
 
 Fuera de la serie: recepción NXDN corregida (filtros del FD6818 en la ruta plana, FSW en ambas polaridades, ganancia AF) en `integration/radiofoundry/nxdn/` y `src/nxdn/`.
