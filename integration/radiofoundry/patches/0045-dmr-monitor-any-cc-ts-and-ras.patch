@@ -1,0 +1,308 @@
+--- a/hal/hal_dmr_modem.h
++++ b/hal/hal_dmr_modem.h
+@@ -91,6 +91,7 @@
+ 	int8_t cc;		// -1 = any
+ 	dmr_access_t access;
+ 	bool repeater;		// RMO framing (BS sync expected) vs DMO
++	bool voice_no_lc;	// digital monitor: voice whose LC never checks out (a RAS repeater's) is wanted too
+ } dmr_config_t;
+ 
+ typedef struct {
+--- a/drivers/modem/hrc7000/hrc7000_dmr.h
++++ b/drivers/modem/hrc7000/hrc7000_dmr.h
+@@ -80,6 +80,7 @@
+ 	uint32_t rx_voice, rx_lc_header, rx_terminator, rx_csbk, rx_data, rx_idle;
+ 	uint32_t rx_crc_err;	// delivered with a bad flag (voice, blocks) or dropped (headers, CSBK)
+ 	uint32_t rx_unusable;	// RC or no type: dropped
++	uint32_t rx_voice_unlocked;	// unusable voice that gave its slot the voice-access flag (voice_no_lc)
+ 	uint32_t late_entry;	// system interrupt bit 2
+ 	uint32_t slot_abnormal;	// bits 5, 6, 16
+ 	uint32_t rx_restarts;
+--- a/drivers/modem/hrc7000/hrc7000_dmr.c
++++ b/drivers/modem/hrc7000/hrc7000_dmr.c
+@@ -603,6 +603,18 @@
+ 	hrc7000_dmr_decode(rti, &s);
+ 	if (s.kind == HRC7000_KIND_NONE) {
+ 		e->st.rx_unusable++;
++		// Voice the chip doesn't number: without the voice-access flag it reports B-F unnumbered, and only a header,
++		// a late entry or a numbered burst gives the flag. A RAS repeater's call fails all three (its key spoils the
++		// header's RS parity and the embedded LC checksum), so it stayed unusable forever. In digital monitor the
++		// voice's own shape gives the flag (voice sync, or an EMB whose QR checks); the stack then takes the numbered
++		// bursts as voice without an LC (rx_no_lc). The CC scan holds on a code that carries such voice
++		uint32_t sync_type = rti & 0x3u;
++		if (e->cfg.voice_no_lc && (sync_type == 1u || (sync_type == 0u && (rti & RTI_QR) == 0))) {
++			e->voice_slots |= (uint8_t)(1u << s.chip_slot);
++			e->voice_slot_tick[s.chip_slot] = e->tick;
++			e->cc_tick = e->tick;
++			e->st.rx_voice_unlocked++;
++		}
+ 		return;
+ 	}
+ 	int8_t ts = slot_ts(e, &s);
+--- a/platform/hrc7000/dmr_glue.c
++++ b/platform/hrc7000/dmr_glue.c
+@@ -416,6 +416,7 @@
+ 		put_kv(&o, " D", m.rx_data);
+ 		put_kv(&o, " crc", m.rx_crc_err);
+ 		put_kv(&o, " u", m.rx_unusable);
++		put_kv(&o, "/", m.rx_voice_unlocked);
+ 		break;
+ 	case 4:
+ 		put_kv(&o, "le", m.late_entry);
+--- a/core/dmr/call/dmr_call.h
++++ b/core/dmr/call/dmr_call.h
+@@ -75,7 +75,7 @@
+ // (0xFFFFFF), the reply target's during the reply window, in groups[], or group_ok() says so.
+ typedef struct {
+ 	bool hear_all;		// every talkgroup (and private calls between others) on our timeslot
+-	bool any_cc;		// monitor: any color code too
++	bool any_cc;		// monitor: any color code and either timeslot too, and voice with no LC (RAS)
+ 	const uint32_t *groups;	// the channel's listen list (RX group list), owned by the caller, may be NULL
+ 	uint16_t group_count;
+ 	bool (*group_ok)(uint32_t tg, void *ctx);	// optional lookup instead of / besides the table
+--- a/core/dmr/call/dmr_call.c
++++ b/core/dmr/call/dmr_call.c
+@@ -111,6 +111,7 @@
+ 	uint32_t le_last_ms;
+ 	bool le_held;		// le_burst: the last burst, its LC taken before the pair was complete
+ 	uint8_t le_run;		// voice bursts in order (A-F) with no call, LC or not
++	bool cc_pinned;		// any color code: the channel's held for a transmission (modem_tx_begin)
+ 	dmr_burst_t le_burst;
+ 	uint32_t le_burst_slot;
+ 	// PI header heard before the call was (late entry after a missed voice LC header)
+@@ -411,6 +412,22 @@
+ 	return s.tx == TX_WAKE || s.tx == TX_ON || s.tx == TX_END || s.tx == TX_DATA || s.tx == TX_DATA_END;
+ }
+ 
++static void modem_config(dmr_config_t *mc);
++
++// A modem that filters no color code (digital monitor, polite to all) scans the codes and would send on the one it
++// happens to hold: the channel's is held for the transmission and let go once it is over (dmr_call_poll)
++static bool modem_tx_begin(dmr_timing_t timing, dmr_access_t access)
++{
++	dmr_config_t mc;
++
++	modem_config(&mc);
++	if (mc.cc < 0 && !sfr_user()) {
++		s.modem->set_cc_filter((int8_t)s.cfg.cc);
++		s.cc_pinned = true;
++	}
++	return s.modem->tx_begin(timing, (int8_t)s.cfg.ts, access);
++}
++
+ // --- Modem event callback (producer) ---
+ 
+ static void on_event(const dmr_event_t *ev, void *ctx)
+@@ -600,8 +617,8 @@
+ 		stats.rx_encrypted_calls++;
+ 	}
+ 	s.pi_pending = false;
+-	if (s.cfg.listen.any_cc)
+-		s.view.cc = b->cc;
++	if (s.cfg.listen.any_cc && !(b->kind == DMR_BURST_VOICE && b->voice_index % 6 == 0))
++		s.view.cc = b->cc;	// burst A has no color code on air
+ 
+ 	s.rx = rx_accept(&l, now) ? RXC_PLAY : RXC_OTHER;
+ 	if (s.rx == RXC_PLAY && !continuing)
+@@ -1008,7 +1025,7 @@
+ 		TR_WHAT('s');
+ 		return;
+ 	}
+-	bool other_slot = sfr_user() ? false : ts_known && b->ts != s.cfg.ts;
++	bool other_slot = sfr_user() || s.cfg.listen.any_cc ? false : ts_known && b->ts != s.cfg.ts;
+ 
+ 	if (!sfr_both() &&
+ 	    (other_slot || (s.rx != RXC_NONE && b->ts != 0 && s.call_ts != 0 && b->ts != s.call_ts))) {
+@@ -1301,7 +1318,7 @@
+ 	// SFR's hang (idle bursts on its outbound slot) is the same
+ 	dmr_access_t access = s.cfg.rmo || sfr_user() ? DMR_ACCESS_IMPOLITE : s.cfg.access;
+ 
+-	if (!s.modem->tx_begin(timing, (int8_t)s.cfg.ts, access)) {
++	if (!modem_tx_begin(timing, access)) {
+ 		tx_deny(DMR_TX_ERR_REJECTED);
+ 		return;
+ 	}
+@@ -1357,7 +1374,7 @@
+ 	uint8_t csbk[12];
+ 
+ 	dmr_csbk_bs_activation(s.cfg.own_id, csbk);
+-	if (!s.modem->tx_begin(DMR_TIMING_ASAP, (int8_t)s.cfg.ts, DMR_ACCESS_IMPOLITE)) {
++	if (!modem_tx_begin(DMR_TIMING_ASAP, DMR_ACCESS_IMPOLITE)) {
+ 		tx_deny(DMR_TX_ERR_REJECTED);
+ 		return;
+ 	}
+@@ -1449,7 +1466,7 @@
+ 		// slot timing of a reception only briefly (the HR_C6000 engine: 390 ms), so not DMR_CALL_ALIGN_MS here: an
+ 		// aligned start after that waits for a slot that never comes and is refused (found by dmrDataChainTest)
+ 		timing = dmo_timing(now, DMR_CALL_DATA_ALIGN_MS);
+-	if (!s.modem->tx_begin(timing, (int8_t)s.cfg.ts, DMR_ACCESS_IMPOLITE)) {
++	if (!modem_tx_begin(timing, DMR_ACCESS_IMPOLITE)) {
+ 		tx_deny(DMR_TX_ERR_REJECTED);
+ 		return;
+ 	}
+@@ -1705,6 +1722,13 @@
+ 	mc->cc = (s.cfg.listen.any_cc || s.cfg.access == DMR_ACCESS_POLITE_ALL || two_cc) ? -1 : (int8_t)s.cfg.cc;
+ 	mc->access = s.cfg.access;
+ 	mc->repeater = s.cfg.rmo;
++	mc->voice_no_lc = s.cfg.listen.any_cc;
++}
++
++// The slot the modem takes: through a repeater ours, unless the monitor hears both
++static int8_t lock_slot(void)
++{
++	return s.cfg.rmo && !s.cfg.listen.any_cc ? (int8_t)s.cfg.ts : 0;
+ }
+ 
+ static void modem_apply(void)
+@@ -1714,7 +1738,7 @@
+ 	modem_config(&mc);
+ 	s.modem->configure(&mc);
+ 	s.modem->set_cc_filter(mc.cc);
+-	s.modem->rx_lock_slot(s.cfg.rmo ? (int8_t)s.cfg.ts : 0);
++	s.modem->rx_lock_slot(lock_slot());
+ }
+ 
+ void dmr_call_configure(const dmr_call_config_t *cfg)
+@@ -1776,7 +1800,7 @@
+ 		return false;
+ 	s.running = true;
+ 	s.modem->set_cc_filter(mc.cc);
+-	s.modem->rx_lock_slot(s.cfg.rmo ? (int8_t)s.cfg.ts : 0);
++	s.modem->rx_lock_slot(lock_slot());
+ 	s.dirty = true;
+ 	return true;
+ }
+@@ -1906,6 +1930,14 @@
+ 
+ 		uint32_t tc = __atomic_load_n(&tick_count, __ATOMIC_ACQUIRE);
+ 
++		if (s.cc_pinned && !transmitting() && !s.modem->is_transmitting()) {
++			dmr_config_t mc;
++
++			modem_config(&mc);
++			s.modem->set_cc_filter(mc.cc);	// the transmission is over: the scan again
++			s.cc_pinned = false;
++		}
++
+ 		if (tc != s.tick_seen) {
+ 			s.tick_seen = tc;
+ 			if (s.cfg.rmo && tick_alt > 3) {	// slot number toggling: a repeater's CACH
+--- a/core/radio/radio_sm.c
++++ b/core/radio/radio_sm.c
+@@ -1316,6 +1316,9 @@
+ 	cfg.talk_target.private_call = sm->one_shot ? sm->one_shot_private : sm->manual ? sm->manual_private :
+ 		sm->talk_private;
+ 	cfg.listen.hear_all = sm->view.monitor || sm->hear_all_latch;
++	// Digital monitor listens like a scanner: every color code and timeslot, and a RAS repeater's voice (issue 12).
++	// TX keeps the channel's color code and slot
++	cfg.listen.any_cc = cfg.listen.hear_all;
+ 	cfg.listen.groups = sm->listen;
+ 	cfg.listen.group_count = sm->listen_count;
+ 	// The channel's TX time-out when it has one, else the radio's
+--- a/tests/host/dmrCallTest.c
++++ b/tests/host/dmrCallTest.c
+@@ -1117,6 +1117,44 @@
+ // the voice comes with no LC the stack can check. Without hear all nothing plays (the group can't be told); with hear
+ // all (digital monitor) a whole superframe in order plays as an unknown group call, and an LC that decodes later
+ // names it
++// Digital monitor listens like a scanner (issue 12): with any_cc a call on another color code and the other slot plays,
++// a RAS repeater's too; through a repeater the modem takes both slots. A transmission still goes out on the channel's
++// color code (the modem scanning codes sends on the one it holds), and the scan is let go once it is over
++static void test_rx_monitor_any_cc_ts(void)
++{
++	dmr_call_config_t c = base_cfg();
++	dmr_call_stats_t st;
++	unsigned frame = 1;
++
++	c.rmo = true;
++	setup(&c);
++	CHECK(sim.locked_ts == 1 && sim.cc_filter == 1 && !sim.cfg.voice_no_lc);
++	c.listen.hear_all = c.listen.any_cc = true;
++	dmr_call_configure(&c);
++	CHECK(sim.locked_ts == 0 && sim.cc_filter == -1 && sim.cfg.voice_no_lc);
++
++	dmr_call_reset_stats();
++	for (int i = 0; i < 6; i++) {
++		rx_voice((uint8_t)i, 9, 2, DMR_SYNC_BS, &frame, NULL, false);	// code 9, slot 2, no LC that decodes
++		run_ms(60);
++	}
++	dmr_call_get_stats(&st);
++	CHECK(st.rx_no_lc_calls == 1 && st.rx_calls_played == 1 && sink_log.begins == 1);
++	CHECK(V()->state == DMR_CALL_STATE_RX && V()->cc == 9 && st.rx_ts_dropped == 0 && st.rx_cc_dropped == 0);
++	run_ms(DMR_CALL_FADE_MS + 60);
++	CHECK(V()->state == DMR_CALL_STATE_IDLE);
++
++	c.rmo = false;	// direct mode: no repeater to wake first
++	dmr_call_configure(&c);
++	CHECK(sim.cc_filter == -1);
++	dmr_call_ptt(true);
++	run_ms(360 * 2);
++	CHECK(sim.tx_begins >= 1 && sim.cc_filter == 1);	// the channel's code held for the transmission
++	dmr_call_ptt(false);
++	run_ms(1200);
++	CHECK(!sim.tx_active && sim.cc_filter == -1);	// scanning again
++}
++
+ static void test_rx_ras_voice_without_lc(void)
+ {
+ 	dmr_call_config_t c = base_cfg();
+@@ -2510,6 +2548,7 @@
+ 	test_rx_recheck_on_configure();
+ 	test_rx_no_call_after_terminator();
+ 	test_rx_ras_voice_without_lc();
++	test_rx_monitor_any_cc_ts();
+ 	test_rx_group_callback();
+ 	test_rx_own_id_parrot();
+ 	test_late_entry();
+--- a/tests/host/hrc7000DmrTest.c
++++ b/tests/host/hrc7000DmrTest.c
+@@ -324,6 +324,41 @@
+ 	CHECK(REG(C7_LAYER2_TXRX_CTRL) == 0x40);
+ }
+ 
++// A RAS repeater's call: its key spoils the header's RS parity and the embedded LC checksum, so no header and no late
++// entry gives its slot the voice-access flag, and without the flag the chip reports the voice unnumbered (unusable).
++// In digital monitor (voice_no_lc) the voice's own shape gives the flag, and the color code scan holds on it. Late
++// entry (no header heard), the hard case: a header, even a spoiled one, holds the scan anyway
++static void test_rx_voice_no_lc(void)
++{
++	for (int mon = 0; mon < 2; mon++) {
++		setup();
++		const dmr_config_t cfg = { .own_id = 1234, .cc = -1, .access = DMR_ACCESS_POLITE_CC, .repeater = false,
++					   .voice_no_lc = mon != 0 };
++		hrc7000_dmr_configure(&eng, &cfg);
++		hrc7000_dmr_run(&eng);
++		count_kind(DMR_EV_SLOT_TICK, NULL);
++		uint32_t base = rti(0, 0, 1, 0, 0, 0) & ~3u;	// voice with no burst number, on chip slot 0
++		uint32_t steps = eng.st.cc_scan_steps;
++
++		for (int n = 0; n < 12; n++) {
++			REG(C7_LAYER2_STATUS) = (uint32_t)(n & 1) << 30;
++			tick(false);
++			if ((n & 1) == 0) {
++				deframe(n == 0 ? base | 1u : base);	// A with its voice sync, then B-F with an EMB that checks
++			}
++		}
++		uint32_t unlocked = eng.st.rx_voice_unlocked;
++		deframe(base | (1u << 28));	// an EMB whose QR fails is not voice
++		CHECK(eng.st.rx_voice_unlocked == unlocked);
++		CHECK((unlocked != 0) == (mon != 0));
++		CHECK(count_kind(DMR_EV_BURST_RX, NULL) == 0);	// unnumbered: the stack gets them once the chip numbers them
++		REG(C7_LAYER2_STATUS) = 0;	// chip slot 0 decided next
++		tick(false);
++		CHECK((REG(C7_LAYER2_TXRX_CTRL) == 0x8040) == (mon != 0));
++		CHECK(mon ? eng.st.cc_scan_steps == steps : eng.st.cc_scan_steps > steps);
++	}
++}
++
+ // The receiver drops its slot timing when it stops giving bursts: at the end of a reception and when the chip keeps
+ // the timing of a sender that left, reporting only unusable slots (bench: no later call was taken)
+ static void test_rx_resync(void)
+@@ -1379,6 +1414,7 @@
+ 	test_pure();
+ 	test_rx();
+ 	test_rx_sfr_both_copies();
++	test_rx_voice_no_lc();
+ 	test_rx_slot_arg();
+ 	test_rx_voice_ram_call();
+ 	test_bs_mode_cleared();

@@ -48,10 +48,16 @@ between the channel's own NAC/RAN and every NAC/RAN, keeping the TX one.
 
 A repeater with RAS (restricted access to system) alters the checks of each call's header and embedded link control
 with its key, so a radio without the key never sees a valid call and plays nothing. Turn on **digital monitor** (a
-short press of the monitor key, SK1): a whole voice superframe in order on the channel's color code and timeslot then
-plays as an unknown group call (talkgroup and ID 0), until a header or embedded LC that decodes names it. Calls marked
-private (encrypted) still do not play. Without digital monitor the talkgroup can't be told, so nothing plays. Transmit
-through such a repeater needs the system's key, which this firmware doesn't have.
+short press of the monitor key, SK1): a whole voice superframe in order then plays as an unknown group call
+(talkgroup and ID 0), until a header or embedded LC that decodes names it. Calls marked private (encrypted) still do
+not play. Without digital monitor the talkgroup can't be told, so nothing plays. Transmit through such a repeater
+needs the system's key, which this firmware doesn't have.
+
+Digital monitor on DMR listens like a scanner: every talkgroup, **every color code and both timeslots**, whatever the
+channel says. The screen shows the color code received. It steps through the 16 codes until it hears one, so the
+first moments of a call can be missed. Transmitting keeps the channel's color code and timeslot. Until 2026-11-17 the
+HR_C7000 never handed a RAS repeater's voice over at all: nothing gave its slot the chip's voice-access flag, so the
+voice stayed unnumbered and was dropped. Digital monitor now gives the flag from the voice itself.
 
 ## Air band channels from the stock codeplug
 
