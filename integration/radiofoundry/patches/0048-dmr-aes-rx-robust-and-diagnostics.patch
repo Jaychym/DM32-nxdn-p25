@@ -1,0 +1,325 @@
+--- a/core/dmr/call/dmr_call.c
++++ b/core/dmr/call/dmr_call.c
+@@ -117,7 +117,7 @@
+ 	// PI header heard before the call was (late entry after a missed voice LC header)
+ 	bool pi_pending;
+ 	uint32_t pi_pending_ms;
+-	uint8_t pi_pending_alg, pi_pending_key;
++	uint8_t pi_pending_alg, pi_pending_fid, pi_pending_key;
+ 
+ 	// repeater outbound
+ 	uint32_t rpt_last_ms;
+@@ -593,10 +593,11 @@
+ 	c->alias_complete = s.ta.complete;
+ 	if (!continuing) {
+ 		c->pi_header = false;
+-		c->pi_alg = c->pi_key = 0;
++		c->pi_alg = c->pi_fid = c->pi_key = c->aes = 0;
+ 		if (s.pi_pending && !elapsed(now, s.pi_pending_ms, true, fade_ms())) {
+ 			c->pi_header = true;	// heard just before the call was acquired
+ 			c->pi_alg = s.pi_pending_alg;
++			c->pi_fid = s.pi_pending_fid;
+ 			c->pi_key = s.pi_pending_key;
+ 			c->encrypted = true;
+ 		}
+@@ -645,6 +646,20 @@
+ 	s.dirty = true;
+ }
+ 
++#if CONFIG_DV_AES
++// What the AES side made of the call's PI header, for the screen (the header's own octets are c->pi_*)
++static void aes_view(void)
++{
++	dmr_caller_t *c = &s.view.caller;
++	uint8_t st = dmr_aes_state();
++
++	if (st != c->aes) {
++		c->aes = st;
++		s.dirty = true;
++	}
++}
++#endif
++
+ // slot: the modem's slot counter for the burst (0 = none). Bursts may arrive in batches, so a repeat is told by the
+ // burst index and the slot counter, never by arrival time (that is only the fallback for a modem without a counter)
+ static void rx_play(const dmr_burst_t *b, uint32_t now, uint32_t slot)
+@@ -667,11 +682,7 @@
+ 				return;
+ 			}
+ 		}
+-#if CONFIG_DV_AES
+-        if (s.cfg.aes_slot && slot && s.last_voice_slot && slot - s.last_voice_slot >= SUPERFRAME_SLOTS)
+-            dmr_aes_reset();
+-#endif
+-        sink_lost((uint8_t)(missing * DMR_AMBE_FRAMES_PER_BURST));
++		sink_lost((uint8_t)(missing * DMR_AMBE_FRAMES_PER_BURST));
+ 	}
+ 	s.next_index = (uint8_t)((i + 1) % 6);
+ 	s.have_index = true;
+@@ -691,8 +702,9 @@
+ 	bool playable = !s.cfg.aes_slot && (!enc || (s.cfg.privacy && !s.view.caller.pi_header));
+ #if CONFIG_DV_AES
+ 	if (s.cfg.aes_slot) {
+-		playable = enc && s.cfg.aes_slot <= 4 && dmr_aes_voice(v, i, false, now, s.view.caller.dst);
++		playable = enc && s.cfg.aes_slot <= 4 && dmr_aes_voice(v, i, false, s.view.caller.dst, slot);
+ 		s.view.caller.decrypted = playable;
++		aes_view();
+ 	} else
+ #endif
+ 	if (enc && playable) s.cfg.privacy(v, i, false, s.cfg.privacy_ctx);
+@@ -955,13 +967,14 @@
+     }
+ #if CONFIG_DV_AES
+ 	if (s.cfg.aes_slot && s.cfg.aes_slot <= 4)
+-		dmr_aes_header(b->payload, b->len, s.rx == RXC_NONE ? 0 : s.view.caller.dst, now);
++		dmr_aes_header(b->payload, b->len, s.rx == RXC_NONE ? 0 : s.view.caller.dst);
+ #endif
+ 	stats.rx_pi_headers++;
+ 	if (s.rx == RXC_NONE) {
+ 		s.pi_pending = true;
+ 		s.pi_pending_ms = now;
+ 		s.pi_pending_alg = b->payload[0];
++		s.pi_pending_fid = b->len >= 2 ? b->payload[1] : 0;
+ 		s.pi_pending_key = b->len >= 3 ? b->payload[2] : 0;
+ 		return;
+ 	}
+@@ -972,8 +985,12 @@
+ 		stats.rx_encrypted_calls++;
+ 	c->pi_header = true;
+ 	c->pi_alg = b->payload[0];
++	c->pi_fid = b->len >= 2 ? b->payload[1] : 0;
+ 	c->pi_key = b->len >= 3 ? b->payload[2] : 0;
+ 	c->encrypted = true;
++#if CONFIG_DV_AES
++	aes_view();
++#endif
+ 	s.dirty = true;
+ }
+ 
+@@ -1274,7 +1291,7 @@
+ 		memcpy(v, s.stage, DMR_VOICE_BYTES);
+ #if CONFIG_DV_AES
+ 		if (s.cfg.aes_slot) {
+-			if (!dmr_aes_voice(v, s.voice_index, true, now, 0)) { tx_deny(DMR_TX_ERR_REJECTED); return; }
++			if (!dmr_aes_voice(v, s.voice_index, true, 0, 0)) { tx_deny(DMR_TX_ERR_REJECTED); return; }
+ 		} else
+ #endif
+ 		if (s.cfg.privacy && (s.cfg.tx_svc & DMR_SVC_PRIVACY))
+--- a/core/dmr/call/dmr_call.h
++++ b/core/dmr/call/dmr_call.h
+@@ -136,8 +136,10 @@
+ 	bool late_entry;	// acquired from the embedded LC, no header heard
+ 	bool emergency;		// the emergency service option
+ 	bool pi_header;		// a PI header (data type 0) was heard for this call
+-	uint8_t pi_alg;		// its first two octets (algorithm and key ID in the DMRA layout; not interpreted)
++	uint8_t pi_alg;		// its algorithm, FID and key ID octets (the DMRA layout: octets 0, 1 and 2)
++	uint8_t pi_fid;
+ 	uint8_t pi_key;
++	uint8_t aes;		// CONFIG_DV_AES: what became of that header (dmr_aes.h DMR_AES_*), 0 none
+ 	char alias[DMR_TA_TEXT_MAX + 1];	// talker alias so far, "" if none
+ 	bool alias_complete;
+ 	bool gps_valid;		// a GPS Info LC was heard from this talker (CONFIG_DMR_GPS)
+--- a/core/radio/radio.h
++++ b/core/radio/radio.h
+@@ -129,6 +129,17 @@
+ 	RDMR_TX_PERMIT,		// PTT held, the channel ours: the talk permit plays before keying (CAP_BEEP_NOT_ON_AIR)
+ } radio_dmr_state_t;
+ 
++// What became of the PI header of an encrypted call on a channel with an AES key slot (radio_dmr_call_t.aes),
++// numbered as dmr_aes.h's DMR_AES_*
++typedef enum {
++	RDMR_AES_NONE,		// no PI header taken for the call
++	RDMR_AES_BAD,		// a PI header with a bad length or CRC, or no key ID or MI
++	RDMR_AES_FID,		// a PI header of another manufacturer than FID 0x10
++	RDMR_AES_ALGO,		// FID 0x10, but not AES-256
++	RDMR_AES_NOKEY,		// AES-256, but no key slot holds its key ID
++	RDMR_AES_OK		// decrypting
++} radio_dmr_aes_t;
++
+ typedef struct {
+ 	uint32_t src, dst;
+ 	bool group;		// group call, else private
+@@ -136,6 +147,9 @@
+ 	bool encrypted;		// privacy service option, PI or a PI header
+ 	bool emergency;		// the emergency service option
+ 	bool pi_header;		// a PI header was heard (an MI-based scheme: we can't decrypt it)
++	bool decrypted;		// the voice is being decrypted with an AES key
++	uint8_t aes;		// radio_dmr_aes_t
++	uint8_t pi_alg, pi_fid, pi_key;	// the PI header's algorithm, FID and key ID octets
+ 	char src_name[CODEPLUG_NAME_LEN + 1];	// codeplug contact, else the DMR ID database's text cut short, "" if unknown
+ 	char dst_name[CODEPLUG_NAME_LEN + 1];	// talkgroup name, "" if unknown
+ 	// The caller's position from an ETSI GPS Info LC (CONFIG_DMR_GPS, docs/spec/dmr-voice.md)
+--- a/core/radio/radio_sm.c
++++ b/core/radio/radio_sm.c
+@@ -1714,6 +1714,11 @@
+ 	out->encrypted = c->encrypted;
+ 	out->emergency = c->emergency;
+ 	out->pi_header = c->pi_header;
++	out->decrypted = c->decrypted;
++	out->aes = c->aes;
++	out->pi_alg = c->pi_alg;
++	out->pi_fid = c->pi_fid;
++	out->pi_key = c->pi_key;
+ 	find_name(sm, c->src, false, out->src_name);
+ 	find_name(sm, c->dst, c->group, out->dst_name);
+ 	out->gps_valid = false;
+--- a/core/ui/ui_screens.c
++++ b/core/ui/ui_screens.c
+@@ -433,6 +433,41 @@
+ 		break;
+ 	}
+ }
++
++#if CONFIG_DMR
++// Why an encrypted DMR call on a channel with an AES key slot is not decrypted: "KID 14: no key", "ALG 24 not
++// supported". False when there is nothing to add (it is being decrypted)
++static bool sb_dmr_aes(sbuf_t *b, const radio_dmr_call_t *c)
++{
++	switch (c->aes) {
++	case RDMR_AES_NONE:
++		sb_str(b, "AES: ");
++		sb_str(b, TR("no PI header"));
++		return true;
++	case RDMR_AES_BAD:
++		sb_str(b, "AES: ");
++		sb_str(b, TR("bad PI header"));
++		return true;
++	case RDMR_AES_FID:
++		sb_str(b, "FID ");
++		sb_hex8(b, c->pi_fid);
++		sb_str(b, TR(" not supported"));
++		return true;
++	case RDMR_AES_ALGO:
++		sb_str(b, "ALG ");
++		sb_hex8(b, c->pi_alg);
++		sb_str(b, TR(" not supported"));
++		return true;
++	case RDMR_AES_NOKEY:
++		sb_str(b, "KID ");
++		sb_u32(b, c->pi_key, 1);
++		sb_str(b, TR(": no key"));
++		return true;
++	default:
++		return false;
++	}
++}
++#endif
+ 
+ // Status strip (P2): state pill, mode, monitor, lock, unread messages, signal, battery.
+ // A titled screen (prefix and / or name) on a display under UI_TALL_PX high merges its title into the strip
+@@ -1682,6 +1717,9 @@
+ 	// Then why it isn't heard, or where the call goes ("TG 91 World")
+ 	const char *why = d->state == RDMR_RX_OTHER ? (d->call.encrypted ? TR("Encrypted: not played") :
+ 		TR("Other TG: not played")) : !d->codec ? TR("No codec: voice off") : NULL;
++	sb_init(&b, buf, sizeof buf);
++	if (why == NULL && v->ch.aes_slot && d->call.encrypted && !d->call.decrypted && sb_dmr_aes(&b, &d->call))
++		why = buf;	// an encrypted call the channel's AES key does not undo, and the reason
+ 	if (why != NULL) {
+ 		y = call_line(L->small, y, why, ui_col.warn);
+ 	} else {
+--- a/core/ui/lang/es.po
++++ b/core/ui/lang/es.po
+@@ -3249,6 +3249,14 @@
+ msgstr "LC no válido"
+ 
+ #: core/ui/ui_screens.c
++msgid "no PI header"
++msgstr "sin cabecera PI"
++
++#: core/ui/ui_screens.c
++msgid "bad PI header"
++msgstr "cabecera PI mala"
++
++#: core/ui/ui_screens.c
+ msgid "IDLE"
+ msgstr "LIBRE"
+ 
+--- a/core/ui/lang/it.po
++++ b/core/ui/lang/it.po
+@@ -3249,6 +3249,14 @@
+ msgstr "LC non valido"
+ 
+ #: core/ui/ui_screens.c
++msgid "no PI header"
++msgstr "header PI assente"
++
++#: core/ui/ui_screens.c
++msgid "bad PI header"
++msgstr "header PI errato"
++
++#: core/ui/ui_screens.c
+ msgid "IDLE"
+ msgstr "IDLE"
+ 
+--- a/tests/host/sim/ui_sim.c
++++ b/tests/host/sim/ui_sim.c
+@@ -2524,6 +2524,30 @@
+ 		}
+ 		return true;
+ 	}
++	if (strcmp(t, "aes") == 0 && arg != NULL) {
++		// The DMR call heard is encrypted on a channel with an AES key slot, and what became of its PI header: none
++		// (no header came), bad, fid (another manufacturer), algo (not AES-256), nokey (no slot holds the key ID), ok
++		static const struct { const char *name; uint8_t aes, alg, fid; bool decrypted; } st[] = {
++			{ "none", RDMR_AES_NONE, 0, 0, false }, { "bad", RDMR_AES_BAD, 0, 0, false },
++			{ "fid", RDMR_AES_FID, 0x25, 0x68, false }, { "algo", RDMR_AES_ALGO, 0x24, 0x10, false },
++			{ "nokey", RDMR_AES_NOKEY, 0x25, 0x10, false }, { "ok", RDMR_AES_OK, 0x25, 0x10, true },
++		};
++		for (size_t i = 0; i < sizeof st / sizeof st[0]; i++) {
++			if (strcmp(arg, st[i].name) != 0)
++				continue;
++			view.ch.aes_slot = 1;
++			view.dmr.call.encrypted = true;
++			view.dmr.call.aes = st[i].aes;
++			view.dmr.call.pi_alg = st[i].alg;
++			view.dmr.call.pi_fid = st[i].fid;
++			view.dmr.call.pi_key = 14;
++			view.dmr.call.pi_header = st[i].aes != RDMR_AES_NONE;
++			view.dmr.call.decrypted = st[i].decrypted;
++		}
++		changed();
++		advance(200);
++		return true;
++	}
+ 	if (strcmp(t, "receivers") == 0 && arg != NULL) {
+ 		sim_receivers = (uint8_t)atoi(arg);
+ 		return true;
+--- a/tests/host/uiSim.c
++++ b/tests/host/uiSim.c
+@@ -38,6 +38,11 @@
+ 	{ "home_dmr", "" },
+ 	{ "home_dmr_lastheard", "call:3101234,91,g wait:11000" },
+ 	{ "home_reply", "call:3101234,91,g" },
++	{ "rx_dmr_aes_nopi", "rx:3101234,91,g aes:none" },	// an encrypted call on a channel with a key: why it is not decrypted
++	{ "rx_dmr_aes_nokey", "rx:3101234,91,g aes:nokey" },
++	{ "rx_dmr_aes_algo", "rx:3101234,91,g aes:algo" },
++	{ "rx_dmr_aes_fid", "rx:3101234,91,g aes:fid" },
++	{ "rx_dmr_aes", "rx:3101234,91,g aes:ok" },
+ 	{ "home_fm", "down" },
+ 	{ "home_p25", "p25:idle" },
+ 	{ "rx_p25", "p25:rx" },
+--- a/tests/host/sim/dmr_sim_modem.c
++++ b/tests/host/sim/dmr_sim_modem.c
+@@ -117,6 +117,11 @@
+ 	emit(DMR_EV_BURST_RX, b->ts, 0, b);
+ }
+ 
++void sim_rx_slot(const dmr_burst_t *b, uint32_t slot)
++{
++	emit(DMR_EV_BURST_RX, b->ts, slot, b);
++}
++
+ void sim_event(uint8_t kind, int8_t ts)
+ {
+ 	emit(kind, ts, 0, NULL);
+--- a/tests/host/sim/dmr_sim_modem.h
++++ b/tests/host/sim/dmr_sim_modem.h
+@@ -77,6 +77,8 @@
+ void sim_slot(void);
+ // Deliver a received burst to the stack
+ void sim_rx(const dmr_burst_t *b);
++// The same, with the modem's slot counter the burst was heard at (30 ms ticks; sim_rx reports none)
++void sim_rx_slot(const dmr_burst_t *b, uint32_t slot);
+ void sim_event(uint8_t kind, int8_t ts);
+ 
+ #endif

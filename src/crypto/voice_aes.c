@@ -91,6 +91,17 @@ void voice_aes_dmr_start(voice_aes *s, const uint8_t key[32], uint32_t mi)
     dmr_generate(s);
 }
 
+bool voice_aes_dmr_advance(voice_aes *s, unsigned superframes)
+{
+    if (!s->ready) return false;
+    if (!superframes) return true;
+    if (superframes >= VOICE_AES_RESERVE || s->superframes + superframes >= VOICE_AES_RESERVE) { s->ready = 0; return false; }
+    for (unsigned i = 0; i < superframes; i++) s->dmr_mi = voice_aes_dmr_step(s->dmr_mi);
+    s->superframes = (uint16_t)(s->superframes + superframes);
+    dmr_generate(s);
+    return true;
+}
+
 bool voice_aes_dmr_burst(voice_aes *s, unsigned index, uint8_t bits[3][49])
 {
     if (!s->ready || index >= 6) return false;

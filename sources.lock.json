@@ -105,6 +105,21 @@
       "git_archive_sha256": "50e34fb54444aca2667805af77c69fbd422e307dbebeb968323ae9b112e2f51d",
       "license_files": [],
       "license_note": "No root license file found; inspect per-file notices / docs/licenses.md"
+    },
+    {
+      "path": "research/protocol/dmrgo",
+      "url": "https://github.com/USA-RedDragon/dmrgo.git",
+      "commit": "159db91a5088738c9aaf88c402fa7ecc82e10281",
+      "commit_date": "2026-11-12T20:19:12+00:00",
+      "tree": "35d132e662136b021c707e3b826913d897b5b952",
+      "git_archive_sha256": "85dbc93ec625df1d08cc21db7c6a5885f8f7d7936d1e391f5183c173246f6238",
+      "license_files": [
+        "LICENSE",
+        "docs/project/license.md",
+        "gr-dmrgo/LICENSE",
+        "v2/vocoder/codec2/wasm/LICENSE"
+      ],
+      "license_note": "See original license files and docs/licenses.md"
     }
   ],
   "files": [

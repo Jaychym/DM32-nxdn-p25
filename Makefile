@@ -15,6 +15,7 @@ host-test:
 
 protocol-test:
 	python3 tests/protocol/test_p25.py
+	python3 tests/protocol/test_dmr_aes.py
 	sh tests/protocol/run_sanitizers.sh
 
 codec-test:

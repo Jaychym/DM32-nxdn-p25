@@ -1,17 +1,20 @@
 # Resources of the multi-mode image
 
-## November 17, 2026: P25 AES receive and what the screen says (patch 0047)
+## November 17, 2026: AES receive and what the screen says (patches 0047 and 0048)
 
 The release configuration (`--speed-codec --stack-check --lean --trunk-tx`), built with the script before and after:
 
 | Build | Image | RAM | Free RAM |
 |---|---:|---:|---:|
 | Series through `0046` | 557,044 | 207,648 | 3,808 |
-| With `0047` and the receive changes | 558,020 | 207,688 | 3,768 |
+| With `0047` and the P25 receive changes | 558,020 | 207,688 | 3,768 |
+| With `0048` (DMR AES receive) | 558,620 | 207,760 | 3,696 |
 
-976 bytes of flash and 40 bytes of RAM: the call state the voice layer keeps (seven bytes, rounded up), the radio core's
-view of it, the screen text and its translations. Zero compiler warnings; the static stack check passes with the same
-margins (least free: idle task, 136 bytes; UI task 248, P25 worker 3,884). Not run on a radio.
+`0047` costs 976 bytes of flash and 40 of RAM: the call state the P25 voice layer keeps (seven bytes, rounded up), the radio
+core's view of it, the screen text and its translations. `0048` costs 600 bytes of flash and 72 of RAM: the DMR caller's
+view of the PI header (FID, state), the burst-loss bookkeeping of the AES stream and the DMR reason line. Zero compiler
+warnings, with AES on and off; the static stack check passes with the same margins (least free: idle task 136 bytes; UI task
+248, P25 worker 3,884). Not run on a radio.
 
 ## November 17, 2026: no diagnostics page in the image
 

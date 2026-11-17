@@ -105,7 +105,9 @@ with GNU assembler/objdump. It never opens a serial port.
 ## Tests
 
 `make test` runs the host image/backup/probe guards, independent OP25 CAI
-comparisons, sanitizer fuzz tests, IMBE against mbelib/OP25 vectors, a complete
+comparisons (frames, and the AES-256 keystream against OP25's own code), the DMR
+AES-256 keystream against dmrgo's public capture (`tests/protocol/test_dmr_aes.py`;
+both need the pinned sources, `python3 tools/sources.py fetch`), sanitizer fuzz tests, IMBE against mbelib/OP25 vectors, a complete
 synthetic PCM/CAI pipeline, modem permutation/continuity analysis and the small
 freestanding runtime against host libc. It requires no radio or purchased
 equipment. Deterministic synthetic audio is the portable primary regression

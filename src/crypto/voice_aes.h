@@ -22,4 +22,7 @@ void voice_aes_p25_frame(voice_aes *s, unsigned frame, uint16_t u[8]);
 void voice_aes_dmr_start(voice_aes *s, const uint8_t key[32], uint32_t mi);
 /* A-F burst position; missing bursts are skipped, a whole lost superframe must reset the stream. */
 bool voice_aes_dmr_burst(voice_aes *s, unsigned index, uint8_t bits[3][49]);
+/* Whole superframes passed without a burst (a fade): the MI steps once for each, so the keystream is the one that many
+ * superframes on. The burst position is kept. False when the stream is not ready or the superframe budget is spent. */
+bool voice_aes_dmr_advance(voice_aes *s, unsigned superframes);
 #endif

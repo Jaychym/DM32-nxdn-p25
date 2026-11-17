@@ -86,6 +86,18 @@ int main(void)
         memset(bits,0,sizeof bits);assert(voice_aes_dmr_burst(&s,index,bits));assert(!memcmp(bits,retry,sizeof bits));
         assert(voice_aes_dmr_burst(&rx,index,bits)); assert(!memcmp(bits,plain,sizeof bits));
     }
+    {   /* Superframes that went by without a burst (a fade): advance() lands on the keystream of the superframe that many on */
+        voice_aes a,b;uint8_t t[3][49],want[3][49];
+        voice_aes_dmr_start(&a,key,0x12345678);voice_aes_dmr_start(&b,key,0x12345678);
+        for(unsigned sf=0;sf<4;sf++)for(unsigned burst=0;burst<6;burst++){
+            memset(t,0,sizeof t);assert(voice_aes_dmr_burst(&a,burst,t));
+            if(sf==3&&burst==2)memcpy(want,t,sizeof want);
+        }
+        memset(t,0,sizeof t);assert(voice_aes_dmr_burst(&b,2,t));
+        assert(voice_aes_dmr_advance(&b,0)&&voice_aes_dmr_advance(&b,3));
+        memset(t,0,sizeof t);assert(voice_aes_dmr_burst(&b,2,t));assert(!memcmp(t,want,sizeof want));
+        assert(!voice_aes_dmr_advance(&b,VOICE_AES_RESERVE)&&!voice_aes_dmr_burst(&b,3,t)); // past the budget the stream stops
+    }
     voice_aes_wipe(&s,sizeof s);assert(!voice_aes_dmr_burst(&s,0,bits));
     puts("PASS AES-256 primitive, P25 MI/OFB vectors, encrypted CAI/FEC, DMR superframes and retries");
     return 0;
