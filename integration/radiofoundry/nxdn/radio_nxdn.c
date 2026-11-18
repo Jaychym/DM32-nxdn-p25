@@ -182,7 +182,10 @@ bool radio_nxdn_ptt(bool down)
     }
     const dmr_voice_source_t *src = ambeVoiceSource();
     if (src->begin) src->begin(src->ctx);
-    nxdn_tx_cfg t = { (uint8_t)(cfg.nac_tx & 63u), (uint16_t)cfg.unit_id, cfg.talkgroup, false, false, NXDN_DIR_INBOUND };
+    /* A conventional channel without a talkgroup transmits the all-call destination (0xffff):
+     * the layer-3 admission rule passes a destination of 0 nowhere else, and Kenwood and
+     * Icom radios ignore the call (issues #21, #23). RAN still gates who receives. */
+    nxdn_tx_cfg t = { (uint8_t)(cfg.nac_tx & 63u), (uint16_t)cfg.unit_id, cfg.talkgroup ? cfg.talkgroup : NXDN_GROUP_ALL, false, false, NXDN_DIR_INBOUND };
     nxdn_link_tx_begin(&link, &t);
     nxdn_link_tx_fill(&link, next_slot, NULL);
     ptt_up = tx_draining = false;

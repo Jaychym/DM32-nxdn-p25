@@ -356,6 +356,28 @@ int main(int argc, char **argv)
     assert(radio_nxdn_select(NULL));
     assert(hw.pull == NULL && !hw.transmitting && !hw.flat && hw.stops == stops + 1);
 
+    /* A conventional channel with no talkgroup transmits the all-call destination 0xffff:
+     * commercial radios ignore a destination of 0 (issues #21, #23). */
+    {
+        radio_dv_cfg_t c0 = channel();
+        c0.talkgroup = 0;
+        assert(radio_nxdn_select(&c0));
+        step_ms(50);
+        n_enc = 0;
+        tx_have = 0;
+        assert(radio_nxdn_ptt(true));
+        step_ms(300);
+        assert(radio_nxdn_ptt(false));
+        for (unsigned guard = 0; hw.tx_off_calls == 1 && guard < 1000; guard++) step_ms(10);
+        assert(hw.tx_off_calls == 2);
+        static nxdn_link rx_all;
+        n_heard_slots = 0;
+        nxdn_link_init(&rx_all, &flat, 12, 0, 0, collect, NULL);
+        nxdn_link_rx_audio(&rx_all, tx_air, tx_have);
+        fprintf(stderr, "tx no talkgroup: calls %u destination %u\n", rx_all.rx.calls, rx_all.rx.msg.destination);
+        assert(rx_all.rx.calls == 1 && rx_all.rx.msg.destination == NXDN_GROUP_ALL);
+    }
+
     printf("PASS NXDN radio channel: receive to the vocoder in order (either polarity), the bench capture, PTT keys FM with the flat path, the mic's frames "
            "on air in order, release then carrier off then receive, board refusal, leaving while on air\n");
     return 0;
