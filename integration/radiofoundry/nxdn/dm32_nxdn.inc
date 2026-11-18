@@ -143,9 +143,13 @@ const hal_audio_tap_t dm32_audio_tap = {
 	.fm_tx_nominal_peak = FLAT_TX_NOMINAL_PEAK,
 	.fm_rx_flat = flat_rx,
 	.fm_rx_read = hrc_fm_rx_read,
-	/* the receive and transmit shape of the flat paths: not measured yet (docs/nxdn-modem.md) */
+	/* the receive shape of the flat path: not measured yet (docs/nxdn-modem.md).
+	 * TX: 40 Hz is inferred, not directly measured -- a first-order high-pass of
+	 * 30-50 Hz reproduces the service-monitor NXDN numbers (issue #4: FSK error
+	 * 19.3%, symbol deviation 993 Hz) in simulation; confirm the corner by a
+	 * TX RAM tone response / a re-measurement on the monitor. */
 	.flat_rx_hpf_hz = 0,
-	.flat_tx_hpf_hz = 0,
+	.flat_tx_hpf_hz = 40,
 	/* 0: 0x2B = 0x0700 bypasses the de-emphasis. The radio tests of 750 and of the AF gain ran with 0x2B = 0xE000 (filters
 	 * on) and before the sync heard an inverted stream: they don't tell. Set from work/rx_ram_capture.py's tone response */
 	.flat_rx_deemph_us = 0,
