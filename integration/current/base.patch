@@ -2942,6 +2942,21 @@ index c2bdadb7..cb2caa04 100644
  #if CONFIG_P25_TRUNK
  	bool trunk;		// trunking signaling is received too (a control channel, or a voice channel it granted)
  #endif
+diff --git a/core/p25/p25_follow.c b/core/p25/p25_follow.c
+index b0610e9..e955881 100644
+--- a/core/p25/p25_follow.c
++++ b/core/p25/p25_follow.c
+@@ -220,8 +220,8 @@ static void accept(p25_follow_t *f, uint16_t nac, uint32_t now)
+ 		f->view.reg = P25_REG_IDLE;	// this one may have an inbound frequency
+ }
+ 
+-static bool any_wacn(const p25_follow_cfg_t *c) { return c->wacn > 0xFFFFFu; }
+-static bool any_sysid(const p25_follow_cfg_t *c) { return c->sysid > 0xFFFu; }
++static bool any_wacn(const p25_follow_cfg_t *c) { return c->wacn == 0 || c->wacn > 0xFFFFFu; } // 0 hears any
++static bool any_sysid(const p25_follow_cfg_t *c) { return c->sysid == 0 || c->sysid > 0xFFFu; } // 0 hears any
+ 
+ // ── Following ──
+ static bool group_wanted(const p25_follow_t *f, uint16_t tg, uint32_t now)
 diff --git a/core/radio/beep.c b/core/radio/beep.c
 index 350f4119..83a5384c 100644
 --- a/core/radio/beep.c
@@ -4915,6 +4930,19 @@ index d84363e9..687660ed 100644
  ## 8. Tests
  
  | Test | Covers |
+diff --git a/docs/spec/p25-trunking.md b/docs/spec/p25-trunking.md
+index 9e20f66..810165d 100644
+--- a/docs/spec/p25-trunking.md
++++ b/docs/spec/p25-trunking.md
+@@ -248,7 +248,7 @@ caller refused, and waits on a busy inbound channel.
+ 
+ | Follower | Codeplug (`p25_trunk_cfg_t`) |
+ |---|---|
+-| `wacn`, `sysid`, `nac` | `sys.wacn`, `sys.sysid`, `sys.cc_nac` (their "any" values are any here too) |
++| `wacn`, `sysid`, `nac` | `sys.wacn`, `sys.sysid`, `sys.cc_nac` (their "any" values are any here too, and so is 0) |
+ | `flags`: `SKIP_ENC`, `PLAN_ONLY`, `ALL_GROUPS`, `NO_REG` | `sys.options` (bits 0, 1, 2), `follow_all` |
+ | `flags`: `TX` | the tag allows transmit, not `listen_only`, `unit_id` and `talk_group` set |
+ | `unit_id`, `talk_group` | `unit_id` (the P25 settings' `unit_id` first, as on a conventional channel), `talk_group` |
 diff --git a/docs/spec/radio-features.md b/docs/spec/radio-features.md
 index f5de0335..f83df998 100644
 --- a/docs/spec/radio-features.md
@@ -7050,6 +7078,98 @@ index 0466ad21..f633d6ba 100644
  	printf("p25EngineTest: %d checks, %d failed\n", checks, failures);
  	return failures ? 1 : 0;
  }
+diff --git a/tests/host/p25TrunkTest.c b/tests/host/p25TrunkTest.c
+index 0f05221..b88c396 100644
+--- a/tests/host/p25TrunkTest.c
++++ b/tests/host/p25TrunkTest.c
+@@ -827,6 +827,79 @@ static void testAccessEarlyAnswers(void)
+ 	p25_follow_end(&f);
+ }
+ 
++// Zero is "any" for WACN and System ID (docs/user-guide.md: "0 hears any (receive only)"): a system with a real
++// identity is held, and zero in one field does not make the other one any
++static void testFollowZeroAny(void)
++{
++	static const p25_follow_cc_t cc[] = { { .hz = HZ_CC1, .site = 3 } };
++	static p25_follow_t f;
++	p25_follow_cfg_t cfg = { .wacn = 0, .sysid = 0, .nac = NAC, .flags = P25_FOLLOW_SKIP_ENC, .unit_id = OUR_UNIT,
++				 .talk_group = 100, .ncc = 1, .cc = cc, .fallback_ms = 5000 };
++	uint8_t b[P25_TSBK_BYTES];
++	p25_follow_view_t v;
++
++	// Both zero: the real system is held
++	ntunes = nfallback = 0;
++	now_ms = 1000;
++	p25_follow_begin(&f, &cfg, &fhooks, NULL, now_ms);
++	retune(&f);
++	mk_net(b, WACN, SYSID);
++	p25_follow_tsbk(&f, b, NAC, now_ms);
++	v = view(&f);
++	CHECK(v.state == P25_FOLLOW_CONTROL && v.wacn == WACN && v.sysid == SYSID, "zero WACN and system: held");
++	p25_follow_end(&f);
++
++	// Only the system ID zero: the WACN still decides
++	cfg.wacn = WACN;
++	cfg.sysid = 0;
++	ntunes = 0;
++	now_ms = 1000;
++	p25_follow_begin(&f, &cfg, &fhooks, NULL, now_ms);
++	retune(&f);
++	mk_net(b, WACN, SYSID);
++	p25_follow_tsbk(&f, b, NAC, now_ms);
++	v = view(&f);
++	CHECK(v.state == P25_FOLLOW_CONTROL && v.wacn == WACN && v.sysid == SYSID, "zero system: held");
++	p25_follow_end(&f);
++
++	// Only the WACN zero: RFSS status settles the candidate (it names the system, not the WACN)
++	cfg.wacn = 0;
++	cfg.sysid = SYSID;
++	ntunes = 0;
++	now_ms = 1000;
++	p25_follow_begin(&f, &cfg, &fhooks, NULL, now_ms);
++	retune(&f);
++	mk_rfss(b, P25_TSBK_RFSS, SYSID, 3, 0x1004);
++	p25_follow_tsbk(&f, b, NAC, now_ms);
++	v = view(&f);
++	CHECK(v.state == P25_FOLLOW_CONTROL && v.sysid == SYSID, "zero WACN: RFSS holds");
++	p25_follow_end(&f);
++
++	// Zero in one field does not make the other any: a wrong system is still refused
++	cfg.wacn = 0;
++	cfg.sysid = SYSID;
++	ntunes = 0;
++	now_ms = 1000;
++	p25_follow_begin(&f, &cfg, &fhooks, NULL, now_ms);
++	retune(&f);
++	mk_net(b, WACN, 0x111);
++	p25_follow_tsbk(&f, b, NAC, now_ms);
++	v = view(&f);
++	CHECK(v.state == P25_FOLLOW_HUNT && v.wrong_sys == 1, "zero WACN, wrong system: refused");
++	p25_follow_end(&f);
++	cfg.wacn = 0x12345;
++	cfg.sysid = 0;
++	ntunes = 0;
++	now_ms = 1000;
++	p25_follow_begin(&f, &cfg, &fhooks, NULL, now_ms);
++	retune(&f);
++	mk_net(b, WACN, SYSID);
++	p25_follow_tsbk(&f, b, NAC, now_ms);
++	v = view(&f);
++	CHECK(v.state == P25_FOLLOW_HUNT && v.wrong_sys == 1, "zero system, wrong WACN: refused");
++	p25_follow_end(&f);
++}
++
+ static void testAccess(void)
+ {
+ 	static const p25_follow_cc_t cc[] = { { .hz = HZ_CC1, .chan = 0x1004, .site = 3 } };
+@@ -1761,6 +1834,7 @@ int main(void)
+ 	testBlocks();
+ 	testChannels();
+ 	testFollowHand();
++	testFollowZeroAny();
+ 	testFollowOptions();
+ 	testAccess();
+ 	testAccessEarlyAnswers();
 diff --git a/tests/host/radioCoreTest.c b/tests/host/radioCoreTest.c
 index 931f5a51..616cfb02 100644
 --- a/tests/host/radioCoreTest.c
