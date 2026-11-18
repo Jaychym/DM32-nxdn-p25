@@ -4725,7 +4725,7 @@ index 57df2c48..ba01d148 100644
  The base record carries:
  
 diff --git a/docs/spec/nxdn.md b/docs/spec/nxdn.md
-index be1bbe0c..7ce0bc82 100644
+index be1bbe0c..848420a6 100644
 --- a/docs/spec/nxdn.md
 +++ b/docs/spec/nxdn.md
 @@ -1,5 +1,6 @@
@@ -4749,6 +4749,14 @@ index be1bbe0c..7ce0bc82 100644
  ## 7. The engine (`core/nxdn/nxdn_engine.c`)
  
  `nxdn_engine` is NXDN on a channel: the call layer on an air interface session, as `p25_engine` is P25's
+@@ -292,6 +300,7 @@ scrambler examples), so the codec checks against itself and the clauses only.
+ | A short sync | one wrong symbol in a header's FSW makes the framer miss the header (10 symbols, the fit's limit); the call is joined late at the next superframe | 5.3.1.2 |
+ | Unit ID range | 1 to 65519 (the top IDs are special) | TS 1-B |
+ | A board's transmit pulse | the provider's shaping at the profile's symbol rate and deviation, as its fit reports (`AIR_FIT_SHAPE_APPROX`, `AIR_FIT_DEV_APPROX`); whether a receiver of another make takes it is untested | 3.4, 3.5 |
++| NXDN4800 TX FSK error (KN4SWB service monitor, 441.1125 MHz: 19.3%, 993 Hz against 1050 Hz nominal) | not an audio high-pass, so no pre-compensation applies: this build sends NXDN through the chip's native 4FSK slot engine (each symbol twice, the chip's DMR RRC 0.2 pulse at 4800 symbols/s — `AIR_FIT_RATE_DOUBLED`, `AIR_FIT_SHAPE_APPROX`), and the TX RAM holds packed 2-bit symbols, not audio, so there is no audio path carrying a high-pass to invert. The legacy 40 Hz fix (`d30230a`, `flat_tx_hpf_hz` in the old software modem's audio tap) has no equivalent here and must not be re-applied as a gain or deviation change. The native route's known error floor is ISI from the doubled-symbol DMR pulse (docs/nxdn-modem.md: 0.3% BER at 30 dB, adjacent-channel power 10 dB up). Deviation here is a single linear scale (`hrc7000_air_mod_bias`, 1050/1820); the bench measured 1012 Hz at 4800 bit/s. Only a service-monitor re-measurement can confirm any improvement to the pulse | 3.4, 3.5 |
+ | Voice on air | the VCH bit order is settled against 7.2.1 (5); a call heard by a radio of another make is untested | 7.2 |
+ 
+ ## 10. Not written
 diff --git a/docs/spec/p25-codeplug.md b/docs/spec/p25-codeplug.md
 index a913e7d9..985877b4 100644
 --- a/docs/spec/p25-codeplug.md
