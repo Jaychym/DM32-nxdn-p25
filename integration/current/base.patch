@@ -9157,3 +9157,445 @@ index bc2eaa7..83cf9ef 100644
  	printf("# ambeVoiceTest: %d checks, %s\n", checks, failures ? "FAILED" : "PASSED");
  	return failures ? 1 : 0;
  }
+diff --git a/boards/dm32/radio_dm32.c b/boards/dm32/radio_dm32.c
+index 66c4565..e377d54 100644
+--- a/boards/dm32/radio_dm32.c
++++ b/boards/dm32/radio_dm32.c
+@@ -797,15 +797,17 @@ void dm32_radio_diag(dm32_radio_diag_t *d)
+ 	d->rf_setup = rf_unlocked ? '-' : rf_b ? 'B' : 'A';
+ }
+ 
+-// Receiver battery saving (FM receive only, the radio's own sequence: hardware-dm32.md 8.8): FD6818 idle with its
+-// low-power 0x37 word and the LNA supply off; waking retunes with rx(). The HR_C7000 keeps its clocks
++// Receiver battery saving and soft off (the radio's own sequence: hardware-dm32.md 8.8): FD6818 idle with its
++// low-power 0x37 word and the LNA supply off; waking retunes with rx(). The HR_C7000 keeps its clocks. FM and DMR
++// alike: the chip driver has a sleep word for each (fd6818_rx_sleep), and the core restarts the modem's receive on
++// wake (radio_sm.c standby_set, as the trunked power save does)
+ static void rx_sleep(bool sleep)
+ {
+-	if (mode != RADIO_MODE_FM || transmitting || !have_rx || sleep == asleep) {
++	if ((mode != RADIO_MODE_FM && mode != RADIO_MODE_DMR) || transmitting || !have_rx || sleep == asleep) {
+ 		return;
+ 	}
+ 	if (sleep) {
+-		fd6818_rx_sleep(&fd, true, FD6818_MODE_FM);
++		fd6818_rx_sleep(&fd, true, mode == RADIO_MODE_DMR ? FD6818_MODE_DMR : FD6818_MODE_FM);
+ 		lna(rx_hz, false);
+ 		asleep = true;
+ 	} else {
+@@ -842,6 +844,7 @@ const hal_radio_t dm32_radio = {
+ #if CONFIG_DTMF
+ 	.tx_dtmf = tx_dtmf,
+ #endif
++	.rx_sleep_dmr = true,	// rx_sleep works on a DMR channel too (soft off, trunked power save)
+ 	.rx_sleep = rx_sleep,
+ #if CONFIG_AM_RX
+ 	.rx_am = rx_am,
+diff --git a/core/radio/radio.h b/core/radio/radio.h
+index 8f573ea..b2e4eed 100644
+--- a/core/radio/radio.h
++++ b/core/radio/radio.h
+@@ -700,6 +700,9 @@ void radio_req_power_off(void);
+ bool radio_power_off_busy(void);
+ // The radio is still running after a power off (the knob holds the supply): back to normal operation
+ void radio_req_power_off_cancel(void);
++// Soft off: the receiver asleep, the speaker quiet, no transmission. Auto power off uses it when the latch drop
++// couldn't switch the radio off (the knob holds the supply); any key wakes it again
++void radio_req_standby(bool on);
+ // The backlight percent for the UI: batt_backlight_pct with the settings and the current battery level
+ uint8_t radio_backlight_pct(uint8_t brightness, uint32_t idle_ms);
+ // The radio does something the user would want to see, so the backlight comes on: a transmission they keyed, a
+diff --git a/core/radio/radio_sm.c b/core/radio/radio_sm.c
+index 3876e1c..7374d4e 100644
+--- a/core/radio/radio_sm.c
++++ b/core/radio/radio_sm.c
+@@ -7548,6 +7548,34 @@ static bool retunes(uint8_t type)
+ 	}
+ }
+ 
++// Soft off (radio_req_standby): auto power off couldn't cut the supply, so the radio goes quiet instead of
++// nagging every period — the receiver asleep, the speaker off, no transmission. The GPS module is the UI's (it
++// switches it off on entry, back on wake). Waking tunes back and restarts the modem's receive, as the trunked
++// power save does (t3_rx_sleep)
++static void standby_set(radio_sm_t *sm, bool on)
++{
++	if (on == sm->standby)
++		return;
++	sm->standby = on;
++	if (on) {
++		if (board.radio->rx_sleep != NULL)
++			board.radio->rx_sleep(true);
++		if (board.radio->audio != NULL)
++			board.radio->audio(false);
++		sm->view.rx_sleeping = true;
++		changed(sm);
++		return;
++	}
++	if (board.radio->rx_sleep != NULL)
++		board.radio->rx_sleep(false);
++#if CONFIG_DMR
++	if (sm->dmr_running && board.dmr != NULL)
++		board.dmr->rx_restart();
++#endif
++	sm->view.rx_sleeping = false;
++	changed(sm);
++}
++
+ void radio_sm_request(radio_sm_t *sm, const radio_req_t *req, uint32_t now_ms)
+ {
+ 	sm->led_now = now_ms;
+@@ -7698,6 +7726,8 @@ void radio_sm_request(radio_sm_t *sm, const radio_req_t *req, uint32_t now_ms)
+ 		break;
+ #endif
+ 	case RREQ_PTT:
++		if (sm->standby && req->arg != 0)
++			break;	// soft off: no transmission until the UI wakes it (a PTT release still goes through)
+ #if CONFIG_FM_TX_TONES
+ 		if (sm->burst_keyed) {
+ 			sm->burst_keyed = req->arg == 0;	// PTT pressed during a burst takes the transmission over
+@@ -7742,6 +7772,8 @@ void radio_sm_request(radio_sm_t *sm, const radio_req_t *req, uint32_t now_ms)
+ 		}
+ 		break;
+ 	case RREQ_MONITOR:
++		if (sm->standby)
++			break;	// soft off: a monitor press that wakes the radio must not toggle digital monitor too
+ #if CONFIG_SCAN && CONFIG_DUAL_WATCH
+ 		// Before the DMR test: the receiver may be on the other channel, of the other mode
+ 		if (req->arg == 1 && dual_running(sm)) {
+@@ -7992,6 +8024,8 @@ void radio_sm_request(radio_sm_t *sm, const radio_req_t *req, uint32_t now_ms)
+ 	}
+ #endif
+ 	case RREQ_HS_ENTER:
++		if (sm->standby)
++			standby_set(sm, false);	// the host starts hotspot mode: wake first, the receiver has to work
+ 		hotspot_enter(sm, (uint32_t)req->arg, now_ms);
+ 		break;
+ 	case RREQ_HS_FREQ:
+@@ -8050,6 +8084,9 @@ void radio_sm_request(radio_sm_t *sm, const radio_req_t *req, uint32_t now_ms)
+ 		sm->power_off_req = true;
+ 		sm->power_off_busy = CONFIG_DMR_DATA_CORE;	// data_tick clears it once the deregistration is out
+ 		break;
++	case RREQ_STANDBY:
++		standby_set(sm, req->arg != 0);
++		break;
+ 	case RREQ_RELOAD:
+ #if CONFIG_POSITION
+ 		settings_read(&st_copy);	// the task's scratch copy: a settings_t is too big for this frame
+@@ -8500,7 +8537,7 @@ void radio_sm_poll(radio_sm_t *sm, uint32_t now_ms)
+ 	}
+ 	// codeplug_serial() before zone_edit_busy(): a zone write that moved indexes has its log entry by then
+ 	if ((sm->reload_pending || codeplug_serial() != sm->codeplug_serial || ZONES_MOVED(sm)) && !ZONE_WRITE_BUSY() &&
+-	    !sm->hotspot && !BENCH_HELD(sm) && !sm->ptt && sm->view.state != RS_TX) {
++	    !sm->hotspot && !BENCH_HELD(sm) && !sm->ptt && sm->view.state != RS_TX && !sm->standby) {
+ 		reload(sm, now_ms);
+ 		persist(sm, now_ms);
+ 	}
+@@ -8524,6 +8561,12 @@ void radio_sm_poll(radio_sm_t *sm, uint32_t now_ms)
+ #if CONFIG_NET_USRP
+ 	host_audio_watch(sm, now_ms);
+ #endif
++	// Soft off: the receiver is asleep and nothing may transmit (an APRS beacon included). Battery monitoring and
++	// the beeps above already ran; the rest of the poll (squelch, scan, time-out) has nothing to do while asleep
++	if (sm->standby) {
++		outputs(sm);
++		return;
++	}
+ #if CONFIG_APRS
+ 	aprs_poll(sm, now_ms);	// before battery saving: beacons are due while the receiver sleeps too
+ #endif
+diff --git a/core/radio/radio_sm.h b/core/radio/radio_sm.h
+index 1d0a6d5..9f43303 100644
+--- a/core/radio/radio_sm.h
++++ b/core/radio/radio_sm.h
+@@ -181,6 +181,7 @@ typedef enum {
+ 	RREQ_AIR_BENCH,		// the air interface bench (CONFIG_AIR_RAW): arg 1 take the modem, 0 give it back
+ 	RREQ_AIR_TX,		// ... arg 1 key (arg2: the longest time in ms), 0 unkey
+ 	RREQ_NXDN_SET,		// radio_task.c: the pending NXDN settings were copied (radio_nxdn_set_settings); applied here
++	RREQ_STANDBY,		// soft off: arg 1 receiver asleep, speaker quiet, no transmission; 0 awake again
+ } radio_req_type_t;
+ 
+ // RREQ_TONE's argument: which (RADIO_TONE_*) in bits 25:24, the tone type in 23:16, the value in 15:0
+@@ -396,6 +397,7 @@ typedef struct {
+ 	bool reload_pending;		// RREQ_RELOAD came while busy
+ 	bool power_off_req;		// RREQ_POWER_OFF seen
+ 	bool power_off_busy;		// still sending what has to go out before the supply drops
++	bool standby;		// soft off (RREQ_STANDBY): the receiver is asleep, no transmission until woken
+ #if CONFIG_DMR
+ 	uint8_t dmr_wake_admits;	// the stack's wake_admits at the last tick (the permit tone for a short press)
+ 	uint8_t dmr_permit_seq;		// the stack's permit_seq at the last tick (the permit tone before keying)
+diff --git a/core/radio/radio_task.c b/core/radio/radio_task.c
+index 3c20e90..968d8a8 100644
+--- a/core/radio/radio_task.c
++++ b/core/radio/radio_task.c
+@@ -621,6 +621,11 @@ void radio_req_power_off_cancel(void)
+ 	post(RREQ_POWER_OFF, 1, pdMS_TO_TICKS(50));
+ }
+ 
++void radio_req_standby(bool on)
++{
++	post(RREQ_STANDBY, on ? 1 : 0, pdMS_TO_TICKS(50));
++}
++
+ bool radio_power_off_busy(void)
+ {
+ 	return power_off_busy;
+diff --git a/core/ui/ui.c b/core/ui/ui.c
+index 7d3d6a5..d9d4b03 100644
+--- a/core/ui/ui.c
++++ b/core/ui/ui.c
+@@ -70,6 +70,8 @@ static void set_backlight(uint8_t pct)
+ 
+ static uint8_t backlight_target(uint32_t now)
+ {
++	if (ui_app_soft_off())
++		return 0;	// soft off: the failed switch-off woke the light (input_inject_wake); keep it dark until a key wakes it
+ 	uint32_t idle = input_idle_ms();
+ 	uint32_t since_radio = now - radio_active_ms;
+ 	if (since_radio < idle)
+@@ -156,8 +158,8 @@ static void ui_task(void *arg)
+ 			was_off = was_off && ui_app_backlight_hold() < 0;	// a key wakes the light, but not in the tests
+ #endif
+ 			set_backlight(ui_app_brightness());
+-			if (!was_off || ev.action == ACT_PTT || ev.action == ACT_MONITOR)
+-				ui_app_key(&ev);
++			if (!was_off || ev.action == ACT_PTT || ev.action == ACT_MONITOR || ui_app_soft_off())
++				ui_app_key(&ev);	// soft off: the first key wakes the radio (ui_app_key consumes it)
+ 			dirty = true;
+ 		}
+ 		now = hal_millis();
+diff --git a/core/ui/ui_app.c b/core/ui/ui_app.c
+index 39308a4..de165db 100644
+--- a/core/ui/ui_app.c
++++ b/core/ui/ui_app.c
+@@ -25,6 +25,9 @@
+ #include "input/input.h"
+ #include "radio/tones.h"
+ #include "config.h"
++#if CONFIG_GPS
++#include "position/position.h"
++#endif
+ #include "codeplug/codeplug_modes.h"	// CODEPLUG_KIND_NONE
+ #if CONFIG_HOTSPOT || (CONFIG_USB_NETWORK && CONFIG_HOSTLINK)
+ #include "hostlink/hostlink.h"
+@@ -84,6 +87,7 @@ static uint32_t last_use_ms;		// the last key press or call (auto power off)
+ static bool off_warned;			// the "switching off in 1 min" banner is up for this idle spell
+ static bool ptt_held;			// the PTT key is down (its DOWN came, its UP not yet)
+ static bool power_off_due;		// auto power off: the housekeeping task switches off (ui_app_power_off_due)
++static bool soft_off;		// soft off: the latch couldn't switch off, the radio is quiet until a key wakes it
+ static bool batt_warned;		// the low battery banner was shown at this level (cleared 3 % above it)
+ static uint32_t batt_warned_ms;
+ #if CONFIG_DMR
+@@ -98,6 +102,8 @@ ui_frame_t *ui_frame(void) { return &stack[sp]; }
+ uint8_t ui_depth(void) { return sp; }
+ void ui_dirty(void) { dirty = true; }
+ static void update_focus_target(void);
++static void soft_off_enter(void);
++static void soft_off_exit(void);
+ void ui_focus_changed(void) { update_focus_target(); }
+ 
+ void ui_toast(const char *text)
+@@ -726,12 +732,9 @@ static void handle_event(const ui_event_t *ev)
+ 		}
+ 		break;
+ 	case UI_EV_POWER_OFF_FAILED:
+-		// The latch dropped but the knob keeps the radio on: say so, and wait a whole period again
+-		power_off_due = false;
+-		off_warned = false;
+-		last_use_ms = now;
+-		banner(UI_BANNER_INFO, true, 0, TR(AUTOOFF_BANNER_FAILED, "Couldn't switch off"),
+-			TR(AUTOOFF_BANNER_TURN_KNOB_OFF, "Turn the knob off"));
++		// The latch dropped but the knob keeps the radio on: soft off instead of the banner and a whole period
++		// again — black screen, receiver asleep, any key wakes it
++		soft_off_enter();
+ 		break;
+ 	case UI_EV_SCAN_STOPPED:
+ 		break;
+@@ -1965,6 +1968,42 @@ bool ui_app_take_backlight_reapply(void)
+ #endif
+ bool ui_app_power_off_due(void) { return power_off_due; }
+ 
++bool ui_app_soft_off(void) { return soft_off; }
++
++// Soft off (UI_EV_POWER_OFF_FAILED: the latch dropped but the knob keeps the supply): the screen goes black, the
++// receiver and the GPS module sleep, and the first key wakes it. The waking key does nothing else, so a key that
++// wakes the radio never acts (and the core also refuses PTT and monitor while asleep)
++static void soft_off_enter(void)
++{
++	if (soft_off)
++		return;
++	soft_off = true;
++	power_off_due = false;
++	off_warned = false;
++	radio_req_standby(true);
++#if CONFIG_GPS
++	position_gps_enable(false);	// the module off too, as Settings > Location > GPS off does
++	board_gps_enable(false);
++#endif
++	dirty = true;
++}
++
++static void soft_off_exit(void)
++{
++	if (!soft_off)
++		return;
++	soft_off = false;
++	last_use_ms = now;	// the wake counts as use: the whole auto-off period starts again
++	last_key_ms = now;
++	off_warned = false;
++	radio_req_standby(false);
++#if CONFIG_GPS
++	position_gps_enable(ui_svc_setting_get(UI_SET_GPS) != 0);
++	board_gps_enable(ui_svc_setting_get(UI_SET_GPS) != 0);
++#endif
++	dirty = true;
++}
++
+ static uint16_t clamp_u16(int32_t v) { return (uint16_t)(v < 0 ? 0 : v > 0xFFFF ? 0xFFFF : v); }
+ 
+ // The settings the UI acts on itself (at start-up and on each change in Settings)
+@@ -2071,6 +2110,11 @@ static void call_back_key(void)
+ 
+ void ui_app_key(const input_event_t *ev)
+ {
++	// Soft off: any key wakes the radio and does nothing else
++	if (soft_off) {
++		soft_off_exit();
++		return;
++	}
+ 	// A programmed home key (P1, P2: board.home_keys): its function on Home, its arrow everywhere else. Home is the
+ 	// bottom of the stack, not while a frequency is typed there
+ 	input_event_t home_ev;
+@@ -2281,7 +2325,9 @@ void ui_app_key(const input_event_t *ev)
+ // banner a minute before, then the housekeeping task switches off (ui_app_power_off_due)
+ static void use_tick(const radio_view_t *v)
+ {
+-	if (v->state != RS_IDLE || v->scan != 0 || v->hotspot) {
++	if (soft_off)
++		return;	// asleep: the wake key restarts the period (soft_off_exit)
++	if (v->state != RS_IDLE || v->scan != 0 || v->hotspot || v->bcast) {
+ 		last_use_ms = now;
+ 		off_warned = false;
+ 	}
+@@ -2304,6 +2350,8 @@ static void battery_tick(const radio_view_t *v)
+ {
+ 	static char text[UI_BANNER_TEXT];
+ 	uint8_t pct = ui_st.battery_pct;
++	if (soft_off)
++		return;	// asleep: no banners on a black screen; the warning comes on wake, if it still applies
+ 	if (ui_st.low_batt_pct == 0 || pct == 0)
+ 		return;
+ 	if (pct >= ui_st.low_batt_pct + 3u) {
+@@ -2406,6 +2454,8 @@ bool ui_app_tick(const radio_view_t *v, uint32_t now_ms)
+ #endif
+ 	now = now_ms;
+ 	ui_st.now_ms = now_ms;
++	if (soft_off && view->hotspot)
++		soft_off_exit();	// the host started hotspot mode: wake, the receiver has to work
+ #if CONFIG_VOLUME_BAR
+ 	knob_tick(v);
+ #endif
+@@ -2654,6 +2704,10 @@ void ui_app_draw(void)
+ 	uint32_t before = ui_strip_draws;
+ 	dirty = false;
+ 	draws++;
++	if (soft_off) {
++		gfx_clear(RGB565(0, 0, 0));	// asleep: black, the backlight stays off (ui.c backlight_target)
++		return;
++	}
+ #if CONFIG_VOLUME_BAR
+ 	uint32_t hints = ui_hint_draws;
+ #endif
+diff --git a/core/ui/ui_app.h b/core/ui/ui_app.h
+index 0ec43a6..f14b273 100644
+--- a/core/ui/ui_app.h
++++ b/core/ui/ui_app.h
+@@ -29,8 +29,11 @@ bool ui_app_take_backlight_reapply(void);
+ // A banner or the emergency screen came up since the last call (then cleared): the backlight comes on for it
+ bool ui_app_take_wake(void);
+ // Auto power off is due (Settings > Power saving > Auto power off): the housekeeping task switches the radio off. If
+-// the supply stays on, it queues UI_EV_POWER_OFF_FAILED (ui_notify) and the UI waits a whole period again. Any task
++// the supply stays on, it queues UI_EV_POWER_OFF_FAILED (ui_notify) and the UI goes to soft off instead. Any task
+ bool ui_app_power_off_due(void);
++// Soft off: auto power off couldn't switch the radio off (the knob holds the supply), so the radio went quiet
++// instead — black screen, receiver asleep, any key wakes it. The UI task's backlight stays off while it holds
++bool ui_app_soft_off(void);
+ 
+ // For the debug link and the simulator: what is on screen
+ typedef struct {
+diff --git a/docs/user/16-battery-and-power.md b/docs/user/16-battery-and-power.md
+index 11b9c6e..ad51dd5 100644
+--- a/docs/user/16-battery-and-power.md
++++ b/docs/user/16-battery-and-power.md
+@@ -81,12 +81,14 @@ These stop the battery saver:
+ ## Auto power off
+ 
+ **Settings > Power saving > Auto power off** switches the radio off after a time without use: Off, 30 min, 1 h or 2 h (Off by
+-default). A key press, a call received or sent, a scan and hotspot mode count as use. One minute before, the radio
++default). A key press, a call received or sent, a scan, hotspot mode and a broadcast program count as use. One minute before, the radio
+ beeps and shows "Switching off in 1 min / Any key keeps it on". Any key cancels it.
+ 
+ On a radio with the power switch on its volume knob, the knob is still on when auto power off acts. Whether each
+-radio can cut its own power then is in the [Radio reference](23-radios.md). A radio that can't cut it comes back up
+-after 2 s, shows "Couldn't switch off / Turn the knob off", and keeps running as before.
++radio can cut its own power then is in the [Radio reference](23-radios.md). A radio that can't cut it drops its latch
++and comes back up after 2 s — instead of switching off, it goes quiet: black screen, receiver and GPS module asleep,
++no sound, no transmission. Any key wakes it again, and the waking key does nothing else. The radio still turns off
++with its power switch.
+ 
+ ## Turning off
+ 
+diff --git a/docs/user/23-radios.md b/docs/user/23-radios.md
+index 8e6d74a..8c2fe1f 100644
+--- a/docs/user/23-radios.md
++++ b/docs/user/23-radios.md
+@@ -438,6 +438,11 @@ warning (**Settings > Power saving > Low battery warning**) applies, and a low b
+ ### DM-32UV power switch
+ 
+ The power switch is on the knob. The radio sees it turn off (three readings in a row), saves and drops its own power.
++
++The radio can't cut its own power while the knob is still on: the knob feeds the supply directly, in parallel with
++the power latch. So auto power off goes to soft off instead — black screen, receiver and GPS module asleep, no sound
++and no transmission — and any key wakes it again.
++
+ The volume control works on the audio amplifier directly. RadioFoundry doesn't read it and can't set it from a PC either.
+ 
+ ### DM-32UV display
+diff --git a/tests/host/sim/ui_sim.c b/tests/host/sim/ui_sim.c
+index e977d7a..7b99303 100644
+--- a/tests/host/sim/ui_sim.c
++++ b/tests/host/sim/ui_sim.c
+@@ -1500,6 +1500,11 @@ void radio_req_monitor(bool down)
+ 	}
+ 	changed();
+ }
++
++void radio_req_standby(bool on) { (void)on; }	// the simulated radio never sleeps: the UI's soft off is what the tests check
++
++void position_gps_enable(bool on) { (void)on; }	// the simulated position module: no GPS hardware here
++
+ void radio_req_power(int8_t dir)
+ {
+ 	to_selected();
+@@ -2713,6 +2718,7 @@ static bool check(const char *kv, char *err, size_t len)
+ 	else if (strcmp(key, "volbar") == 0) snprintf(got, sizeof got, "%d", s.volbar);	// the knob's bar, -1 = none
+ 	else if (strcmp(key, "pttblock") == 0) snprintf(got, sizeof got, "%u", ptt_blocked);
+ 	else if (strcmp(key, "poweroff") == 0) snprintf(got, sizeof got, "%u", ui_app_power_off_due());
++	else if (strcmp(key, "softoff") == 0) snprintf(got, sizeof got, "%u", ui_app_soft_off());
+ 	else if (strcmp(key, "wake") == 0) snprintf(got, sizeof got, "%u", ui_app_take_wake());	// the backlight asked for
+ 	else if (strncmp(key, "set", 3) == 0 && key[3] >= '0' && key[3] <= '9')	// set<N>: ui_setting_t N's value
+ 		snprintf(got, sizeof got, "%d", (int)ui_svc_setting_get((uint8_t)atoi(key + 3)));
+diff --git a/tests/host/uiFlowTest.c b/tests/host/uiFlowTest.c
+index 9608568..f764aab 100644
+--- a/tests/host/uiFlowTest.c
++++ b/tests/host/uiFlowTest.c
+@@ -1262,7 +1262,9 @@ static const flow_t flows_k[] = {
+ 	  false },
+ 	{ "P auto power off", "ok 7 7 down ok long:back", "wait:1801000", "poweroff=1", 0, false },
+ 	{ "P a key keeps it on", "ok 7 7 down ok long:back wait:1700000", "up wait:200000", "poweroff=0", 1, false },
+-	{ "P the knob holds it", "ok 7 7 down ok long:back wait:1801000", "offfailed", "poweroff=0 banner=Couldn't", 0,
++	{ "P the knob holds it", "ok 7 7 down ok long:back wait:1801000", "offfailed", "poweroff=0 softoff=1", 0,
++	  false },
++	{ "P soft off wakes on a key", "ok 7 7 down ok long:back wait:1801000", "offfailed up", "softoff=0 poweroff=0", 1,
+ 	  false },
+ };
+ 
