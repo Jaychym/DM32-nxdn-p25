@@ -11,6 +11,8 @@ los cambios de esta rama en [`integration/current/base.patch`](integration/curre
 [Open25-DM32](https://github.com/tylerwatt12/Open25-DM32) (tylerwatt12). La mantiene **lyra XE1POC**.
 
 > Firmware experimental. Úsalo bajo tu responsabilidad, solo en frecuencias en las que tengas licencia y con un respaldo de tu radio.
+>
+> **Sobre AES-256:** solo para sistemas comerciales / Part 90 autorizados para cifrar. No lo uses en bandas de radioaficionado: el servicio de aficionados es en claro, aun con licencia.
 
 ## Estado (17 de noviembre de 2026)
 
@@ -79,6 +81,8 @@ La imagen queda en `build/current/build/dm32/rfoundry_dm32.bin`. Detalle del cif
 
 También puedes apoyar el desarrollo del firmware y del flasher en Ko-fi: **<https://ko-fi.com/lyraarsgoetia>**
 
+Apoyar en Ko-fi o regalar un radio es apoyar mi tiempo de desarrollo. El firmware es gratuito y libre (GPL-3.0-or-later): apoyar no compra el firmware, ni acceso anticipado, ni el códec AMBE. El AMBE no se distribuye aquí y sigue saliendo de tu propia radio.
+
 ## Créditos y licencia
 
 - **Open25-DM32** original: tylerwatt12 (KD8ZMM). Puedes apoyar su trabajo en [GitHub Sponsors](https://github.com/sponsors/tylerwatt12?metadata_project=open25-dm32) o [Ko-fi](https://ko-fi.com/kd8zmm).
@@ -103,3 +107,4 @@ Interoperability with other makers' encrypted radios is untested. GPL-3.0-or-lat
 
 **Support:** want firmware for another radio? Gift one from my wishlist and I can port it:
 <https://throne.com/lyraarsgoetia> · Support development on Ko-fi: <https://ko-fi.com/lyraarsgoetia>
+Donations support development time. The firmware is free (GPL-3.0-or-later): supporting does not buy the firmware, early access, or the AMBE codec, which is not distributed here and still comes from your own radio.
