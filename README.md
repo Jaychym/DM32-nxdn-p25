@@ -14,15 +14,15 @@ los cambios de esta rama en [`integration/current/base.patch`](integration/curre
 >
 > **Sobre AES-256:** solo para sistemas comerciales / Part 90 autorizados para cifrar. No lo uses en bandas de radioaficionado: el servicio de aficionados es en claro, aun con licencia.
 
-## Estado (18 de noviembre de 2026, main `8d01838`)
+## Estado (18 de noviembre de 2026, main `3e83541`)
 
-Última release al escribir esto: `v2026.11.18-8d018382` (mismo binario que `v2026.11.18-3f1c173f`; ese commit solo tocó el README).
+Última release al escribir esto: `v2026.11.18-8d018382` (el CI está compilando la nueva con el all-call; el flasher todavía sirve `d30230a8`).
 
 | Función | Estado |
 |---|---|
 | Base | RadioFoundry `e89121e9`, instalada y arrancando en la radio del autor, más `integration/current/base.patch`. Trae la desviación de TX de P25/NXDN medida en el HR_C7000 (RadioFoundry #644) |
 | NXDN96 en el aire | DSD+ sincroniza y decodifica llamadas NXDN96 de este firmware (18 nov, 13:45: TG 91, RID 321, RAN 22, tramas de voz fluyendo) |
-| NXDN TX: pendiente portar | El monitor de servicio de KN4SWB midió FSK error 19,3 % y desviación de símbolo 993 Hz (nominal 1050 Hz) en 441,1125 MHz. El fix candidato de 40 Hz (`d30230a`) y el destino all-call para canales sin talkgroup (`333739d`) están solo en `integration/radiofoundry/` (serie vieja / tests host) y **no están en `base.patch`, así que no están en la imagen que se distribuye**. Hay que portarlos a `base.patch` como se hizo con el 0043. Re-medición de KN4SWB pendiente |
+| NXDN TX | El monitor de servicio de KN4SWB midió FSK error 19,3 % y desviación de símbolo 993 Hz (nominal 1050 Hz) en 441,1125 MHz. **All-call portado:** un canal sin talkgroup ya transmite destino all-call (`e6c105f`, `fix_dst()` en el engine NXDN, con test host). **40 Hz no portable:** el fix candidato (`d30230a`, `.flat_tx_hpf_hz = 40` en el tap de audio plano de la serie vieja) no tiene equivalente en este build — el TX NXDN va por el engine 4FSK nativo del HR_C7000 y la TX RAM lleva símbolos, no audio, así que no hay high-pass que pre-compensar (`3e83541`, documentado en `docs/spec/nxdn.md`). No se toca el gain ni la desviación. Re-medición de KN4SWB pendiente |
 | Modo por canal | Fila **Modo** en cada canal: FM, AM, DMR, P25, NXDN 4800, NXDN 9600 |
 | AM | Tipo de canal AM propio, solo RX, en cualquier frecuencia que sintonice el receptor (p. ej. banda aérea) |
 | Recepción ampliada | Activada por defecto. Solo RX fuera de las bandas de TX |
@@ -104,7 +104,7 @@ Multi-mode open firmware for the Baofeng DM-32UV: FM, AM, DMR (Tier II and Tier 
 NXDN48/NXDN96, with AES-256 voice on DMR (Motorola layout, decrypts a real recording with a published key), P25
 (TIA-102.AAAD-A layout, matches OP25's keystream) and NXDN (matches the
 NXDN TS 1-D test vectors). Since 2026-11-17 it builds on current [RadioFoundry](https://github.com/RadioFoundry/RadioFoundry)
-(`e89121e9`) plus `integration/current/base.patch`; the old patch series no longer builds. Motorola-style talk permit tones. The first DMR PTT after NXDN/FM/P25 no longer goes out voiceless (`3f1c173`, host-tested; on-air confirmation still pending). DSD+ decodes NXDN96 calls from this firmware (18 Nov: TG 91, RID 321, RAN 22). Pending port to `base.patch`: the 40 Hz NXDN TX pre-compensation (`d30230a`, inferred from KN4SWB's service-monitor numbers: 19.3% FSK error, 993 Hz deviation) and the all-call destination for talkgroup-less NXDN channels (`333739d`) — both currently live only in `integration/radiofoundry/` (host tests), not in the shipped image. Lost
+(`e89121e9`) plus `integration/current/base.patch`; the old patch series no longer builds. Motorola-style talk permit tones. The first DMR PTT after NXDN/FM/P25 no longer goes out voiceless (`3f1c173`, host-tested; on-air confirmation still pending). DSD+ decodes NXDN96 calls from this firmware (18 Nov: TG 91, RID 321, RAN 22). A talkgroup-less NXDN channel now transmits all-call (`e6c105f`). The 40 Hz NXDN TX pre-compensation (`d30230a`) has no equivalent in this build — NXDN TX goes through the HR_C7000 native 4FSK slot engine, not an audio path — so it was documented as not portable (`3e83541`), not ported. Lost
 in the switch: P25 Phase 2, P25 trunking TX; AES keys must be loaded again. The pink theme is back as the Kawaii layer (`7c972f0`). Releases ship the image **without** the proprietary AMBE
 codec; the [web flasher](https://donttellmeimcute.github.io/dm32-web-cps-flasher/) takes it from your own radio.
 Interoperability with other makers' encrypted radios is untested. GPL-3.0-or-later, RadioFoundry code MIT.
