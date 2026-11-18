@@ -69,8 +69,8 @@ not play. Without digital monitor the talkgroup can't be told, so nothing plays.
 needs the system's key, which this firmware doesn't have.
 
 Digital monitor on DMR listens like a scanner: every talkgroup, **every color code and both timeslots**, whatever the
-channel says. The screen shows the color code received. It steps through the 16 codes until it hears one, so the
-first moments of a call can be missed. Transmitting keeps the channel's color code and timeslot. Until 2026-11-17 the
+channel says. The screen shows the color code received. It hears every color code at once (no stepping scan), so the
+color code costs no time; a RAS call still needs its first whole superframe in order before it plays. Transmitting keeps the channel's color code and timeslot. Until 2026-11-17 the
 HR_C7000 never handed a RAS repeater's voice over at all: nothing gave its slot the chip's voice-access flag, so the
 voice stayed unnumbered and was dropped. Digital monitor now gives the flag from the voice itself.
 
