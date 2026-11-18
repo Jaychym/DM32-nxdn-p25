@@ -14,11 +14,15 @@ los cambios de esta rama en [`integration/current/base.patch`](integration/curre
 >
 > **Sobre AES-256:** solo para sistemas comerciales / Part 90 autorizados para cifrar. No lo uses en bandas de radioaficionado: el servicio de aficionados es en claro, aun con licencia.
 
-## Estado (17 de noviembre de 2026)
+## Estado (18 de noviembre de 2026, main `8d01838`)
+
+Última release al escribir esto: `v2026.11.18-8d018382` (mismo binario que `v2026.11.18-3f1c173f`; ese commit solo tocó el README).
 
 | Función | Estado |
 |---|---|
-| Base | RadioFoundry `e89121e9`, instalada y arrancando en la radio del autor. Trae la desviación de TX de P25/NXDN medida en el HR_C7000 (RadioFoundry #644), lo que puede afectar los reportes de radios que no decodificaban nuestro NXDN |
+| Base | RadioFoundry `e89121e9`, instalada y arrancando en la radio del autor, más `integration/current/base.patch`. Trae la desviación de TX de P25/NXDN medida en el HR_C7000 (RadioFoundry #644) |
+| NXDN96 en el aire | DSD+ sincroniza y decodifica llamadas NXDN96 de este firmware (18 nov, 13:45: TG 91, RID 321, RAN 22, tramas de voz fluyendo) |
+| NXDN TX: pendiente portar | El monitor de servicio de KN4SWB midió FSK error 19,3 % y desviación de símbolo 993 Hz (nominal 1050 Hz) en 441,1125 MHz. El fix candidato de 40 Hz (`d30230a`) y el destino all-call para canales sin talkgroup (`333739d`) están solo en `integration/radiofoundry/` (serie vieja / tests host) y **no están en `base.patch`, así que no están en la imagen que se distribuye**. Hay que portarlos a `base.patch` como se hizo con el 0043. Re-medición de KN4SWB pendiente |
 | Modo por canal | Fila **Modo** en cada canal: FM, AM, DMR, P25, NXDN 4800, NXDN 9600 |
 | AM | Tipo de canal AM propio, solo RX, en cualquier frecuencia que sintonice el receptor (p. ej. banda aérea) |
 | Recepción ampliada | Activada por defecto. Solo RX fuera de las bandas de TX |
@@ -28,7 +32,7 @@ los cambios de esta rama en [`integration/current/base.patch`](integration/curre
 | AES-256 NXDN | Formato del estándar NXDN TS 1-D (cipher 3, KID 0-63, VCALL_IV). Coincide bit a bit con los 32 vectores de prueba del estándar. Entrada tardía: descifra desde la sesión siguiente (hasta 1,3 s). **Sin probar contra Icom o Kenwood** |
 | DMR Tier III | Estación móvil: control channel, registro, llamadas de grupo y privadas, datos cortos (RadioFoundry). Sin probar en un sistema real |
 | P25 troncal | Recepción y seguimiento de llamadas (RadioFoundry). Sin TX |
-| Tonos de permiso estilo Motorola | DMR: el chirp de MOTOTRBO (cuatro notas rápidas). P25 y NXDN: el permiso de ASTRO 25 (tres bips de 910 Hz) antes de transmitir. Se apagan en Ajustes › Sonido › Tono de permiso. El primer PTT DMR tras NXDN, FM o P25 ya no sale sin voz: la voz retoma en su primer bloque la ruta del altavoz que el tono de permiso dejaba encendida (antes se perdió al cambiar de base; `ambeVoiceTest` lo cubre) |
+| Tonos de permiso estilo Motorola | DMR: el chirp de MOTOTRBO (cuatro notas rápidas). P25 y NXDN: el permiso de ASTRO 25 (tres bips de 910 Hz) antes de transmitir. Se apagan en Ajustes › Sonido › Tono de permiso. El primer PTT DMR tras NXDN, FM o P25 ya no sale sin voz: la voz retoma en su primer bloque la ruta del altavoz que el tono de permiso dejaba encendida (el fix 0043 se había perdido al cambiar de base; `3f1c173`, cubierto por `ambeVoiceTest` en host). **Pendiente confirmación en el aire** de ese primer PTT |
 | APRS, GPS, hotspot | Los de RadioFoundry; sin probar en el aire con esta imagen |
 
 ## Cambio de base: qué se pierde y qué hacer
@@ -41,7 +45,7 @@ pierde, por ahora:
 | Cuatro claves AES en EEPROM (`0x7C00`) y la clave por canal en el byte `0x32` | Las claves van en el llavero del codeplug (CPS web, pestaña Radio). **Vuelve a cargar tus claves** después de actualizar y revisa los canales que tenían AES |
 | P25 fase 2 (TDMA), TX troncal P25 | No están |
 | AES-256 en DMR por canal (byte `0x32`) | AES-256 en DMR para toda la radio, en Ajustes › Privacidad (como la privacidad DMR de RadioFoundry) |
-| Tema «Rosa», mensajes DMR de texto libre | Los de RadioFoundry: color de acento rosa (Ajustes › Pantalla) |
+| Tema «Rosa», mensajes DMR de texto libre | El tema Rosa volvió como capa Kawaii (`CONFIG_UI_KAWAII`, `7c972f0`): tema rosa claro en toda la UI y foto de arranque. Los mensajes DMR de texto libre de la serie vieja siguen fuera; lo que trae esta base es DMR SMS/TMS de RadioFoundry |
 
 En la radio del autor, actualizar desde la versión anterior conservó canales y calibración. Haz siempre el respaldo
 que ofrece el flasher. La serie de parches anterior queda en `integration/radiofoundry/` y `docs/` como historia; ya no se compila.
@@ -53,7 +57,7 @@ El NAC/RAN de **TX** debe coincidir con el del otro equipo; Pi-Star usa NAC 293 
 
 ## Instalar
 
-1. Usa el **web flasher**: <https://donttellmeimcute.github.io/dm32-web-cps-flasher/> (Chrome o Edge de escritorio, Web Serial), o descarga la imagen `.bin` sin códec de la última [release](../../releases).
+1. Usa el **web flasher**: <https://donttellmeimcute.github.io/dm32-web-cps-flasher/> (Chrome o Edge de escritorio, Web Serial), o descarga la imagen `.bin` sin códec de la última [release](../../releases). El flasher sincroniza cada varias horas, no al instante: si muestra una versión anterior a la última release de GitHub, espera a que corra su sincronización o baja el `.bin` de la release.
 2. Pon la radio en modo actualización: apagada, mantén **PTT + SK1** al encenderla (LED verde).
 3. El flasher hace un respaldo, toma el códec AMBE de tu propia radio (o del archivo de firmware de fábrica que elijas) y lo instala junto al firmware.
 
@@ -100,8 +104,8 @@ Multi-mode open firmware for the Baofeng DM-32UV: FM, AM, DMR (Tier II and Tier 
 NXDN48/NXDN96, with AES-256 voice on DMR (Motorola layout, decrypts a real recording with a published key), P25
 (TIA-102.AAAD-A layout, matches OP25's keystream) and NXDN (matches the
 NXDN TS 1-D test vectors). Since 2026-11-17 it builds on current [RadioFoundry](https://github.com/RadioFoundry/RadioFoundry)
-(`e89121e9`) plus `integration/current/base.patch`; the old patch series no longer builds. Motorola-style talk permit tones. Lost
-in the switch: P25 Phase 2, P25 trunking TX; AES keys must be loaded again. Releases ship the image **without** the proprietary AMBE
+(`e89121e9`) plus `integration/current/base.patch`; the old patch series no longer builds. Motorola-style talk permit tones. The first DMR PTT after NXDN/FM/P25 no longer goes out voiceless (`3f1c173`, host-tested; on-air confirmation still pending). DSD+ decodes NXDN96 calls from this firmware (18 Nov: TG 91, RID 321, RAN 22). Pending port to `base.patch`: the 40 Hz NXDN TX pre-compensation (`d30230a`, inferred from KN4SWB's service-monitor numbers: 19.3% FSK error, 993 Hz deviation) and the all-call destination for talkgroup-less NXDN channels (`333739d`) — both currently live only in `integration/radiofoundry/` (host tests), not in the shipped image. Lost
+in the switch: P25 Phase 2, P25 trunking TX; AES keys must be loaded again. The pink theme is back as the Kawaii layer (`7c972f0`). Releases ship the image **without** the proprietary AMBE
 codec; the [web flasher](https://donttellmeimcute.github.io/dm32-web-cps-flasher/) takes it from your own radio.
 Interoperability with other makers' encrypted radios is untested. GPL-3.0-or-later, RadioFoundry code MIT.
 
