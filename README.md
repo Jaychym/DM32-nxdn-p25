@@ -26,7 +26,7 @@ los cambios de esta rama en [`integration/current/base.patch`](integration/curre
 | AES-256 NXDN | Formato del estándar NXDN TS 1-D (cipher 3, KID 0-63, VCALL_IV). Coincide bit a bit con los 32 vectores de prueba del estándar. Entrada tardía: descifra desde la sesión siguiente (hasta 1,3 s). **Sin probar contra Icom o Kenwood** |
 | DMR Tier III | Estación móvil: control channel, registro, llamadas de grupo y privadas, datos cortos (RadioFoundry). Sin probar en un sistema real |
 | P25 troncal | Recepción y seguimiento de llamadas (RadioFoundry). Sin TX |
-| Tonos de permiso estilo Motorola | DMR: el chirp de MOTOTRBO (cuatro notas rápidas). P25 y NXDN: el permiso de ASTRO 25 (tres bips de 910 Hz) antes de transmitir. Se apagan en Ajustes › Sonido › Tono de permiso |
+| Tonos de permiso estilo Motorola | DMR: el chirp de MOTOTRBO (cuatro notas rápidas). P25 y NXDN: el permiso de ASTRO 25 (tres bips de 910 Hz) antes de transmitir. Se apagan en Ajustes › Sonido › Tono de permiso. El primer PTT DMR tras NXDN, FM o P25 ya no sale sin voz: la voz retoma en su primer bloque la ruta del altavoz que el tono de permiso dejaba encendida (antes se perdió al cambiar de base; `ambeVoiceTest` lo cubre) |
 | APRS, GPS, hotspot | Los de RadioFoundry; sin probar en el aire con esta imagen |
 
 ## Cambio de base: qué se pierde y qué hacer

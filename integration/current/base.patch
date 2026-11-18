@@ -8966,3 +8966,96 @@ index acb48753..1bfabe71 100644
  	static const struct { sim_map_t map; const char *name, *geom; } runs[] = {
  		{ SIM_MAP_K, "K DM-1701", "160x120i5" },
  		{ SIM_MAP_M, "M GD-77", "128x64" },
+diff --git a/core/dmr/ambe/ambeVoice.c b/core/dmr/ambe/ambeVoice.c
+index 670365c..e04f1ee 100644
+--- a/core/dmr/ambe/ambeVoice.c
++++ b/core/dmr/ambe/ambeVoice.c
+@@ -69,10 +69,14 @@ static bool tx_have_prev;
+ static uint32_t enc_opts = VOCODER_OPT_DEFAULT;	// ambeVoiceSetEncodeOptions: any task
+ static uint32_t cb_enc_opts;		// what the vocoder was last given (audio callback)
+ static bool cb_enc_opts_set;		// cb_enc_opts is valid
++static bool route_stale;		// set by the call task before a start, cleared by the audio callback
+ 
+ static void ensure_streaming(void)
+ {
+ 	if (!streaming && aud != NULL) {
++		// The stream may be taken over from another user (a beep's own stream) that left the speaker route on: our
++		// first block sends our own route (ambeVoiceAudioBlock)
++		STORE(route_stale, true);
+ 		streaming = aud->start(ambeVoiceAudioBlock, NULL);
+ 	}
+ }
+@@ -509,6 +513,12 @@ static void tx_block(const int16_t *mic)
+ void ambeVoiceAudioBlock(const int16_t *mic, int16_t *spk, void *ctx)
+ {
+ 	(void)ctx;
++	// A (re)started stream: our route is off until this block turns it on (ambeVoiceStop left cb_speaker as it was)
++	bool stale = LOAD(route_stale);
++	if (stale) {
++		STORE(route_stale, false);
++		cb_speaker = false;
++	}
+ 	// DMR is simplex: TX first (a fresh transmission resets the vocoder), then RX playback (silent while transmitting)
+ 	tx_block(mic);
+ 	rx_block(spk);
+@@ -522,6 +532,11 @@ void ambeVoiceAudioBlock(const int16_t *mic, int16_t *spk, void *ctx)
+ 			speaker(false);
+ 		}
+ 	}
++	// A talk permit beep on its own stream, handed over at the key-up, left the route and the amplifier on through the
++	// whole first transmission, and the microphone reached the codec flat (measured on a radio: 3 dB against 39 dB)
++	if (stale && !cb_speaker && aud != NULL && aud->speaker_pcm != NULL) {
++		aud->speaker_pcm(false);
++	}
+ }
+ 
+ // --- set-up ---
+diff --git a/tests/host/ambeVoiceTest.c b/tests/host/ambeVoiceTest.c
+index bc2eaa7..83cf9ef 100644
+--- a/tests/host/ambeVoiceTest.c
++++ b/tests/host/ambeVoiceTest.c
+@@ -560,6 +560,36 @@ static void testCapture(void)
+ }
+ #endif
+ 
++static bool mixOn(int16_t *s) { (void)s; return true; }
++
++// A talk permit beep on its own stream holds the speaker route on as the voice stream takes it over at the key-up: the
++// voice's first block gives it back (on the radio the microphone reached the codec flat through the whole call)
++static void testRouteHandoff(void)
++{
++	const dmr_voice_source_t *src = ambeVoiceSource();
++	ambeVoiceStop();
++	fake_speaker(true);	// the beep's last block
++	int calls = speaker_calls;
++	src->begin(src->ctx);
++	block();
++	CHECK(!speaker_on && speaker_calls == calls + 1, "the first block gives the route back (on %d)", speaker_on);
++	block();
++	CHECK(speaker_calls == calls + 1, "once");
++	src->end(src->ctx);
++
++	// A beep still mixed in that first block keeps the route, then lets it go
++	ambeVoiceStop();
++	fake_speaker(true);
++	ambeVoiceSetMixer(mixOn);
++	src->begin(src->ctx);
++	block();
++	CHECK(speaker_on, "a mixed beep keeps the route");
++	ambeVoiceSetMixer(NULL);
++	block();
++	CHECK(!speaker_on, "off after the beep");
++	src->end(src->ctx);
++}
++
+ int main(void)
+ {
+ 	ambeVoiceInit(&audio, &vocoder);
+@@ -577,6 +607,7 @@ int main(void)
+ 	CHECK(stops == 1 && !speaker_on, "stop");
+ 	ambeVoiceSink()->begin(NULL, NULL);
+ 	CHECK(starts == 2, "restarted after stop");
++	testRouteHandoff();
+ 	printf("# ambeVoiceTest: %d checks, %s\n", checks, failures ? "FAILED" : "PASSED");
+ 	return failures ? 1 : 0;
+ }
