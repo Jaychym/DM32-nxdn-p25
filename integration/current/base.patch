@@ -2150,7 +2150,7 @@ index e071d019..0d7430d0 100644
  
  // Decode len bytes of a block (a short one, or none, takes the defaults); never fails: a value out of range is read as
 diff --git a/core/nxdn/nxdn_engine.c b/core/nxdn/nxdn_engine.c
-index 695c57c0..354e619b 100644
+index 695c57c0..d3774ae5 100644
 --- a/core/nxdn/nxdn_engine.c
 +++ b/core/nxdn/nxdn_engine.c
 @@ -1,7 +1,11 @@
@@ -2174,7 +2174,31 @@ index 695c57c0..354e619b 100644
  }
  
  static void rx_fields(nxdn_engine_t *e, const nxdn_call_t *c, bool start)
-@@ -164,6 +168,9 @@ bool nxdn_engine_begin(nxdn_engine_t *e, const hal_air_t *air, const nxdn_engine
+@@ -155,15 +159,33 @@ static void tx_fill(void *ctx)
+ 
+ static const air_session_ops_t ops = { tx_fill, NULL };
+ 
++// A TX destination of 0 is no destination: the layer-3 admission rule passes a VCALL with dst 0 nowhere, so
++// Kenwood and Icom radios ignore the call (issues #21, #23; legacy 333739d). A channel with no talkgroup — the
++// VFO's settings, or any caller that leaves tx_dst at 0 — sends all-call instead; the RAN still gates who
++// receives it. An individual call to unit 0 is the same non-call, so it becomes a group all-call too. The
++// engine is the choke point: every caller (radio core, debug link) goes through begin/set, and the view reads
++// the normalized cfg back.
++static void fix_dst(nxdn_engine_cfg_t *c)
++{
++	if (c->tx_dst == 0) {
++		c->tx_dst = NXDN_ID_ALL;
++		c->tx_call_type = NXDN_CALL_GROUP;
++	}
++}
++
+ bool nxdn_engine_begin(nxdn_engine_t *e, const hal_air_t *air, const nxdn_engine_cfg_t *cfg,
+ 		       const nxdn_engine_hooks_t *hooks, void *ctx)
+ {
+ 	memset(e, 0, sizeof *e);
+ 	e->cfg = *cfg;
++	fix_dst(&e->cfg);
+ 	e->hooks = *hooks;
  	e->ctx = ctx;
  	e->mode = nxdn_engine_mode(cfg->rate9600);
  	nxdn_call_rx_init(&e->rx, cfg->rx_ran, &sink, e);
@@ -2184,8 +2208,11 @@ index 695c57c0..354e619b 100644
  	return air_session_open(&e->session, air, e->mode, &e->rx.rx, e->frame, e->soft, NXDN_FRAME_SYMS, &ops, e);
  }
  
-@@ -184,6 +191,9 @@ void nxdn_engine_set(nxdn_engine_t *e, const nxdn_engine_cfg_t *cfg)
+@@ -182,8 +204,12 @@ void nxdn_engine_set(nxdn_engine_t *e, const nxdn_engine_cfg_t *cfg)
+ 	bool rate = e->cfg.rate9600;
+ 
  	e->cfg = *cfg;
++	fix_dst(&e->cfg);
  	e->cfg.rate9600 = rate;		// the mode is the session's: a new rate is a new session
  	e->rx.rx.ran = cfg->rx_ran;
 +#if CONFIG_AIR_AES
@@ -2194,7 +2221,7 @@ index 695c57c0..354e619b 100644
  	e->recheck = true;
  }
  
-@@ -203,6 +213,18 @@ bool nxdn_engine_tx_prepare(nxdn_engine_t *e)
+@@ -203,6 +229,18 @@ bool nxdn_engine_tx_prepare(nxdn_engine_t *e)
  		};
  
  		e->tx_stop = e->tx_ended = false;
@@ -6328,7 +6355,7 @@ index 244e8175..342742bb 100644
  			int len = unhex(w[1], b, sizeof b);
  			CHECK(nxdn_unit_id_decode(b, len == 0 ? -1 : len, h(w[2])) == h(w[3]));
 diff --git a/tests/host/nxdnEngineTest.c b/tests/host/nxdnEngineTest.c
-index 8d0e7ce0..53e04a1f 100644
+index 8d0e7ce0..a2e6d85c 100644
 --- a/tests/host/nxdnEngineTest.c
 +++ b/tests/host/nxdnEngineTest.c
 @@ -1,5 +1,6 @@
@@ -6384,7 +6411,68 @@ index 8d0e7ce0..53e04a1f 100644
  		x->enc_made++;
  	}
  }
-@@ -679,10 +695,109 @@ static void testSoftModem(void)
+@@ -478,6 +494,60 @@ static void testSquelch(void)
+ 	nxdn_engine_end(&r[1].e);
+ }
+ 
++// A TX destination of 0 is no destination: it goes out as all-call (issues #21, #23; legacy 333739d)
++static void testAllCall(void)
++{
++	nxdn_engine_cfg_t cfg = base_cfg(false);
++
++	// No talkgroup (tx_dst 0, group call): the far end hears all-call, not destination 0
++	cfg.tx_dst = 0;
++	begin(0, &cfg, &hooks);
++	cfg.unit_id = 2002;
++	begin(1, &cfg, &hooks);
++	over(20, 0, 0);
++	CHECK(r[1].starts == 1 && r[1].call.vcall.dst == NXDN_ID_ALL && r[1].call.vcall.call_type == NXDN_CALL_GROUP,
++	      "no talkgroup: starts %u dst %u type %u", r[1].starts, r[1].call.vcall.dst, r[1].call.vcall.call_type);
++	nxdn_engine_end(&r[0].e);
++	nxdn_engine_end(&r[1].e);
++
++	// An individual call to unit 0 is the same non-call: group all-call, not an individual call to 0
++	cfg.tx_call_type = NXDN_CALL_INDIVIDUAL;
++	cfg.tx_dst = 0;
++	begin(0, &cfg, &hooks);
++	cfg.unit_id = 2002;
++	begin(1, &cfg, &hooks);
++	over(20, 0, 0);
++	CHECK(r[1].starts == 1 && r[1].call.vcall.dst == NXDN_ID_ALL && r[1].call.vcall.call_type == NXDN_CALL_GROUP,
++	      "individual to unit 0: starts %u dst %u type %u", r[1].starts, r[1].call.vcall.dst,
++	      r[1].call.vcall.call_type);
++	nxdn_engine_end(&r[0].e);
++	nxdn_engine_end(&r[1].e);
++
++	// The set() path, mid-session: a group call whose destination is cleared to 0 goes out as all-call
++	cfg = base_cfg(false);
++	begin(0, &cfg, &hooks);
++	cfg.unit_id = 2002;
++	begin(1, &cfg, &hooks);
++	cfg.tx_dst = 0;
++	nxdn_engine_set(&r[0].e, &cfg);
++	over(20, 0, 0);
++	CHECK(r[1].starts == 1 && r[1].call.vcall.dst == NXDN_ID_ALL && r[1].call.vcall.call_type == NXDN_CALL_GROUP,
++	      "set to 0: starts %u dst %u type %u", r[1].starts, r[1].call.vcall.dst, r[1].call.vcall.call_type);
++	nxdn_engine_end(&r[0].e);
++	nxdn_engine_end(&r[1].e);
++
++	// A real group still goes out as that group, not all-call
++	cfg = base_cfg(false);
++	begin(0, &cfg, &hooks);
++	cfg.unit_id = 2002;
++	begin(1, &cfg, &hooks);
++	over(20, 0, 0);
++	CHECK(r[1].starts == 1 && r[1].call.vcall.dst == 77 && r[1].call.vcall.call_type == NXDN_CALL_GROUP,
++	      "group 77: starts %u dst %u", r[1].starts, r[1].call.vcall.dst);
++	nxdn_engine_end(&r[0].e);
++	nxdn_engine_end(&r[1].e);
++}
++
+ // ── A call through a modeled discriminator tap and the soft modem (as airSoftmodemTest's channel model) ──
+ #define FS		240000
+ #define SPAN		8
+@@ -679,11 +749,111 @@ static void testSoftModem(void)
  	       last_whole >= 0 ? sigmas[last_whole] : -1.0, last_found >= 0 ? sigmas[last_found] : -1.0);
  }
  
@@ -6492,8 +6580,10 @@ index 8d0e7ce0..53e04a1f 100644
 +	testAes(true);
 +#endif
  	testSquelch();
++	testAllCall();
  	testSoftModem();
  	printf("nxdnEngineTest: %d checks, %d failed\n", checks, failures);
+ 	return failures ? 1 : 0;
 diff --git a/tests/host/p25CodeplugTest.c b/tests/host/p25CodeplugTest.c
 index 563350fc..2796a621 100644
 --- a/tests/host/p25CodeplugTest.c
