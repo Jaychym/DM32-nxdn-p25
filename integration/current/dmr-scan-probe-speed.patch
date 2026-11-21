@@ -1,0 +1,56 @@
+diff --git a/core/radio/radio_sm.h b/core/radio/radio_sm.h
+index 772e734..6e265f4 100644
+--- a/core/radio/radio_sm.h
++++ b/core/radio/radio_sm.h
+@@ -85,8 +85,9 @@
+ #define RADIO_SCAN_DWELL_MS	75	// empty-channel dwell after the receiver settle
+ #define RADIO_SCAN_DUAL_MIN_DWELL_MS 150	// dual watch keeps a full receiver visit on each channel
+ #define RADIO_SCAN_FM_PROBE_MS	350	// FM: a carrier without the RX tone yet (CTCSS detection takes 100-250 ms)
+-#define RADIO_SCAN_DMR_PROBE_MS	700	// DMR: a carrier, waiting for bursts with the channel's color code (they come
+-					// within a superframe of the modem's lock)
++#define RADIO_SCAN_DMR_PROBE_MS	450	// DMR: an unsynchronized carrier. Lock takes 90 ms and a superframe 360 ms;
++					// with the 75 ms dwell, this leaves another 75 ms of poll margin. Once sync is heard,
++					// RADIO_SCAN_DMR_SYNC_MS still gives late entry its full time
+ #define RADIO_SCAN_DMR_SYNC_MS	1500	// DMR: such bursts heard, waiting for the call to play (a late entry takes its
+ 					// LC from the second complete superframe at worst: about 1.1 s from the retune)
+ #define RADIO_SCAN_DMR_CARRIER_MS 150	// DMR: a carrier this recent still counts (direct mode: 30 ms on air in 60)
+diff --git a/docs/spec/radio-features.md b/docs/spec/radio-features.md
+index 7e5d171..b61837c 100644
+--- a/docs/spec/radio-features.md
++++ b/docs/spec/radio-features.md
+@@ -72,11 +72,13 @@ Each stop: 50 ms settle (readings from the previous frequency are ignored), then
+ scan uses `zone_scan_dwell_ms`; VFO scan and dual watch keep using `scan_dwell_ms`, so the zone setting does not
+ shorten their visits. Tools > Zone scan speed offers 50, 75, 100, 150, 250 and 500 ms, saves the choice and applies
+ it immediately, including to the current stop of an active zone scan. FM stops can use 50 ms; DMR, P25, NXDN and
+-YSF stops keep a 75 ms minimum so their carrier detector still gets a reading after the settle. The tone, carrier,
++YSF stops keep a 75 ms minimum so their carrier detector still gets a reading after the settle. The tone,
+ digital-sync and hold probes below are unchanged. A signal
+ is "active" when FM squelch opens (with the RX tone if the channel needs one) or DMR plays a call (`dmr.state` rx).
+ A carrier that isn't active yet earns a probe: 350 ms on FM channels that need a tone (CTCSS detection takes 100 to
+-250 ms), 700 ms on DMR; other FM channels move on at once. On DMR a carrier is the noise reading at the squelch level
++250 ms), 450 ms on an unsynchronized DMR carrier; other FM channels move on at once. DMR modem lock takes 90 ms and
++a superframe 360 ms, so the 75 ms dwell plus this probe covers a complete superframe after lock with 75 ms of poll
++margin. On DMR a carrier is the noise reading at the squelch level
+ or the signal strength at the DMR scale (level 1 above -112 dBm, 3 dB a level: -100 dBm at the default level; some
+ receivers' noise reading doesn't follow a DMR signal, [gotchas](gotchas.md) 17.3). Level 1 is also at least 6 dB above
+ the floor: the lowest strength read past the settle on the last 8 stops (the first stop has none), since a strength
+diff --git a/tests/host/radioFeaturesTest.c b/tests/host/radioFeaturesTest.c
+index 0d20485..59161af 100644
+--- a/tests/host/radioFeaturesTest.c
++++ b/tests/host/radioFeaturesTest.c
+@@ -1457,6 +1457,7 @@ static void test_mixed_scan(void)
+ 	signal_on(0, 438500000, 30, no_tone);
+ 	req(RREQ_ZONE_POS, 4);
+ 	req(RREQ_SCAN, RSCAN_ZONE);
++	uint32_t arrived = now;
+ 	CHECK(sm.view.zone_pos == 5 && sm.view.ch.mode == RADIO_MODE_DMR && sim.started);
+ 	run(300);
+ 	CHECK(sm.view.zone_pos == 5 && sm.view.scan_phase == SCAN_PH_PROBE);
+@@ -1465,6 +1466,7 @@ static void test_mixed_scan(void)
+ 		run(25);
+ 	}
+ 	CHECK(sm.view.zone_pos != 5 && !sim.started);	// back on FM: the stack let go of the modem
++	CHECK(now - arrived == RADIO_SCAN_DWELL_MS + RADIO_SCAN_DMR_PROBE_MS);
+ 	// Next time round a call is on: the scan holds on it
+ 	for (int i = 0; i < 200 && sm.view.zone_pos != 5; i++) {
+ 		run(25);

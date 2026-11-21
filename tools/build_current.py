@@ -48,6 +48,10 @@ PATCHES = (
 	'dmr-activity-hang-late-entry.patch',
 	# Tools: independent, persistent zone-scan dwell; FM 50 ms, digital at least 75 ms
 	'zone-scan-speed.patch',
+	# DMR scan: discard an unsynchronized carrier after 450 ms; valid sync keeps full late-entry time
+	'dmr-scan-probe-speed.patch',
+	# Air band AM: use stock's AM audio gain instead of FM's word, and restore FM on exit
+	'am-airband-af-gain.patch',
 )
 
 

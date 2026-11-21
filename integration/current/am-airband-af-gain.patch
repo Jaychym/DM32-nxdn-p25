@@ -1,0 +1,202 @@
+diff --git a/docs/spec/hardware-dm32.md b/docs/spec/hardware-dm32.md
+index 4dcbf1a..dda1e84 100644
+--- a/docs/spec/hardware-dm32.md
++++ b/docs/spec/hardware-dm32.md
+@@ -1078,12 +1078,15 @@ So with the gain loop the RSSI half of the chip's squelch always passes (0x67 is
+ decides; the factory rows can't be compared with 0x67 as it reads here.
+ 
+ What RadioFoundry does: `rx_am` in `boards/dm32/radio_dm32.c` is the FM receive path (VHF LNA, speaker source to the
+-FD6818, A2) with that set-up: 0x43 = 0x0048, 0x47 = 0x6740, 0x13 = 0x03FF and its gain loop at every status poll, 0x4A
+-= 0x5450, each AM tune (`fd6818_set_am`, `fd6818_am_status`). Leaving AM writes 0x13 = 0x037E, 0x47 = 0x0140 and 0x4A as
+-it read before. The gain loop (`fd6818_agc_step`) runs at each status poll, so its hold counts polls; it starts from
+-full gain at each AM tune and writes 0x13 only when the gain changes. The squelch works on noise_sq plus 17 (`fd6818_am_noise`): level 1 opens under 47, as the chip's own
+-squelch does, and each level is 3 dB tighter; the factory rows are not read. The RSSI shown adds the gain the loop took
+-off back. The RDA5807M runs through the shared HR_C7000 glue (`platform/hrc7000/bcast_hrc.c`)
++FD6818, A2) with that set-up: 0x43 = 0x0048, 0x47 = 0x6740, the stock default AM AF gain 0x48 = 0x31ED (completing
++the stock AM set-up instead of leaving FM's 0xBBBF), 0x13 = 0x03FF and its gain loop at every status poll, 0x4A
++= 0x5450, each AM tune (`fd6818_set_am`, `fd6818_am_status`). Leaving AM writes 0x13 = 0x037E, 0x47 = 0x0140, 0x48 to
++the variant's FM word and 0x4A as it read before. The AM AF word is a property of the variant: another variant without
++a documented AM value keeps its previous behavior. The gain loop (`fd6818_agc_step`) runs at each status poll, so its
++hold counts polls; it starts from full gain at each AM tune and writes 0x13 only when the gain changes. The squelch
++works on noise_sq plus 17 (`fd6818_am_noise`): level 1 opens under 47, as the chip's own squelch does, and each level is
++3 dB tighter; the factory rows are not read. The RSSI shown adds the gain the loop took off back. The RDA5807M runs
++through the shared HR_C7000 glue (`platform/hrc7000/bcast_hrc.c`)
+ on PTA25 / PTA26 with no enable pin; its audio path turns the amplifier on and leaves the speaker source alone (B4).
+ The air band is an RX-only band of 108-136 MHz and the broadcast range 65-108 MHz in `boards/dm32/board.c`.
+ 
+diff --git a/drivers/rf/fd6818/fd6818.c b/drivers/rf/fd6818/fd6818.c
+index ad5154b..544e6b7 100644
+--- a/drivers/rf/fd6818/fd6818.c
++++ b/drivers/rf/fd6818/fd6818.c
+@@ -86,6 +86,7 @@ const fd6818_variant_t fd6818_variant_default = {
+ 	.bw_fm_25k = FD6818_BW_FM_25K, .bw_fm_12k5 = FD6818_BW_FM_12K5, .bw_dmr = FD6818_BW_DMR,
+ 	.band_words = fd6818_band_words,
+ 	.park_10hz = 14400000u,
++	.am_af_gain = FD6818_AF_GAIN_AM,
+ };
+ 
+ #define RSSI_CAL_BAND_GAP_MHZ	100u
+@@ -131,6 +132,7 @@ void fd6818_attach_variant(fd6818_t *dev, rfbus_t *bus, const fd6818_variant_t *
+ 	dev->am = false;
+ 	dev->am_noise_off = 0;
+ 	dev->r13 = 0;
++	dev->r48 = 0;
+ 	dev->r4a = 0;
+ 	fd6818_agc_reset(&dev->agc);
+ #endif
+@@ -362,13 +364,16 @@ void fd6818_set_am(fd6818_t *dev, bool am)
+ {
+ 	if (am) {
+ 		if (!dev->am) {
+-			// FM's 0x13 and 0x4A differ by board: the last value the variant's tables write, or the chip's own
++			// FM's 0x13, 0x48 and 0x4A differ by board: the last value the variant's tables write, or the chip's own
+ 			if (!fm_value(dev->variant, FD6818_REG_GAIN, &dev->r13)) {
+ 				dev->r13 = fd6818_read(dev, FD6818_REG_GAIN);
+ 			}
+ 			if (!fm_value(dev->variant, FD6818_REG_AM_4A, &dev->r4a)) {
+ 				dev->r4a = fd6818_read(dev, FD6818_REG_AM_4A);
+ 			}
++			if (dev->variant->am_af_gain != 0u && !fm_value(dev->variant, FD6818_REG_VOLUME, &dev->r48)) {
++				dev->r48 = fd6818_read(dev, FD6818_REG_VOLUME);
++			}
+ 			// The squelch's level 1 at the chip's own noise threshold, as this board sets it
+ 			uint16_t r4f;
+ 			if (!fm_value(dev->variant, FD6818_REG_SQ_NOISE, &r4f)) {
+@@ -377,12 +382,18 @@ void fd6818_set_am(fd6818_t *dev, bool am)
+ 			dev->am_noise_off = fd6818_am_noise_offset(r4f);
+ 		}
+ 		fd6818_write(dev, FD6818_REG_AF, FD6818_AF_AM);
++		if (dev->variant->am_af_gain != 0u) {
++			fd6818_write(dev, FD6818_REG_VOLUME, dev->variant->am_af_gain);
++		}
+ 		fd6818_write(dev, FD6818_REG_GAIN, FD6818_GAIN_AM_FULL);
+ 		fd6818_write(dev, FD6818_REG_AM_4A, FD6818_AM_4A);
+ 		fd6818_agc_reset(&dev->agc);
+ 	} else if (dev->am) {
+ 		fd6818_write(dev, FD6818_REG_GAIN, dev->r13);
+ 		fd6818_write(dev, FD6818_REG_AF, FD6818_AF_FM);
++		if (dev->variant->am_af_gain != 0u) {
++			fd6818_write(dev, FD6818_REG_VOLUME, dev->r48);
++		}
+ 		fd6818_write(dev, FD6818_REG_AM_4A, dev->r4a);
+ 	}
+ 	dev->am = am;
+diff --git a/drivers/rf/fd6818/fd6818.h b/drivers/rf/fd6818/fd6818.h
+index d56a0c2..8d8f562 100644
+--- a/drivers/rf/fd6818/fd6818.h
++++ b/drivers/rf/fd6818/fd6818.h
+@@ -48,6 +48,8 @@ typedef struct {
+ 	uint16_t sleep_fm, sleep_dmr, sleep_wake;
+ 	// Band words for a frequency in 10 Hz units: *r1a == 0 leaves 0x1A alone; false writes neither
+ 	bool (*band_words)(uint32_t freq_10hz, uint16_t *r1a, uint16_t *r40);
++	// AM audio gain in 0x48 where the board's own AM set-up documents it; 0 keeps the variant's FM word
++	uint16_t am_af_gain;
+ } fd6818_variant_t;
+ 
+ extern const fd6818_variant_t fd6818_variant_default;
+@@ -73,7 +75,7 @@ typedef struct {
+ #if CONFIG_AM_RX
+ 	bool am;		// the AM set-up is on (fd6818_set_am)
+ 	uint8_t am_noise_off;	// fd6818_am_noise's offset, from the variant's 0x4F
+-	uint16_t r13, r4a;	// 0x13 and 0x4A as they were before AM, written back when AM ends
++	uint16_t r13, r48, r4a;	// 0x13, 0x48 and 0x4A as they were before AM, written back when AM ends
+ 	fd6818_agc_t agc;
+ #endif
+ } fd6818_t;
+@@ -118,6 +120,8 @@ typedef struct {
+ // write (checked on the radio). FD6818_AF_AM is the radio's own air band word (hardware-dm32.md 8.7)
+ #define FD6818_AF_FM		0x0140u
+ #define FD6818_AF_AM		0x6740u
++// Stock's default AM AF gain. AM previously retained FM's 0xBBBF instead of completing the stock AM audio set-up
++#define FD6818_AF_GAIN_AM	0x31EDu
+ // The rest of the radio's own AM set-up (hardware-dm32.md 8.7): 0x13 at full gain (the top of the gain loop's table)
+ // and 0x4A
+ #define FD6818_GAIN_AM_FULL	0x03FFu
+@@ -201,10 +205,10 @@ void fd6818_set_rx_tone(fd6818_t *dev, fd6818_tone_t type, uint16_t value);
+ bool fd6818_rx_tone_ok(fd6818_t *dev, fd6818_tone_t type);
+ #if CONFIG_AM_RX
+ // The air band AM set-up (true) or back to FM (false), the radio's own sequence (hardware-dm32.md 8.7). On: 0x47 to
+-// the AM output, 0x13 to full gain, 0x4A to its AM word and the gain loop reset. The caller tunes as for FM receive
+-// with FD6818_BW_AM in 0x43, calls this on every FM-mode tune (am false outside the air band), and fd6818_am_status on
+-// each status reading. Off (from AM): 0x47 to the FM word, 0x13 and 0x4A to what they were before AM; outside AM it
+-// writes nothing. fd6818_set_mode ends AM first
++// the AM output, the variant's AM 0x48 if it has one, 0x13 to full gain, 0x4A to its AM word and the gain loop reset.
++// The caller tunes as for FM receive with FD6818_BW_AM in 0x43, calls this on every FM-mode tune (am false outside the
++// air band), and fd6818_am_status on each status reading. Off (from AM): 0x47 to the FM word, 0x13, the AM-specific
++// 0x48 and 0x4A to what they were before AM; outside AM it writes nothing. fd6818_set_mode ends AM first
+ void fd6818_set_am(fd6818_t *dev, bool am);
+ // In AM, one status reading (0x65, 0x67): rssi_dbm gets the gain the loop took off added back, noise the AM squelch
+ // value (fd6818_am_noise), and the gain loop takes its step (writing 0x13 when the gain changes). Outside AM it changes
+diff --git a/tests/host/fd6818Test.c b/tests/host/fd6818Test.c
+index 67686e8..d33d76b 100644
+--- a/tests/host/fd6818Test.c
++++ b/tests/host/fd6818Test.c
+@@ -308,7 +308,7 @@ static void test_rx_sleep(void)
+ 	CHECK(chip.n == 1 && chip.log[0].reg == 0x37 && chip.log[0].val == 0x9D1F);
+ }
+ 
+-// AM receive: one AF word, the FM word with the AM demodulator type; FM gives the tables' word back
++// AM receive: its own demodulator output and AF gain, not FM's hotter AF word; FM gives every saved word back
+ static void test_am(void)
+ {
+ 	fd6818_t dev;
+@@ -317,28 +317,32 @@ static void test_am(void)
+ 	// Outside AM, "off" writes nothing
+ 	fd6818_set_am(&dev, false);
+ 	CHECK(chip.n == 0);
+-	// On: the AM output, full gain, 0x4A's AM word (hardware-dm32.md 8.7). 0x4A isn't in the default tables: its value
+-	// before AM is read from the chip
++	// On: the AM output, its stock AF gain, full RF gain, 0x4A's AM word (hardware-dm32.md 8.7). 0x4A isn't in the
++	// default tables: its value before AM is read from the chip
+ 	chip.regs[FD6818_REG_AM_4A] = 0x1234;
+ 	fd6818_set_am(&dev, true);
+-	CHECK(chip.n == 3);
++	CHECK(chip.n == 4);
+ 	CHECK(chip.log[0].reg == FD6818_REG_AF && chip.log[0].val == 0x6740);
+-	CHECK(chip.log[1].reg == FD6818_REG_GAIN && chip.log[1].val == 0x03FF);
+-	CHECK(chip.log[2].reg == FD6818_REG_AM_4A && chip.log[2].val == 0x5450);
++	CHECK(chip.log[1].reg == FD6818_REG_VOLUME && chip.log[1].val == FD6818_AF_GAIN_AM);
++	CHECK(chip.log[2].reg == FD6818_REG_GAIN && chip.log[2].val == 0x03FF);
++	CHECK(chip.log[3].reg == FD6818_REG_AM_4A && chip.log[3].val == 0x5450);
++	CHECK(FD6818_AF_GAIN_AM == 0x31EDu);	// stock's default AM word; FM's 0xBBBF must not drive AM audio
+ 	CHECK((FD6818_AF_AM & 0x0F00u) == 0x0700u && (FD6818_AF_FM & 0x0F00u) == 0x0100u);
+ 	CHECK(FD6818_BW_AM == 0x0048u);
+ 	// Again (a new AM channel): the same writes, 0x4A's saved value kept
+ 	fd6818_set_am(&dev, true);
+-	CHECK(chip.n == 6 && chip.log[5].val == 0x5450);
+-	// Off: FM's AF word, the FM table's 0x13, 0x4A as it was
++	CHECK(chip.n == 8 && chip.log[7].val == 0x5450);
++	// Off: FM's AF word and AF gain, the FM table's 0x13, 0x4A as it was
+ 	fd6818_set_am(&dev, false);
+ 	int i = find_last(FD6818_REG_GAIN);
+ 	CHECK(i >= 0 && chip.log[i].val == 0x037E);
+ 	i = find_last(FD6818_REG_AF);
+ 	CHECK(i >= 0 && chip.log[i].val == 0x0140);
++	i = find_last(FD6818_REG_VOLUME);
++	CHECK(i >= 0 && chip.log[i].val == 0xBBBF);
+ 	i = find_last(FD6818_REG_AM_4A);
+ 	CHECK(i >= 0 && chip.log[i].val == 0x1234);
+-	// A mode change from AM ends AM first: 0x4A comes back although the mode tables don't write it
++	// A mode change from AM ends AM first: 0x48 and 0x4A come back although the mode tables don't write 0x4A
+ 	fd6818_set_am(&dev, true);
+ 	chip.n = 0;
+ 	fd6818_set_mode(&dev, FD6818_MODE_FM);
+@@ -346,6 +350,8 @@ static void test_am(void)
+ 	CHECK(i >= 0 && chip.log[i].val == 0x1234 && !dev.am);
+ 	i = find_last(FD6818_REG_AF);
+ 	CHECK(i >= 0 && chip.log[i].val == FD6818_AF_FM);
++	i = find_last(FD6818_REG_VOLUME);
++	CHECK(i >= 0 && chip.log[i].val == 0xBBBF);
+ 	// Outside AM a status reading changes nothing and the gain loop doesn't run
+ 	chip.n = 0;
+ 	int16_t rssi = -90;
+@@ -376,7 +382,9 @@ static void test_am(void)
+ 	chip.regs[FD6818_REG_AM_4A] = 0x2222;
+ 	fd6818_set_am(&dev, true);
+ 	CHECK(dev.am_noise_off == 24);	// its 0x4F = 0x2A28: noise_sq_th_in 40 is its level 1
++	CHECK(chip.n == 3 && find_last(FD6818_REG_VOLUME) < 0);	// no stock DM-32 AM AF word on another variant
+ 	fd6818_set_am(&dev, false);
++	CHECK(find_last(FD6818_REG_VOLUME) < 0);
+ 	i = find_last(FD6818_REG_GAIN);
+ 	CHECK(i >= 0 && chip.log[i].val == 0x03DF);
+ 	i = find_last(FD6818_REG_AM_4A);
