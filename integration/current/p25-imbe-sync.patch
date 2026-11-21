@@ -169,3 +169,16 @@ index 687660e..dfcfb9d 100644
  
  The voice path (`core/p25/p25Voice.c`) sits between the engine and the board's PCM stream (`hal_audio_t`):
  
+diff --git a/tools/bench/p25tool.py b/tools/bench/p25tool.py
+index a0dfece..3ea7c6d 100644
+--- a/tools/bench/p25tool.py
++++ b/tools/bench/p25tool.py
+@@ -275,6 +275,8 @@ def compare(lines, exp):
+         for v, w in zip(u.get("voice", []), want[j].get("voice", [])):
+             r["voice_frames"] += 1
+             x = int.from_bytes(bytes.fromhex(v["imbe"]), "big") ^ int.from_bytes(bytes.fromhex(w), "big")
++            # Bit 87 is the sync bit the transmitter replaces; compare the 87 vocoder bits here
++            x &= ~1
+             diff, bare = bin(x).count("1"), bin(x & 0x7F).count("1")
+             r["voice_bit_errs"] += diff
+             r["voice_frames_wrong"] += 1 if diff else 0
