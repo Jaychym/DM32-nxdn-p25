@@ -10,7 +10,6 @@ index 5b4b7e6..e98cbf7 100644
 +
  	if (!p25_call_tx_wants_voice(t))
  		return;
-+	p25_ldu_voice_put(t->unit, t->nvoice, imbe);
 +	memcpy(framed, imbe, sizeof framed);
 +	// IMBE bit 87 is the frame sync bit, not a vocoder parameter: alternate it through each LDU1/LDU2 pair
 +	framed[P25_IMBE_BYTES - 1] = (uint8_t)((framed[P25_IMBE_BYTES - 1] & 0xFEu) |
