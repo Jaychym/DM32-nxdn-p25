@@ -1,0 +1,170 @@
+diff --git a/core/p25/p25_call.c b/core/p25/p25_call.c
+index 5b4b7e6..e98cbf7 100644
+--- a/core/p25/p25_call.c
++++ b/core/p25/p25_call.c
+@@ -342,20 +342,22 @@ bool p25_call_tx_wants_voice(const p25_call_tx_t *t)
+ 
+ void p25_call_tx_voice(p25_call_tx_t *t, const uint8_t imbe[P25_IMBE_BYTES])
+ {
++	uint8_t framed[P25_IMBE_BYTES];
++
+ 	if (!p25_call_tx_wants_voice(t))
+ 		return;
+-	p25_ldu_voice_put(t->unit, t->nvoice, imbe);
++	memcpy(framed, imbe, sizeof framed);
++	// IMBE bit 87 is the frame sync bit, not a vocoder parameter: alternate it through each LDU1/LDU2 pair
++	framed[P25_IMBE_BYTES - 1] = (uint8_t)((framed[P25_IMBE_BYTES - 1] & 0xFEu) |
++					      ((t->nvoice + (t->state == TX_LDU2)) & 1u));
+ #if CONFIG_AIR_AES
+ 	if (t->aes_key != NULL) {
+-		uint8_t enc[P25_IMBE_BYTES];
+-
+-		memcpy(enc, imbe, sizeof enc);
+ 		if (t->nvoice == 8)
+ 			aes_ofb_skip(&t->ofb, 2);
+-		aes_ofb_xor(&t->ofb, enc, sizeof enc);	// the frame's 88 bits, before their FEC
+-		p25_ldu_voice_put(t->unit, t->nvoice, enc);
+-	} else
++		aes_ofb_xor(&t->ofb, framed, sizeof framed);	// the frame's 88 bits, including sync, before their FEC
++	}
+ #endif
+-	p25_ldu_voice_put(t->unit, t->nvoice, imbe);
++	p25_ldu_voice_put(t->unit, t->nvoice, framed);
+ 	t->nvoice++;
+ 	t->ready = p25_ldu_voice_sym(t->nvoice);
+ }
+diff --git a/tests/host/p25Test.c b/tests/host/p25Test.c
+index 13810b2..02f2f39 100644
+--- a/tests/host/p25Test.c
++++ b/tests/host/p25Test.c
+@@ -422,6 +422,12 @@ static void cs_voice(const uint8_t imbe[P25_IMBE_BYTES], uint8_t errs, void *ctx
+ }
+ static const p25_call_sink_t cs_sink = { cs_start, cs_update, cs_voice, cs_end };
+ 
++// Bit 87 is the air interface's sync bit, overwritten by the transmitter; the 87 vocoder bits must survive
++static bool same_voice(const uint8_t *a, const uint8_t *b)
++{
++	return memcmp(a, b, P25_IMBE_BYTES - 1) == 0 && (a[P25_IMBE_BYTES - 1] & 0xFEu) == (b[P25_IMBE_BYTES - 1] & 0xFEu);
++}
++
+ // A transmission of nframes voice frames onto air[]; the symbols go out in pulls of any size, a voice frame comes
+ // only when nothing else can go out (so a symbol sent before its frame was in would show as a wrong frame)
+ static uint8_t tx_voice[64][P25_IMBE_BYTES];
+@@ -484,10 +490,15 @@ static void testCallLayer(void)
+ 	CHECK(cs.starts == 1 && cs.ends == 1 && cs.updates == 1, "starts %u ends %u updates %u", cs.starts, cs.ends, cs.updates);
+ 	CHECK(!cs.call.late && cs.call.nac == 0x293 && cs.call.have_lc && cs.call.lc.tgid == 4321 && cs.call.lc.src == 7654321 && cs.call.have_alg && cs.call.algid == P25_ALGID_CLEAR, "call fields");
+ 	CHECK(cs.nvoice == 27 && cs.worst == 0, "voice frames %u, worst %u", cs.nvoice, cs.worst);
+-	for (uint8_t i = 0; i < 27 && i < cs.nvoice; i++)
+-		if (memcmp(cs.voice[i], i < 23 ? tx_voice[i] : silence, P25_IMBE_BYTES))
++	bool sync_ok = true;
++	for (uint8_t i = 0; i < 27 && i < cs.nvoice; i++) {
++		if (!same_voice(cs.voice[i], i < 23 ? tx_voice[i] : silence))
+ 			bad++;
++		if ((cs.voice[i][P25_IMBE_BYTES - 1] & 1u) != ((i % 9 + (i / 9) % 2) & 1u))
++			sync_ok = false;
++	}
+ 	CHECK(bad == 0, "%u voice frames differ", bad);
++	CHECK(sync_ok, "IMBE sync bit alternates through LDU1 and LDU2");
+ 	CHECK(c.stats.units == 5 && c.stats.voice == 27 && c.stats.calls == 1 && !c.active, "stats: units %u voice %u", c.stats.units, c.stats.voice);
+ 
+ 	// Late entry: the receiver comes on the channel inside the first LDU. The call starts with the LDU2, the link
+@@ -504,7 +515,7 @@ static void testCallLayer(void)
+ 	air_n -= tx_at[1] + 200;
+ 	run(&fr, 100, 0, 0);
+ 	CHECK(cs.starts == 1 && cs.ends == 1 && cs.call.late && cs.call.have_lc && cs.call.lc.src == 7654321, "late entry: starts %u ends %u late %d lc %d", cs.starts, cs.ends, cs.call.late, cs.call.have_lc);
+-	CHECK(cs.nvoice == 27 && !memcmp(cs.voice[0], tx_voice[9], P25_IMBE_BYTES) && !memcmp(cs.voice[26], tx_voice[35], P25_IMBE_BYTES), "late entry: %u voice frames", cs.nvoice);
++	CHECK(cs.nvoice == 27 && same_voice(cs.voice[0], tx_voice[9]) && same_voice(cs.voice[26], tx_voice[35]), "late entry: %u voice frames", cs.nvoice);
+ 
+ 	// PTT let go during the header: no LDU is sent
+ 	air_n = 0;
+diff --git a/tests/host/p25EngineTest.c b/tests/host/p25EngineTest.c
+index f633d6b..d7c0cfb 100644
+--- a/tests/host/p25EngineTest.c
++++ b/tests/host/p25EngineTest.c
+@@ -141,6 +141,15 @@ PROVIDER(1)
+ 
+ // ── The two radios ──
+ static const uint8_t silence[P25_IMBE_BYTES] = { 0xA5, 0x5A, 0xA5, 0x5A, 0xA5, 0x5A, 0xA5, 0x5A, 0xA5, 0x5A, 0xA5 };
++
++// Bit 87 is the air interface's sync bit, overwritten by the transmitter; the 87 vocoder bits must survive
++static int voice_memcmp(const uint8_t *a, const uint8_t *b)
++{
++	if (memcmp(a, b, P25_IMBE_BYTES - 1) != 0)
++		return 1;
++	return (a[P25_IMBE_BYTES - 1] & 0xFEu) != (b[P25_IMBE_BYTES - 1] & 0xFEu);
++}
++
+ typedef struct {
+ 	p25_engine_t e;
+ 	// What it heard
+@@ -252,9 +261,9 @@ static void testCall(void)
+ 	// Every encoded frame arrived, in order; the tail is silence up to the LDU's end, and whole LDUs came
+ 	CHECK(r[0].enc_taken == r[0].enc_made && r[1].nvoice % 9 == 0 && r[1].nvoice >= r[0].enc_made && r[1].nvoice < r[0].enc_made + 9 + v.tx_filler, "frames: made %u taken %u heard %u", r[0].enc_made, r[0].enc_taken, r[1].nvoice);
+ 	for (uint16_t i = 0, k = 0; i < r[1].nvoice; i++) {
+-		if (!memcmp(r[1].voice[i], silence, P25_IMBE_BYTES))
++		if (!voice_memcmp(r[1].voice[i], silence, P25_IMBE_BYTES))
+ 			continue;	// filler
+-		if (k >= r[0].enc_made || memcmp(r[1].voice[i], r[0].enc[k++], P25_IMBE_BYTES))
++		if (k >= r[0].enc_made || voice_memcmp(r[1].voice[i], r[0].enc[k++], P25_IMBE_BYTES))
+ 			bad++;
+ 	}
+ 	CHECK(bad == 0 && r[1].voice_errs == 0, "%u frames out of order or wrong, %u with errors", bad, r[1].voice_errs);
+@@ -297,7 +306,7 @@ static void testCall(void)
+ 		step(0);
+ 	}
+ 	CHECK(n > 40 && n < 52 && prov[1].underruns == 0, "no encoder: ended at %u, underruns %u", n, prov[1].underruns);
+-	CHECK(r[0].starts == 1 && r[0].ends == 1 && r[0].call.lc.src == 2002 && r[0].nvoice >= 54 && !memcmp(r[0].voice[5], silence, P25_IMBE_BYTES), "no encoder: heard %u frames", r[0].nvoice);
++	CHECK(r[0].starts == 1 && r[0].ends == 1 && r[0].call.lc.src == 2002 && r[0].nvoice >= 54 && !voice_memcmp(r[0].voice[5], silence, P25_IMBE_BYTES), "no encoder: heard %u frames", r[0].nvoice);
+ 	p25_engine_end(&r[0].e);
+ 	p25_engine_end(&r[1].e);
+ }
+@@ -398,9 +407,9 @@ static uint16_t heard_in_order(void)
+ 	uint16_t ok = 0;
+ 
+ 	for (uint16_t i = 0, k = 0; i < r[1].nvoice; i++) {
+-		if (!memcmp(r[1].voice[i], silence, P25_IMBE_BYTES))
++		if (!voice_memcmp(r[1].voice[i], silence, P25_IMBE_BYTES))
+ 			continue;
+-		if (k < r[0].enc_made && !memcmp(r[1].voice[i], r[0].enc[k], P25_IMBE_BYTES))
++		if (k < r[0].enc_made && !voice_memcmp(r[1].voice[i], r[0].enc[k], P25_IMBE_BYTES))
+ 			ok++;
+ 		k++;
+ 	}
+@@ -428,6 +437,10 @@ static void testAes(void)
+ 	CHECK(r[1].nvoice >= 90 && r[1].voice_errs == 0, "aes call: %u frames, %u with errors", r[1].nvoice, r[1].voice_errs);
+ 	n = heard_in_order();
+ 	CHECK(n >= 90 && n == r[0].enc_made, "aes call: %u of %u encoded frames heard in order", n, r[0].enc_made);
++	bool sync_ok = true;
++	for (uint16_t i = 0; i < r[1].nvoice; i++)
++		sync_ok &= (r[1].voice[i][P25_IMBE_BYTES - 1] & 1u) == ((i % 9 + (i / 9) % 2) & 1u);
++	CHECK(sync_ok, "aes call: IMBE sync is set before encryption and alternates through each LDU pair");
+ 	// The same encoder frames would not arrive unless the voice on air was encrypted: radio 2 with no key hears none
+ 	// (below), and the frames on air are not the plain ones (the key stream is not all zero)
+ 	CHECK(mi_calls == 1, "one indicator for the call: %u", mi_calls);
+@@ -492,10 +505,10 @@ static void testAes(void)
+ 	for (uint16_t i = 0; i < r[1].nvoice; i++) {
+ 		bool found = false;
+ 
+-		if (!memcmp(r[1].voice[i], silence, P25_IMBE_BYTES))
++		if (!voice_memcmp(r[1].voice[i], silence, P25_IMBE_BYTES))
+ 			continue;
+ 		for (uint16_t k = 0; k < r[0].enc_made && !found; k++)
+-			found = !memcmp(r[1].voice[i], r[0].enc[k], P25_IMBE_BYTES);
++			found = !voice_memcmp(r[1].voice[i], r[0].enc[k], P25_IMBE_BYTES);
+ 		known += found;
+ 		foreign += !found;
+ 	}
+diff --git a/docs/spec/p25.md b/docs/spec/p25.md
+index 687660e..dfcfb9d 100644
+--- a/docs/spec/p25.md
++++ b/docs/spec/p25.md
+@@ -98,7 +98,8 @@ before an LDU's first voice frame sends the terminator right after the LDU befor
+ 
+ ## 5. Voice
+ 
+-A voice frame is 88 bits (11 bytes): the IMBE vocoder's words u0 to u7 after the frame's FEC.
++A voice frame is 88 bits (11 bytes): the IMBE vocoder's words u0 to u7 after the frame's FEC. On transmit, bit 87
++(the low bit of u7) is the frame sync bit: it alternates through each LDU1/LDU2 pair, and is set before encryption and FEC.
+ 
+ The voice path (`core/p25/p25Voice.c`) sits between the engine and the board's PCM stream (`hal_audio_t`):
+ 

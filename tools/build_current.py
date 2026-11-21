@@ -52,6 +52,8 @@ PATCHES = (
 	'dmr-scan-probe-speed.patch',
 	# Air band AM: use stock's AM audio gain instead of FM's word, and restore FM on exit
 	'am-airband-af-gain.patch',
+	# P25: alternate the IMBE frame-sync bit through LDU1/LDU2, before FEC and AES
+	'p25-imbe-sync.patch',
 )
 
 
