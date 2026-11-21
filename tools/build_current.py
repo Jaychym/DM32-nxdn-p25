@@ -54,6 +54,8 @@ PATCHES = (
 	'am-airband-af-gain.patch',
 	# P25: alternate the IMBE frame-sync bit through LDU1/LDU2, before FEC and AES
 	'p25-imbe-sync.patch',
+	# Zone scan: empty digital channels advance after 50 ms; signal probes stay unchanged
+	'zone-digital-scan-50ms.patch',
 )
 
 
