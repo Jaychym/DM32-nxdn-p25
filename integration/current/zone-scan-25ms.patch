@@ -1,0 +1,302 @@
+diff --git a/core/radio/scan.h b/core/radio/scan.h
+index f3c6066..aeb72a9 100644
+--- a/core/radio/scan.h
++++ b/core/radio/scan.h
+@@ -26,6 +26,7 @@ typedef enum { SCAN_ACT_NONE, SCAN_ACT_NEXT, SCAN_ACT_STOP } scan_act_t;
+ #define SCAN_FLOOR_STOPS	8	// the signal strength floor: the lowest reading of the last this many stops
+ 
+ typedef struct {
++	uint16_t settle_ms;	// readings this soon after a retune belong to the last stop (0 = SCAN_SETTLE_MS)
+ 	uint16_t dwell_ms;	// listen time per stop with nothing heard (from the retune)
+ 	uint16_t probe_ms;	// a carrier without a tone match (FM) or a call (DMR): wait this long for one
+ 	uint16_t sync_ms;	// ... and this long (from the probe's start) once sync was heard on this stop (0 = probe_ms)
+diff --git a/core/radio/scan.c b/core/radio/scan.c
+index 28a27f9..d8d5b91 100644
+--- a/core/radio/scan.c
++++ b/core/radio/scan.c
+@@ -28,6 +28,9 @@ void scan_begin(scan_t *s, uint8_t kind, const scan_cfg_t *cfg, uint32_t now_ms)
+ 	s->sweep_pos = origin_pos;
+ 	s->kind = kind;
+ 	s->cfg = *cfg;
++	if (s->cfg.settle_ms == 0) {
++		s->cfg.settle_ms = SCAN_SETTLE_MS;
++	}
+ 	s->tuned_ms = now_ms;
+ 	phase(s, SCAN_PH_LISTEN, now_ms);
+ }
+@@ -60,7 +63,7 @@ void scan_tuned(scan_t *s, uint32_t now_ms)
+ 
+ void scan_level(scan_t *s, uint32_t now_ms, int16_t dbm)
+ {
+-	if (now_ms - s->tuned_ms < SCAN_SETTLE_MS) {
++	if (now_ms - s->tuned_ms < s->cfg.settle_ms) {
+ 		return;
+ 	}
+ 	if (!s->stop_min_ok || dbm < s->stop_min_dbm) {
+@@ -118,7 +121,7 @@ scan_act_t scan_poll(scan_t *s, uint32_t now_ms, bool active, bool carrier, bool
+ 	}
+ 	uint32_t since_tune = now_ms - s->tuned_ms;
+ 	uint32_t in_phase = now_ms - s->phase_ms;
+-	if (since_tune < SCAN_SETTLE_MS) {
++	if (since_tune < s->cfg.settle_ms) {
+ 		return SCAN_ACT_NONE;
+ 	}
+ 	if (carrier || sync) {
+diff --git a/core/radio/radio_sm.h b/core/radio/radio_sm.h
+index b14cb74..08a574b 100644
+--- a/core/radio/radio_sm.h
++++ b/core/radio/radio_sm.h
+@@ -83,7 +83,8 @@
+ 
+ // Scan defaults and per-stop timing (docs/spec/radio-features.md 2)
+ #define RADIO_SCAN_DWELL_MS	75	// VFO / dual watch: empty-channel dwell after the receiver settle
+-#define RADIO_SCAN_ZONE_DIGITAL_DWELL_MS 50	// zone scan: empty digital channels; one 50 ms settle/listen window
++#define RADIO_SCAN_ZONE_SETTLE_MS 25	// zone scan: one poll to discard the last stop's readings
++#define RADIO_SCAN_ZONE_DIGITAL_DWELL_MS 25	// zone scan: empty digital channels; settle and listen in one poll
+ #define RADIO_SCAN_DUAL_MIN_DWELL_MS 150	// dual watch keeps a full receiver visit on each channel
+ #define RADIO_SCAN_FM_PROBE_MS	350	// FM: a carrier without the RX tone yet (CTCSS detection takes 100-250 ms)
+ #define RADIO_SCAN_DMR_PROBE_MS	450	// DMR: an unsynchronized carrier. Lock takes 90 ms and a superframe 360 ms;
+diff --git a/core/radio/radio_sm.c b/core/radio/radio_sm.c
+index d389e67..312b7a5 100644
+--- a/core/radio/radio_sm.c
++++ b/core/radio/radio_sm.c
+@@ -4493,8 +4493,9 @@ static bool scan_step(radio_sm_t *sm, uint32_t now_ms)
+ static void scan_config(const radio_sm_t *sm, uint8_t kind, scan_cfg_t *cfg)
+ {
+ 	memset(cfg, 0, sizeof(*cfg));
++	cfg->settle_ms = kind == SCAN_ZONE ? RADIO_SCAN_ZONE_SETTLE_MS : SCAN_SETTLE_MS;
+ 	uint16_t dwell_ms = kind == SCAN_ZONE ? sm->set.zone_scan_dwell_ms : sm->set.scan_dwell_ms;
+-	cfg->dwell_ms = dwell_ms < SCAN_SETTLE_MS ? SCAN_SETTLE_MS : dwell_ms;
++	cfg->dwell_ms = dwell_ms < cfg->settle_ms ? cfg->settle_ms : dwell_ms;
+ 	cfg->hold_ms = (uint16_t)(sm->set.scan_hold_s * 1000u);
+ 	cfg->delay_ms = sm->set.scan_delay_ms;
+ 	cfg->resume = sm->set.scan_resume;
+@@ -4802,11 +4803,11 @@ static void scan_service(radio_sm_t *sm, const radio_status_t *st, uint32_t now_
+ 		// The strength scale also sits above the floor read on the stops before: some receivers' strength
+ 		// reading isn't calibrated, and reads far up the scale on an empty channel (gotchas 17.4)
+ 		scan_level(sc, now_ms, st->rssi_dbm);
+-		carrier = carrier || (now_ms - sc->tuned_ms >= SCAN_SETTLE_MS && dmr_strength_heard(sm, st->rssi_dbm));
++		carrier = carrier || (now_ms - sc->tuned_ms >= sc->cfg.settle_ms && dmr_strength_heard(sm, st->rssi_dbm));
+ 		// Sync: bursts with the channel's color code since this stop's settle, a call or a late entry still
+ 		// waiting for its LC. A call known not to be for us (another group, a private call) holds nothing
+ 		uint32_t heard_ms;
+-		sync = dmr_call_last_activity(&heard_ms) && (int32_t)(heard_ms - sc->tuned_ms) >= SCAN_SETTLE_MS &&
++		sync = dmr_call_last_activity(&heard_ms) && (int32_t)(heard_ms - sc->tuned_ms) >= sc->cfg.settle_ms &&
+ 		       now_ms - heard_ms <= RADIO_SCAN_DMR_SYNC_AGE_MS;
+ 		if (sm->view.dmr.state == RDMR_RX_OTHER) {
+ 			carrier = sync = false;
+@@ -4824,7 +4825,7 @@ static void scan_service(radio_sm_t *sm, const radio_status_t *st, uint32_t now_
+ 		// plays. A call decided against (another talk group, encrypted) holds nothing
+ 		uint8_t h = air_heard(sm);
+ 		scan_level(sc, now_ms, st->rssi_dbm);
+-		carrier = carrier || (now_ms - sc->tuned_ms >= SCAN_SETTLE_MS && dmr_strength_heard(sm, st->rssi_dbm));
++		carrier = carrier || (now_ms - sc->tuned_ms >= sc->cfg.settle_ms && dmr_strength_heard(sm, st->rssi_dbm));
+ 		active = h == AIR_HEARD_PLAYED;
+ 		sync = h == AIR_HEARD_PENDING;
+ 		if (h == AIR_HEARD_OTHER) {
+@@ -4836,12 +4837,12 @@ static void scan_service(radio_sm_t *sm, const radio_status_t *st, uint32_t now_
+ 		active = sm->view.state == RS_RX && (sm->view.squelch != 0 || carrier);
+ 	}
+ 	if (sc->kind == SCAN_ZONE) {
+-		// FM and digital empty channels can advance after 50 ms: the receiver settle and carrier reading share
+-		// that window. VFO and dual watch keep their own, longer dwell; signal probes are unchanged
++		// Empty channels advance after one 25 ms poll: the receiver settle and the first carrier reading share
++		// that window. VFO and dual watch keep their own, longer timing; signal probes are unchanged
+ 		uint16_t dwell = sm->set.zone_scan_dwell_ms;
+ 		if ((dmr || air) && dwell < RADIO_SCAN_ZONE_DIGITAL_DWELL_MS)
+ 			dwell = RADIO_SCAN_ZONE_DIGITAL_DWELL_MS;
+-		sc->cfg.dwell_ms = dwell < SCAN_SETTLE_MS ? SCAN_SETTLE_MS : dwell;
++		sc->cfg.dwell_ms = dwell < sc->cfg.settle_ms ? sc->cfg.settle_ms : dwell;
+ 	}
+ 	sc->cfg.probe_ms = dmr ? RADIO_SCAN_DMR_PROBE_MS : air ? RADIO_SCAN_AIR_PROBE_MS :
+ 			   tone_needed(sm) ? RADIO_SCAN_FM_PROBE_MS : 0;
+@@ -7425,8 +7426,8 @@ static void persist(radio_sm_t *sm, uint32_t now_ms)
+ 
+ static void clamp_settings(radio_settings_t *s)
+ {
+-	if (s->zone_scan_dwell_ms < SCAN_SETTLE_MS) {
+-		s->zone_scan_dwell_ms = SCAN_SETTLE_MS;
++	if (s->zone_scan_dwell_ms < RADIO_SCAN_ZONE_SETTLE_MS) {
++		s->zone_scan_dwell_ms = RADIO_SCAN_ZONE_SETTLE_MS;
+ 	} else if (s->zone_scan_dwell_ms > RADIO_ZONE_SCAN_DWELL_MAX_MS) {
+ 		s->zone_scan_dwell_ms = RADIO_ZONE_SCAN_DWELL_MAX_MS;
+ 	}
+@@ -7507,8 +7508,8 @@ static void settings_to_radio(const settings_t *st, radio_settings_t *s)
+ 		s->sfr_cwid = (uint8_t)((st->rpt_beacon & SETTINGS_RPT_SFR_CWID) >> SETTINGS_RPT_SFR_CWID_SHIFT);
+ 		clamp_settings(s);
+ 	}
+-	// Page 1: 0 (never set, or a page 0 alone) keeps the default
+-	if (st->zone_scan_dwell_25ms != 0) {
++	// Page 1: 0 (never set, or a page 0 alone) and the old 50 ms default migrate to 25 ms; slower choices survive
++	if (st->zone_scan_dwell_25ms > 2) {
+ 		s->zone_scan_dwell_ms = (uint16_t)st->zone_scan_dwell_25ms * 25u;
+ 		clamp_settings(s);
+ 	}
+@@ -7609,7 +7610,7 @@ static void use_settings(radio_sm_t *sm, const radio_settings_t *s, uint32_t now
+ #if CONFIG_SCAN
+ 	if (sm->scan.kind == SCAN_ZONE && sm->scan.cfg.dwell_ms != sm->set.zone_scan_dwell_ms) {
+ 		// Tools' zone dwell takes effect on this stop too; all signal probe and hold times stay unchanged
+-		sm->scan.cfg.dwell_ms = sm->set.zone_scan_dwell_ms < SCAN_SETTLE_MS ? SCAN_SETTLE_MS :
++		sm->scan.cfg.dwell_ms = sm->set.zone_scan_dwell_ms < sm->scan.cfg.settle_ms ? sm->scan.cfg.settle_ms :
+ 					       sm->set.zone_scan_dwell_ms;
+ 	}
+ #endif
+diff --git a/core/radio/radio.h b/core/radio/radio.h
+index 57c3522..e8925a6 100644
+--- a/core/radio/radio.h
++++ b/core/radio/radio.h
+@@ -44,9 +44,9 @@ typedef enum { RADIO_BCL_OFF, RADIO_BCL_CARRIER, RADIO_BCL_WRONG_TONE } radio_bc
+ // VOX: off, on channels whose codeplug entry allows it, on every FM channel
+ typedef enum { RADIO_VOX_OFF, RADIO_VOX_CHANNEL, RADIO_VOX_ALL } radio_vox_t;
+ 
+-// Zone scan has its own empty-channel dwell: speeding it up does not shorten VFO or dual-watch visits. The receiver
+-// still gets SCAN_SETTLE_MS after every retune; 500 ms is the slowest choice offered by Tools > Zone scan speed
+-#define RADIO_ZONE_SCAN_DWELL_MIN_MS	50u
++// Zone scan has its own settle and empty-channel dwell: speeding them up does not shorten VFO or dual-watch visits.
++// Other scans still get SCAN_SETTLE_MS; 500 ms is the slowest choice offered by Tools > Zone scan speed
++#define RADIO_ZONE_SCAN_DWELL_MIN_MS	25u
+ #define RADIO_ZONE_SCAN_DWELL_MS	RADIO_ZONE_SCAN_DWELL_MIN_MS
+ #define RADIO_ZONE_SCAN_DWELL_MAX_MS	500u
+ 
+diff --git a/core/settings/settings.h b/core/settings/settings.h
+index d246906..fe91ea1 100644
+--- a/core/settings/settings.h
++++ b/core/settings/settings.h
+@@ -252,7 +252,7 @@ typedef struct {
+ 	uint8_t vfo_nxdn_key[2];
+ 	uint8_t vfo_dmr_kid[2];
+ 	uint8_t classic_style;	// 1: RadioFoundry visual style, 0: this build's default
+-	// Zone scan's independent empty-channel dwell, in 25 ms units (50-500 ms). 0 in an older record = the 50 ms default
++	// Zone scan's independent empty-channel dwell, in 25 ms units (25-500 ms). 0 or the old 50 ms default = 25 ms now
+ 	uint8_t zone_scan_dwell_25ms;	// was reserved_vfo
+ } settings_t;
+ 
+diff --git a/core/ui/ui_menus.c b/core/ui/ui_menus.c
+index d8fec99..5b92419 100644
+--- a/core/ui/ui_menus.c
++++ b/core/ui/ui_menus.c
+@@ -7114,8 +7114,9 @@ static const tr_id_t n_ptype[] = { TRN(VALUE_OFF, "Off"), TRX(VALUE_MOTOROLA, "M
+ #define LIST(nm, syn_, sid, v, nms) { nm, syn_, ST_LIST, sid, sizeof v / sizeof v[0], { .values = v, .names = nms } }
+ #define ACTION(nm, syn_, a) { nm, syn_, ST_ACTION, a, 0, { { 0, 0, 0, NULL } } }
+ 
+-static const int16_t v_zone_scan_dwell[] = { 50, 75, 100, 150, 250, 500 };
+-static const tr_id_t n_zone_scan_dwell[] = { TRX(ZONE_SCAN_VALUE_50_MS, "50 ms"), TRX(ZONE_SCAN_VALUE_75_MS, "75 ms"),
++static const int16_t v_zone_scan_dwell[] = { 25, 50, 75, 100, 150, 250, 500 };
++static const tr_id_t n_zone_scan_dwell[] = { TRX(ZONE_SCAN_VALUE_25_MS, "25 ms"), TRX(ZONE_SCAN_VALUE_50_MS, "50 ms"),
++	TRX(ZONE_SCAN_VALUE_75_MS, "75 ms"),
+ 	TRX(ZONE_SCAN_VALUE_100_MS, "100 ms"), TRX(ZONE_SCAN_VALUE_150_MS, "150 ms"),
+ 	TRX(ZONE_SCAN_VALUE_250_MS, "250 ms"), TRX(ZONE_SCAN_VALUE_500_MS, "500 ms") };
+ static const set_item_t s_zone_scan[] = {
+diff --git a/docs/spec/radio-features.md b/docs/spec/radio-features.md
+index d7fec7c..eb99456 100644
+--- a/docs/spec/radio-features.md
++++ b/docs/spec/radio-features.md
+@@ -69,11 +69,12 @@ tuned channel or frequency is the core view's as usual.
+ - **Priority** (zone scan): the start channel again after every 2 others.
+ 
+ Each stop: 50 ms settle (readings from the previous frequency are ignored), then its empty-channel dwell. Zone
+-scan uses `zone_scan_dwell_ms`; VFO scan and dual watch keep using `scan_dwell_ms`, so the zone setting does not
+-shorten their visits. Tools > Zone scan speed offers 50, 75, 100, 150, 250 and 500 ms, saves the choice and applies
+-it immediately, including to the current stop of an active zone scan. FM, DMR, P25, NXDN and YSF stops can use
+-50 ms: the receiver settle and the first carrier reading share that window. VFO scan and dual watch keep their
+-longer dwell. The tone, digital-sync and hold probes below are unchanged. A signal
++scan uses its own 25 ms settle and `zone_scan_dwell_ms`; VFO scan and dual watch keep the 50 ms settle and
++`scan_dwell_ms`, so the zone timing does not shorten their visits. Tools > Zone scan speed offers 25, 50, 75, 100,
++150, 250 and 500 ms, saves the choice and applies it immediately, including to the current stop of an active zone scan.
++The old 50 ms default migrates to 25 ms; slower saved choices survive. FM, DMR, P25, NXDN and YSF stops can use
++25 ms: the receiver settle and the first carrier reading share that poll. The tone, digital-sync and hold probes
++below are unchanged. A signal
+ is "active" when FM squelch opens (with the RX tone if the channel needs one) or DMR plays a call (`dmr.state` rx).
+ A carrier that isn't active yet earns a probe: 350 ms on FM channels that need a tone (CTCSS detection takes 100 to
+ 250 ms), 450 ms on an unsynchronized DMR carrier; other FM channels move on at once. DMR modem lock takes 90 ms and
+diff --git a/tests/host/radioFeaturesTest.c b/tests/host/radioFeaturesTest.c
+index 0b53ef4..4da3182 100644
+--- a/tests/host/radioFeaturesTest.c
++++ b/tests/host/radioFeaturesTest.c
+@@ -534,6 +534,14 @@ static void test_scan_engine(void)
+ 	CHECK(scan_poll(&s, 1025, true, true, false) == SCAN_ACT_NONE && s.phase == SCAN_PH_LISTEN);	// settling
+ 	CHECK(scan_poll(&s, 1100, false, false, false) == SCAN_ACT_NONE);
+ 	CHECK(scan_poll(&s, 1150, false, false, false) == SCAN_ACT_NEXT);
++	// Zone's shorter settle is configurable too: 25 ms, not the generic 50 ms
++	s.cfg.settle_ms = 25;
++	s.cfg.dwell_ms = 25;
++	scan_tuned(&s, 1500);
++	CHECK(scan_poll(&s, 1524, false, false, false) == SCAN_ACT_NONE);
++	CHECK(scan_poll(&s, 1525, false, false, false) == SCAN_ACT_NEXT);
++	s.cfg.settle_ms = SCAN_SETTLE_MS;
++	s.cfg.dwell_ms = 150;
+ 	// A carrier at the end of the dwell: probe, then give up after probe_ms
+ 	scan_tuned(&s, 2000);
+ 	CHECK(scan_poll(&s, 2150, false, true, false) == SCAN_ACT_NONE && s.phase == SCAN_PH_PROBE);
+@@ -1318,7 +1326,7 @@ static void set_priority(radio_settings_t *s) { s->scan_priority = true; }
+ static void test_zone_scan_dwell_setting(void)
+ {
+ 	start();
+-	CHECK(sm.set.zone_scan_dwell_ms == RADIO_ZONE_SCAN_DWELL_MS && RADIO_ZONE_SCAN_DWELL_MS == 50);
++	CHECK(sm.set.zone_scan_dwell_ms == RADIO_ZONE_SCAN_DWELL_MS && RADIO_ZONE_SCAN_DWELL_MS == 25);
+ 	CHECK(sm.set.scan_dwell_ms == RADIO_SCAN_DWELL_MS && RADIO_SCAN_DWELL_MS == 75);
+ 	req(RREQ_SCAN, RSCAN_ZONE);
+ 	// A slower choice applies to the scan already running, not only to the next one
+@@ -1330,22 +1338,22 @@ static void test_zone_scan_dwell_setting(void)
+ 	CHECK(sm.view.zone_pos == 1);
+ 	run(75);
+ 	CHECK(sm.view.zone_pos == 4);
+-	// Back to fast: this stop advances after its 50 ms settle/listen window
++	// Back to fast: this stop advances after one 25 ms settle/listen poll
+ 	rs = sm.set;
+-	rs.zone_scan_dwell_ms = 50;
++	rs.zone_scan_dwell_ms = 25;
+ 	radio_sm_set_settings(&sm, &rs, now);
+-	run(50);
+-	CHECK(sm.view.zone_pos == 5);
+-	// Digital zone stops share the 50 ms settle/listen window too; VFO and dual watch keep 75 ms.
+ 	run(25);
+-	CHECK(sm.view.ch.mode == RADIO_MODE_DMR && sm.scan.cfg.dwell_ms == RADIO_SCAN_ZONE_DIGITAL_DWELL_MS);
++	CHECK(sm.view.zone_pos == 5 && sm.view.ch.mode == RADIO_MODE_DMR);
++	CHECK(sm.scan.cfg.settle_ms == RADIO_SCAN_ZONE_SETTLE_MS &&
++	      sm.scan.cfg.dwell_ms == RADIO_SCAN_ZONE_DIGITAL_DWELL_MS);
+ 	run(25);
+-	CHECK(sm.view.zone_pos != 5);	// 50 ms from the DMR stop's retune, not the old 75 ms
++	CHECK(sm.view.zone_pos != 5);	// 25 ms from the DMR stop's retune, not the old 50 ms
+ 	req(RREQ_SCAN, RSCAN_STOP);
+-	// The VFO's existing 75 ms dwell does not follow the zone-only setting
++	// The VFO's existing 75 ms dwell and 50 ms settle do not follow the zone-only setting
+ 	req(RREQ_VFO_SET, 146000000);
+ 	req2(RREQ_SCAN_VFO, 146000000, 146100000);
+-	CHECK(sm.view.scan == SCAN_VFO && sm.scan.cfg.dwell_ms == RADIO_SCAN_DWELL_MS);
++	CHECK(sm.view.scan == SCAN_VFO && sm.scan.cfg.dwell_ms == RADIO_SCAN_DWELL_MS &&
++	      sm.scan.cfg.settle_ms == SCAN_SETTLE_MS);
+ 	req(RREQ_SCAN, RSCAN_STOP);
+ }
+ 
+diff --git a/tests/host/radioCoreTest.c b/tests/host/radioCoreTest.c
+index e17e352..7e1067e 100644
+--- a/tests/host/radioCoreTest.c
++++ b/tests/host/radioCoreTest.c
+@@ -3037,10 +3037,16 @@ static void test_persist(void)
+ 	settings_t cur;
+ 	settings_read(&cur);
+ 	CHECK(cur.rs_stored == 1 && cur.rs_tot_s == 45 && cur.rs_vox_level == 10 &&
+-	      (cur.rs_flags & SETTINGS_RS_SCAN_DWELL_SET) && cur.zone_scan_dwell_25ms == 2);
++	      (cur.rs_flags & SETTINGS_RS_SCAN_DWELL_SET) && cur.zone_scan_dwell_25ms == 1);
+ 	boot();
+ 	CHECK(sm.set.tot_s == 45 && !sm.set.key_beep && sm.set.roger_beep && sm.set.vox_level == 10 &&
+ 	      sm.set.zone_scan_dwell_ms == RADIO_ZONE_SCAN_DWELL_MS);
++	// The previous release's 50 ms default migrates to 25 ms too
++	st = settings_begin();
++	st->zone_scan_dwell_25ms = 2;
++	settings_end(now);
++	boot();
++	CHECK(sm.set.zone_scan_dwell_ms == RADIO_ZONE_SCAN_DWELL_MS && RADIO_ZONE_SCAN_DWELL_MS == 25);
+ 	// An old record's legacy 150 ms default migrates to the fast default;
+ 	// explicitly saving 150 ms after that keeps the user's choice.
+ 	st = settings_begin();
+@@ -4827,7 +4833,7 @@ static void test_ui_glue(void)
+ 	kv_tone[0] = -1;
+ 	n_ev = 0;
+ 	// Tools > Zone scan speed: every offered value reads back, reaches the core and is stored in 25 ms units
+-	static const uint16_t zone_dwells[] = { 50, 75, 100, 150, 250, 500 };
++	static const uint16_t zone_dwells[] = { 25, 50, 75, 100, 150, 250, 500 };
+ 	CHECK(ui_svc_setting_get(UI_SET_ZONE_SCAN_DWELL) == RADIO_ZONE_SCAN_DWELL_MS);
+ 	for (size_t i = 0; i < sizeof zone_dwells / sizeof zone_dwells[0]; i++) {
+ 		CHECK(ui_svc_setting_set(UI_SET_ZONE_SCAN_DWELL, zone_dwells[i]));

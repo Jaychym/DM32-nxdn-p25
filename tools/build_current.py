@@ -56,6 +56,8 @@ PATCHES = (
 	'p25-imbe-sync.patch',
 	# Zone scan: empty digital channels advance after 50 ms; signal probes stay unchanged
 	'zone-digital-scan-50ms.patch',
+	# Zone scan: 25 ms settle and empty-channel dwell; VFO and dual watch keep their timing
+	'zone-scan-25ms.patch',
 )
 
 
