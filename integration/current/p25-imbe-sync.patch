@@ -77,26 +77,28 @@ index 13810b2..02f2f39 100644
  	// PTT let go during the header: no LDU is sent
  	air_n = 0;
 diff --git a/tests/host/p25EngineTest.c b/tests/host/p25EngineTest.c
-index f633d6b..d7c0cfb 100644
+index f633d6b..8703b1b 100644
 --- a/tests/host/p25EngineTest.c
 +++ b/tests/host/p25EngineTest.c
-@@ -141,6 +141,15 @@ PROVIDER(1)
+@@ -141,6 +141,17 @@ PROVIDER(1)
  
  // ── The two radios ──
  static const uint8_t silence[P25_IMBE_BYTES] = { 0xA5, 0x5A, 0xA5, 0x5A, 0xA5, 0x5A, 0xA5, 0x5A, 0xA5, 0x5A, 0xA5 };
 +
 +// Bit 87 is the air interface's sync bit, overwritten by the transmitter; the 87 vocoder bits must survive
-+static int voice_memcmp(const uint8_t *a, const uint8_t *b)
++static int voice_memcmp(const uint8_t *a, const uint8_t *b, size_t n)
 +{
-+	if (memcmp(a, b, P25_IMBE_BYTES - 1) != 0)
++	if (n != P25_IMBE_BYTES)
++		return memcmp(a, b, n);
++	if (memcmp(a, b, n - 1) != 0)
 +		return 1;
-+	return (a[P25_IMBE_BYTES - 1] & 0xFEu) != (b[P25_IMBE_BYTES - 1] & 0xFEu);
++	return (a[n - 1] & 0xFEu) != (b[n - 1] & 0xFEu);
 +}
 +
  typedef struct {
  	p25_engine_t e;
  	// What it heard
-@@ -252,9 +261,9 @@ static void testCall(void)
+@@ -252,9 +263,9 @@ static void testCall(void)
  	// Every encoded frame arrived, in order; the tail is silence up to the LDU's end, and whole LDUs came
  	CHECK(r[0].enc_taken == r[0].enc_made && r[1].nvoice % 9 == 0 && r[1].nvoice >= r[0].enc_made && r[1].nvoice < r[0].enc_made + 9 + v.tx_filler, "frames: made %u taken %u heard %u", r[0].enc_made, r[0].enc_taken, r[1].nvoice);
  	for (uint16_t i = 0, k = 0; i < r[1].nvoice; i++) {
@@ -108,7 +110,7 @@ index f633d6b..d7c0cfb 100644
  			bad++;
  	}
  	CHECK(bad == 0 && r[1].voice_errs == 0, "%u frames out of order or wrong, %u with errors", bad, r[1].voice_errs);
-@@ -297,7 +306,7 @@ static void testCall(void)
+@@ -297,7 +308,7 @@ static void testCall(void)
  		step(0);
  	}
  	CHECK(n > 40 && n < 52 && prov[1].underruns == 0, "no encoder: ended at %u, underruns %u", n, prov[1].underruns);
@@ -117,7 +119,7 @@ index f633d6b..d7c0cfb 100644
  	p25_engine_end(&r[0].e);
  	p25_engine_end(&r[1].e);
  }
-@@ -398,9 +407,9 @@ static uint16_t heard_in_order(void)
+@@ -398,9 +409,9 @@ static uint16_t heard_in_order(void)
  	uint16_t ok = 0;
  
  	for (uint16_t i = 0, k = 0; i < r[1].nvoice; i++) {
@@ -129,7 +131,7 @@ index f633d6b..d7c0cfb 100644
  			ok++;
  		k++;
  	}
-@@ -428,6 +437,10 @@ static void testAes(void)
+@@ -428,6 +439,10 @@ static void testAes(void)
  	CHECK(r[1].nvoice >= 90 && r[1].voice_errs == 0, "aes call: %u frames, %u with errors", r[1].nvoice, r[1].voice_errs);
  	n = heard_in_order();
  	CHECK(n >= 90 && n == r[0].enc_made, "aes call: %u of %u encoded frames heard in order", n, r[0].enc_made);
@@ -140,7 +142,7 @@ index f633d6b..d7c0cfb 100644
  	// The same encoder frames would not arrive unless the voice on air was encrypted: radio 2 with no key hears none
  	// (below), and the frames on air are not the plain ones (the key stream is not all zero)
  	CHECK(mi_calls == 1, "one indicator for the call: %u", mi_calls);
-@@ -492,10 +505,10 @@ static void testAes(void)
+@@ -492,10 +507,10 @@ static void testAes(void)
  	for (uint16_t i = 0; i < r[1].nvoice; i++) {
  		bool found = false;
  
