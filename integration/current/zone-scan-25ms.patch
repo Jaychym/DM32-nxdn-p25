@@ -366,7 +366,7 @@ index 0b53ef4..b96bcd3 100644
  }
  
 diff --git a/tests/host/radioCoreTest.c b/tests/host/radioCoreTest.c
-index e17e352..f5d4d11 100644
+index e17e352..f0b8d17 100644
 --- a/tests/host/radioCoreTest.c
 +++ b/tests/host/radioCoreTest.c
 @@ -3037,10 +3037,16 @@ static void test_persist(void)
@@ -407,6 +407,15 @@ index e17e352..f5d4d11 100644
  	// The zone-only value survives a reboot and leaves the general VFO/dual dwell alone
  	rs = sm.set;
  	rs.zone_scan_dwell_ms = 100;
+@@ -3061,7 +3073,7 @@ static void test_persist(void)
+ 	settings_read(&cur);
+ 	CHECK(cur.zone_scan_dwell_25ms == 4);
+ 	boot();
+-	CHECK(sm.set.zone_scan_dwell_ms == 100 && sm.set.scan_dwell_ms == 150);
++	CHECK(sm.set.zone_scan_dwell_ms == 100 && sm.set.scan_dwell_ms == RADIO_SCAN_DWELL_MS);
+ 	st = settings_begin();
+ 	st->rs_stored = 0;	// never set: the defaults
+ 	st->zone_scan_dwell_25ms = 0;	// an old record: no zone-only value yet
 @@ -4827,7 +4839,7 @@ static void test_ui_glue(void)
  	kv_tone[0] = -1;
  	n_ev = 0;
