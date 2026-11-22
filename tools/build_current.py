@@ -58,6 +58,8 @@ PATCHES = (
 	'zone-digital-scan-50ms.patch',
 	# Zone scan: 25 ms settle and empty-channel dwell; VFO and dual watch keep their timing
 	'zone-scan-25ms.patch',
+	# P25/YSF VW: calibrate the software IMBE microphone input to the reference encoder's level
+	'p25-tx-voice-level.patch',
 )
 
 
