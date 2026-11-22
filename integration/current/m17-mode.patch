@@ -182,7 +182,7 @@ index 9c7e469..1aa15ca 100644
  		       v->hotspot ? " HOTSPOT" : "");
  		return true;
 diff --git a/core/debuglink/debuglink_view.c b/core/debuglink/debuglink_view.c
-index 1fe02c6..66f268c 100644
+index 1fe02c6..56253ab 100644
 --- a/core/debuglink/debuglink_view.c
 +++ b/core/debuglink/debuglink_view.c
 @@ -62,7 +62,7 @@ static const char *state_key(uint8_t s)
@@ -192,6 +192,15 @@ index 1fe02c6..66f268c 100644
 -	static const char *const names[] = { "fm", "dmr", "p25", "nxdn", "ysf" };
 +	static const char *const names[] = { "fm", "dmr", "p25", "nxdn", "ysf", "m17" };
  	return m < sizeof(names) / sizeof(names[0]) ? names[m] : "?";
+ }
+ 
+@@ -71,7 +71,7 @@ static const char *deny_key(uint8_t d)
+ 	static const char *const names[] = { "none", "rx_only", "band", "timeout", "no_freq", "mode", "no_codec",
+ 					     "no_dmr", "busy", "no_repeater", "rejected", "hotspot", "no_id", "inhibit",
+ 					     "battery", "am", "bcast", "sfr_rpt", "hwopt", "refused", "ceased", "bench",
+-					     "trunk", "air_no_tx" };
++					     "trunk", "air_no_tx", "cpu" };
+ 	return d < sizeof(names) / sizeof(names[0]) ? names[d] : "?";
  }
  
 diff --git a/core/debuglink/debuglink_view_radio.c b/core/debuglink/debuglink_view_radio.c
@@ -1283,10 +1292,10 @@ index 0000000..328383f
 +#endif
 diff --git a/core/m17/m17_voice.c b/core/m17/m17_voice.c
 new file mode 100644
-index 0000000..414d453
+index 0000000..8af9abf
 --- /dev/null
 +++ b/core/m17/m17_voice.c
-@@ -0,0 +1,380 @@
+@@ -0,0 +1,415 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// Copyright (c) 2026 lyra XE1POC
 +// M17 voice: engine stream contents <-> Codec 2 3200 <-> PCM blocks (m17_voice.h)
@@ -1418,6 +1427,29 @@ index 0000000..414d453
 +
 +static const m17_engine_hooks_t hooks = { rx_start, rx_voice, rx_end, tx_voice };
 +
++// ── The codec's time: each encode and decode is timed (the clock m17VoiceBegin is given). One that takes longer than
++// M17_VOICE_BUDGET_US means this core can't run Codec 2 in real time: from then on the codec
++// is never called again (until a restart: the core won't get faster), so the audio task, which runs above the radio and
++// UI tasks, is not busy without end ──
++static uint32_t (*now_fn)(void);
++static volatile bool slow;
++
++static uint32_t clock_us(void)
++{
++	return now_fn != NULL ? now_fn() : 0;
++}
++
++static void took(uint32_t *last, uint32_t *max, uint32_t t0)
++{
++	uint32_t us = clock_us() - t0;
++
++	*last = us;
++	if (us > *max)
++		*max = us;
++	if (us > M17_VOICE_BUDGET_US)
++		STORE(slow, true);
++}
++
 +// ── Audio callback ──
 +static void speaker(bool on)
 +{
@@ -1481,7 +1513,9 @@ index 0000000..414d453
 +		silence(spk);
 +		return;
 +	}
++	uint32_t t0 = clock_us();
 +	codec2_decode(c, spk, rxq[t & (M17_VOICE_QUEUE - 1)]);
++	took(&stats.dec_us, &stats.dec_us_max, t0);
 +	STORE(rx_tail, (uint8_t)(t + 1));
 +	stats.rx_frames++;
 +}
@@ -1496,7 +1530,9 @@ index 0000000..414d453
 +
 +		scaled[i] = (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v);
 +	}
++	uint32_t t0 = clock_us();
 +	codec2_encode(c, cb_pair + cb_half * M17_C2_BYTES, scaled);
++	took(&stats.enc_us, &stats.enc_us_max, t0);
 +	stats.tx_encoded++;
 +	cb_half ^= 1;
 +	if (cb_half)
@@ -1517,7 +1553,9 @@ index 0000000..414d453
 +{
 +	if (c2 == NULL && !c2_failed) {
 +		arena_at = 0;
++		uint32_t t0 = clock_us();
 +		c2 = codec2_create(CODEC2_MODE_3200);
++		stats.create_us = clock_us() - t0;
 +		if (c2 == NULL || codec2_bits_per_frame(c2) != 8 * M17_C2_BYTES ||
 +		    codec2_samples_per_frame(c2) != AUDIO_BLOCK_SAMPLES) {
 +			c2 = NULL;
@@ -1561,7 +1599,7 @@ index 0000000..414d453
 +	block_t b = { mic, spk };
 +
 +	(void)ctx;
-+	if (!LOAD(active))
++	if (!LOAD(active) || LOAD(slow))
 +		silence(spk);
 +	else if (run_on != NULL)
 +		run_on(codec_block, &b, stack_top);
@@ -1589,13 +1627,14 @@ index 0000000..414d453
 +	aud = audio;
 +}
 +
-+void m17VoiceBegin(void *mem, size_t len, m17_voice_runner_t run, void *top)
++void m17VoiceBegin(void *mem, size_t len, m17_voice_runner_t run, void *top, uint32_t (*now_us)(void))
 +{
 +	// The stream is stopped and the engine not started: nothing else touches this state now
 +	arena = mem;
 +	arena_len = mem != NULL ? len : 0;
 +	run_on = top != NULL ? run : NULL;
 +	stack_top = top;
++	now_fn = now_us;
 +	c2 = NULL;
 +	c2_failed = false;
 +	rx_head = rx_tail = rx_seq = rx_end_seq = 0;
@@ -1661,6 +1700,11 @@ index 0000000..414d453
 +	return &hooks;
 +}
 +
++bool m17VoiceSlow(void)
++{
++	return LOAD(slow);
++}
++
 +void m17VoiceGetStats(m17_voice_stats_t *out)
 +{
 +	*out = stats;
@@ -1669,10 +1713,10 @@ index 0000000..414d453
 +#endif	// CONFIG_M17
 diff --git a/core/m17/m17_voice.h b/core/m17/m17_voice.h
 new file mode 100644
-index 0000000..31fd49d
+index 0000000..6e5f69b
 --- /dev/null
 +++ b/core/m17/m17_voice.h
-@@ -0,0 +1,81 @@
+@@ -0,0 +1,91 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// Copyright (c) 2026 lyra XE1POC
 +// M17 voice between the engine (m17_engine.h, 16 bytes per 40 ms stream frame) and the board's PCM audio
@@ -1709,6 +1753,9 @@ index 0000000..31fd49d
 +#ifndef M17_VOICE_ARENA
 +#define M17_VOICE_ARENA		31744	// bytes for Codec 2's state and FFT tables (m17VoiceTest: 30752 on a 64-bit host)
 +#endif
++// The longest a 20 ms block's encode or decode may take. Longer, the core can't keep up: the codec is switched off (the
++// audio task runs above the radio and UI tasks, so a codec that never catches up would starve them)
++#define M17_VOICE_BUDGET_US	15000u
 +#ifndef M17_VOICE_STACK
 +#define M17_VOICE_STACK		24576	// bytes of stack for Codec 2's frames (about 20 KB measured on a host)
 +#endif
@@ -1724,16 +1771,23 @@ index 0000000..31fd49d
 +	uint32_t tx_dropped;	// stream frames dropped, queue full
 +	uint32_t arena_used;	// bytes of the arena Codec 2 took
 +	uint32_t alloc_fails;	// allocations the arena could not give (Codec 2 then is not started)
++	uint32_t create_us;	// how long codec2_create took (the clock m17VoiceBegin was given)
++	uint32_t enc_us, enc_us_max;	// the latest encode of a 20 ms block, and the longest
++	uint32_t dec_us, dec_us_max;	// the same for decode
 +} m17_voice_stats_t;
 +
 +void m17VoiceInit(const hal_audio_t *audio);
 +// Runs fn(arg) with the stack pointer at top (hal_vocoder_t.call_on_stack)
 +typedef void (*m17_voice_runner_t)(void (*fn)(void *arg), void *arg, void *top);
-+// Start (radio task, before m17_engine_begin) with mem (len bytes, 8-byte aligned) for Codec 2's state, and its
++// Start (radio task, before m17_engine_begin) with mem (len bytes, 8-byte aligned) for Codec 2's state, its clock
++// (now_us: free-running microseconds, NULL: not timed) and its
 +// stack: run calls the codec with the stack pointer at top (NULL top or run: on the audio task's own stack). Codec
 +// 2 is made in the arena by the audio callback's first block (its
 +// set-up needs the codec's stack); one that does not fit leaves the voice silent (m17_voice_stats_t.alloc_fails)
-+void m17VoiceBegin(void *mem, size_t len, m17_voice_runner_t run, void *top);
++void m17VoiceBegin(void *mem, size_t len, m17_voice_runner_t run, void *top, uint32_t (*now_us)(void));
++// An encode or a decode took longer than M17_VOICE_BUDGET_US: the codec is off until a restart (voice silent, no
++// stream frames for the engine). Any task
++bool m17VoiceSlow(void);
 +void m17VoicePoll(void);	// every tick while M17 runs: starts the audio stream once a call is heard
 +void m17VoicePause(void);	// stop PCM before the RF provider switches clocks
 +void m17VoiceTx(bool on);
@@ -1779,7 +1833,7 @@ index 4b05ec7..50dd3a0 100644
  
  uint8_t radio_mic_gain(void)
 diff --git a/core/radio/radio.h b/core/radio/radio.h
-index 4932092..6bc3fcf 100644
+index 4932092..cf9135e 100644
 --- a/core/radio/radio.h
 +++ b/core/radio/radio.h
 @@ -12,6 +12,7 @@
@@ -1790,7 +1844,15 @@ index 4932092..6bc3fcf 100644
  
  typedef enum {
  	RS_IDLE,	// receiving, squelch closed
-@@ -482,6 +483,9 @@ typedef struct {
+@@ -36,6 +37,7 @@ typedef enum {
+ 	TXDENY_INHIBIT, TXDENY_BATTERY, TXDENY_AM, TXDENY_BCAST, TXDENY_SFR_RPT, TXDENY_HWOPT, TXDENY_REFUSED,
+ 	TXDENY_CEASED,	// the system stopped the over (DMR reverse channel)
+ 	TXDENY_BENCH, TXDENY_TRUNK, TXDENY_AIR_NO_TX,
++	TXDENY_CPU,	// the mode's voice codec can't keep up on this core (M17's Codec 2: radio_air_ops_t.tx_fault)
+ } tx_deny_t;
+ 
+ // Busy channel lockout (FM): CARRIER refuses PTT while anything is heard on the channel; WRONG_TONE only while a
+@@ -482,6 +484,9 @@ typedef struct {
  #if CONFIG_YSF
  	radio_ysf_view_t ysf;	// YSF conventional (docs/spec/ysf.md 8): the same
  #endif
@@ -1800,12 +1862,26 @@ index 4932092..6bc3fcf 100644
  #if CONFIG_MDC1200
  	radio_mdc_view_t mdc;
  #endif
+diff --git a/core/radio/radio_air.h b/core/radio/radio_air.h
+index f6dcded..5663550 100644
+--- a/core/radio/radio_air.h
++++ b/core/radio/radio_air.h
+@@ -20,6 +20,9 @@ typedef struct {
+ 	void (*tx_abort)(void);
+ 	uint8_t (*tx_state)(void);	// air_tx_state_t
+ 	void (*tx_clear)(void);		// after AIR_TX_DONE and hal_radio_t.tx_off()
++	// Optional (NULL: never): why the mode can't transmit now (a tx_deny_t, TXDENY_NONE: it can). Asked before keying and
++	// while transmitting: a reason refuses PTT, or cuts the transmission as the time-out does, and is shown
++	uint8_t (*tx_fault)(void);
+ } radio_air_ops_t;
+ 
+ #endif
 diff --git a/core/radio/radio_m17.c b/core/radio/radio_m17.c
 new file mode 100644
-index 0000000..d3fedfe
+index 0000000..2bd59c8
 --- /dev/null
 +++ b/core/radio/radio_m17.c
-@@ -0,0 +1,276 @@
+@@ -0,0 +1,296 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// Copyright (c) 2026 lyra XE1POC
 +// M17 on a channel, the radio core's side (radio_m17.h)
@@ -1813,6 +1889,7 @@ index 0000000..d3fedfe
 +#if CONFIG_M17	// the whole file
 +#include <string.h>
 +#include "board.h"
++#include "radio/radio.h"
 +#include "radio/radio_m17.h"
 +#include "radio/radio_bands.h"
 +#include "m17/m17_engine.h"
@@ -1943,7 +2020,7 @@ index 0000000..d3fedfe
 +	top = (void *)((uintptr_t)(mem + len) & ~(uintptr_t)7u);
 +	run = board.vocoder->call_on_stack;
 +#endif
-+	m17VoiceBegin(mem + ENG_BYTES, M17_VOICE_ARENA, run, top);
++	m17VoiceBegin(mem + ENG_BYTES, M17_VOICE_ARENA, run, top, board.air->now_us);
 +	if (!m17_engine_begin(eng, board.air, &cfg, m17VoiceHooks(), NULL)) {
 +		m17VoiceEnd();
 +		eng = NULL;
@@ -1984,6 +2061,12 @@ index 0000000..d3fedfe
 +	m17_engine_set(eng, &cfg);
 +}
 +
++// Microseconds as tenths of a millisecond, saturated
++static uint16_t t10(uint32_t us)
++{
++	return (uint16_t)(us / 100u > 0xFFFFu ? 0xFFFFu : us / 100u);
++}
++
 +bool radio_m17_poll(radio_m17_view_t *v)
 +{
 +	m17_engine_view_t ev;
@@ -2014,6 +2097,12 @@ index 0000000..d3fedfe
 +		m17_addr_decode(eng->cfg.dst, n.talk);
 +	}
 +	n.fit = (uint16_t)radio_m17_fit();
++	m17_voice_stats_t vs;
++	m17VoiceGetStats(&vs);
++	n.enc_t10 = t10(vs.enc_us_max);
++	n.dec_t10 = t10(vs.dec_us_max);
++	if (m17VoiceSlow())
++		n.flags |= RADIO_M17_SLOW;
 +	bool changed = memcmp(&n, v, sizeof(n)) != 0;
 +	*v = n;
 +	return changed;
@@ -2063,6 +2152,12 @@ index 0000000..d3fedfe
 +	}
 +}
 +
++// Codec 2 too slow for this core: PTT refused, a transmission cut (radio_sm.c shows why)
++static uint8_t m17_tx_fault(void)
++{
++	return m17VoiceSlow() ? (uint8_t)TXDENY_CPU : (uint8_t)TXDENY_NONE;
++}
++
 +static uint8_t m17_tx_state(void)
 +{
 +	return eng != NULL ? (uint8_t)m17_engine_tx_state(eng) : (uint8_t)AIR_TX_IDLE;
@@ -2079,15 +2174,16 @@ index 0000000..d3fedfe
 +
 +const radio_air_ops_t radio_m17_air = {
 +	radio_m17_running, m17_no_tx, m17_tx_prepare, m17_tx_go, m17_tx_stop, m17_tx_abort, m17_tx_state, m17_tx_clear,
++	m17_tx_fault,
 +};
 +
 +#endif	// CONFIG_M17
 diff --git a/core/radio/radio_m17.h b/core/radio/radio_m17.h
 new file mode 100644
-index 0000000..c1df93f
+index 0000000..4a0ca0a
 --- /dev/null
 +++ b/core/radio/radio_m17.h
-@@ -0,0 +1,73 @@
+@@ -0,0 +1,76 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// Copyright (c) 2026 lyra XE1POC
 +// M17 on a channel, the radio core's side (docs/spec/m17.md 6): the engine (core/m17/m17_engine.h) on the memory it
@@ -2118,6 +2214,7 @@ index 0000000..c1df93f
 +#define RADIO_M17_RX		0x02u	// a call is being received
 +#define RADIO_M17_PLAYED	0x04u	// ... and passes the squelch (its voice plays)
 +#define RADIO_M17_LATE		0x08u	// ... was entered without its LSF
++#define RADIO_M17_SLOW		0x10u	// Codec 2 can't keep up on this core: voice off, PTT refused (m17VoiceSlow)
 +
 +// The radio view's part (radio_view_t.m17): the call heard now, or the last one
 +typedef struct {
@@ -2126,6 +2223,8 @@ index 0000000..c1df93f
 +	uint8_t can;		// the CAN of the call heard
 +	uint8_t tx_can;		// the CAN in force for transmission
 +	uint16_t fit;		// what the board's provider gives M17 (AIR_FIT_*), 0: nothing
++	// Codec 2's time for one 20 ms block, the longest measured, in tenths of a millisecond (0: not measured yet)
++	uint16_t enc_t10, dec_t10;
 +	char src[M17_CALLSIGN_LEN + 1];		// the call heard's source
 +	char dst[M17_CALLSIGN_LEN + 1];		// its destination
 +	char talk[M17_CALLSIGN_LEN + 1];	// what PTT calls
@@ -2161,8 +2260,34 @@ index 0000000..c1df93f
 +#endif
 +
 +#endif
+diff --git a/core/radio/radio_nxdn.c b/core/radio/radio_nxdn.c
+index 0a338bd..fee7594 100644
+--- a/core/radio/radio_nxdn.c
++++ b/core/radio/radio_nxdn.c
+@@ -538,7 +538,7 @@ static void nxdn_tx_clear(void)
+ 
+ const radio_air_ops_t radio_nxdn_air = {
+ 	radio_nxdn_running, nxdn_no_tx, nxdn_tx_prepare, nxdn_tx_go, nxdn_tx_stop, nxdn_tx_abort, nxdn_tx_state,
+-	nxdn_tx_clear,
++	nxdn_tx_clear, NULL,
+ };
+ 
+ void radio_nxdn_stats(radio_nxdn_stats_t *out)
+diff --git a/core/radio/radio_p25.c b/core/radio/radio_p25.c
+index 0348891..f1c21a6 100644
+--- a/core/radio/radio_p25.c
++++ b/core/radio/radio_p25.c
+@@ -976,7 +976,7 @@ void radio_p25_tx_clear(void)
+ 
+ const radio_air_ops_t radio_p25_air = {
+ 	radio_p25_running, NULL, radio_p25_tx_prepare, radio_p25_tx_go, radio_p25_tx_stop, radio_p25_tx_abort,
+-	radio_p25_tx_state, radio_p25_tx_clear,
++	radio_p25_tx_state, radio_p25_tx_clear, NULL,
+ };
+ 
+ #ifndef HAL_VOCODER_LEND_BYTES
 diff --git a/core/radio/radio_sm.c b/core/radio/radio_sm.c
-index 7acb561..6984098 100644
+index 7acb561..e62e95b 100644
 --- a/core/radio/radio_sm.c
 +++ b/core/radio/radio_sm.c
 @@ -45,6 +45,9 @@
@@ -2374,7 +2499,19 @@ index 7acb561..6984098 100644
  }
  
  // The talk permit before keying a P25, NXDN or YSF channel (BEEP_TX_PERMIT_DV, Motorola ASTRO 25 style): it plays while the
-@@ -6311,6 +6405,13 @@ static void air_key(radio_sm_t *sm, uint32_t now_ms, uint32_t hz)
+@@ -6280,6 +6374,11 @@ static void air_key(radio_sm_t *sm, uint32_t now_ms, uint32_t hz)
+ 		deny(sm, TXDENY_AIR_NO_TX);	// the provider receives this profile only
+ 		return;
+ 	}
++	uint8_t fault = o->tx_fault != NULL ? o->tx_fault() : (uint8_t)TXDENY_NONE;
++	if (fault != TXDENY_NONE) {
++		deny(sm, fault);		// the mode knows it can't (M17: its codec is too slow for this core)
++		return;
++	}
+ 	bool primed = o->tx_prepare();
+ 	sm->air_tx = o->tx_state() != AIR_TX_IDLE;
+ 	if (!primed) {
+@@ -6311,6 +6410,13 @@ static void air_key(radio_sm_t *sm, uint32_t now_ms, uint32_t hz)
  // The settings sent while it transmitted (RREQ_P25_SET, RREQ_NXDN_SET, RREQ_YSF_SET): the engine takes them now
  static void air_apply(radio_sm_t *sm)
  {
@@ -2388,7 +2525,23 @@ index 7acb561..6984098 100644
  #if CONFIG_YSF
  	radio_ysf_monitor(hear_all_on(sm));
  	if (ysf_now(sm)) {
-@@ -7265,7 +7366,8 @@ static void restore_vfo(radio_sm_t *sm, const settings_t *st, uint8_t idx)
+@@ -6484,6 +6590,15 @@ static void air_poll_tx(radio_sm_t *sm, uint32_t now_ms)
+ 		return;
+ 	}
+ 	tx_timer(sm, now_ms);
++	const radio_air_ops_t *fo = air_ops(sm);
++	uint8_t fault = fo->tx_fault != NULL ? fo->tx_fault() : (uint8_t)TXDENY_NONE;
++	if (fault != TXDENY_NONE) {
++		fo->tx_abort();	// cut at once, as the time-out: AIR_TX_DONE follows and air_tick switches off
++		if (sm->ptt) {
++			deny(sm, fault);	// until PTT is released
++		}
++		return;
++	}
+ 	if (sm->view.tot_s != 0 && sm->view.tx_elapsed_ms >= (uint32_t)sm->view.tot_s * 1000) {
+ 		const radio_air_ops_t *o = air_ops(sm);	// a typed pointer: the stack check follows its calls
+ 		o->tx_abort();	// cut at once; AIR_TX_DONE follows and air_tick switches off
+@@ -7265,7 +7380,8 @@ static void restore_vfo(radio_sm_t *sm, const settings_t *st, uint8_t idx)
  		v.mode == RADIO_MODE_FM && CONFIG_VFO_FM ? RADIO_MODE_FM :
  		v.mode == RADIO_MODE_P25 && p25_ok() ? RADIO_MODE_P25 :
  		v.mode == RADIO_MODE_NXDN && nxdn_ok() ? RADIO_MODE_NXDN :
@@ -2398,7 +2551,7 @@ index 7acb561..6984098 100644
  	if (sm->vfo_ch.mode != v.mode) {
  		sm->view.vfo_drop = (uint8_t)(v.mode + 1u);	// the debug link's vfo_drop: why the VFO came back changed
  	}
-@@ -7904,6 +8006,12 @@ void radio_sm_init(radio_sm_t *sm, uint32_t now_ms)
+@@ -7904,6 +8020,12 @@ void radio_sm_init(radio_sm_t *sm, uint32_t now_ms)
  #if CONFIG_YSF
  	radio_ysf_init();
  #endif
@@ -2411,7 +2564,7 @@ index 7acb561..6984098 100644
  #if CONFIG_P25
  	radio_p25_init(pcm_audio());
  #if CONFIG_IMBE && CONFIG_BEEP
-@@ -8485,14 +8593,15 @@ void radio_sm_request(radio_sm_t *sm, const radio_req_t *req, uint32_t now_ms)
+@@ -8485,14 +8607,15 @@ void radio_sm_request(radio_sm_t *sm, const radio_req_t *req, uint32_t now_ms)
  		// Not on a channel of a kind: its mode is the kind's (channel-modes.md 6)
  		if (busy || sm->view.ch.kind != CODEPLUG_KIND_NONE ||
  				(req->arg != RADIO_MODE_FM && req->arg != RADIO_MODE_DMR && req->arg != RADIO_MODE_P25 &&
@@ -2429,6 +2582,103 @@ index 7acb561..6984098 100644
  			break;
  		}
  		if (req->arg2 != VFO_VARIANT_DEFAULT) {
+diff --git a/core/radio/radio_ysf.c b/core/radio/radio_ysf.c
+index cb9db98..2ce324f 100644
+--- a/core/radio/radio_ysf.c
++++ b/core/radio/radio_ysf.c
+@@ -734,7 +734,7 @@ static void ysf_tx_clear(void)
+ 
+ const radio_air_ops_t radio_ysf_air = {
+ 	radio_ysf_running, ysf_no_tx, ysf_tx_prepare, ysf_tx_go, ysf_tx_stop, ysf_tx_abort, ysf_tx_state,
+-	ysf_tx_clear,
++	ysf_tx_clear, NULL,
+ };
+ 
+ void radio_ysf_stats(radio_ysf_stats_t *out)
+diff --git a/core/ui/lang/es.po b/core/ui/lang/es.po
+index d028a68..9a2b4ab 100644
+--- a/core/ui/lang/es.po
++++ b/core/ui/lang/es.po
+@@ -4532,6 +4532,16 @@ msgctxt "DENY_WHY_AIR_NO_TX"
+ msgid "This mode: receive only"
+ msgstr "Este modo: solo recibe"
+ 
++#: core/ui/ui_screens.c
++msgctxt "DENY_WHY_CPU"
++msgid "CPU too slow for voice"
++msgstr "CPU insuficiente para voz"
++
++#: core/ui/ui_screens.c
++msgctxt "HOME_CHIP_CPU_SLOW"
++msgid "CPU slow"
++msgstr "CPU insuficiente"
++
+ #: core/ui/ui_screens.c
+ msgctxt "DENY_WHY_P25T_NO_CC"
+ msgid "No control channel"
+diff --git a/core/ui/lang/fr.po b/core/ui/lang/fr.po
+index 222f7bb..61d18c9 100644
+--- a/core/ui/lang/fr.po
++++ b/core/ui/lang/fr.po
+@@ -4532,6 +4532,16 @@ msgctxt "DENY_WHY_AIR_NO_TX"
+ msgid "This mode: receive only"
+ msgstr "Ce mode: réception seule"
+ 
++#: core/ui/ui_screens.c
++msgctxt "DENY_WHY_CPU"
++msgid "CPU too slow for voice"
++msgstr "CPU trop lent pour la voix"
++
++#: core/ui/ui_screens.c
++msgctxt "HOME_CHIP_CPU_SLOW"
++msgid "CPU slow"
++msgstr "CPU trop lent"
++
+ #: core/ui/ui_screens.c
+ msgctxt "DENY_WHY_P25T_NO_CC"
+ msgid "No control channel"
+diff --git a/core/ui/lang/it.po b/core/ui/lang/it.po
+index c07946b..333ea92 100644
+--- a/core/ui/lang/it.po
++++ b/core/ui/lang/it.po
+@@ -4532,6 +4532,16 @@ msgctxt "DENY_WHY_AIR_NO_TX"
+ msgid "This mode: receive only"
+ msgstr "Questo modo: solo RX"
+ 
++#: core/ui/ui_screens.c
++msgctxt "DENY_WHY_CPU"
++msgid "CPU too slow for voice"
++msgstr "CPU troppo lenta per la voce"
++
++#: core/ui/ui_screens.c
++msgctxt "HOME_CHIP_CPU_SLOW"
++msgid "CPU slow"
++msgstr "CPU lenta"
++
+ #: core/ui/ui_screens.c
+ msgctxt "DENY_WHY_P25T_NO_CC"
+ msgid "No control channel"
+diff --git a/core/ui/lang/zh.po b/core/ui/lang/zh.po
+index f72981c..5b693c9 100644
+--- a/core/ui/lang/zh.po
++++ b/core/ui/lang/zh.po
+@@ -4534,6 +4534,16 @@ msgctxt "DENY_WHY_AIR_NO_TX"
+ msgid "This mode: receive only"
+ msgstr "此模式：仅接收"
+ 
++#: core/ui/ui_screens.c
++msgctxt "DENY_WHY_CPU"
++msgid "CPU too slow for voice"
++msgstr "CPU 不足，无语音"
++
++#: core/ui/ui_screens.c
++msgctxt "HOME_CHIP_CPU_SLOW"
++msgid "CPU slow"
++msgstr "CPU 不足"
++
+ #: core/ui/ui_screens.c
+ msgctxt "DENY_WHY_P25T_NO_CC"
+ msgid "No control channel"
 diff --git a/core/ui/ui_app.c b/core/ui/ui_app.c
 index ad37a3e..2531f99 100644
 --- a/core/ui/ui_app.c
@@ -2740,7 +2990,7 @@ index 5b92419..e6b310a 100644
  #if CONFIG_NXDN || CONFIG_YSF
  	case CE_RATE:
 diff --git a/core/ui/ui_screens.c b/core/ui/ui_screens.c
-index 6fc387e..7843c35 100644
+index 6fc387e..a8b72dd 100644
 --- a/core/ui/ui_screens.c
 +++ b/core/ui/ui_screens.c
 @@ -1307,6 +1307,10 @@ static void draw_talk(const radio_view_t *v, bool label_first)
@@ -2754,7 +3004,46 @@ index 6fc387e..7843c35 100644
  #endif
  	} else {
  		// " MHz" goes before the frequency is cut (font.h alternates)
-@@ -1444,6 +1448,21 @@ static void draw_chips(const radio_view_t *v, const ui_state_t *s)
+@@ -1341,6 +1345,38 @@ static void sb_ysf_dg(sbuf_t *b, uint8_t dgid, uint8_t dt)
+ }
+ #endif
+ 
++#if CONFIG_M17
++// Codec 2's time for a 20 ms block, the longest measured: "enc 178.3 dec 130.1 ms" (a part not measured yet: "-"). Over
++// 20 ms the core can't keep up (docs/spec/m17.md 6): the number the user reports
++static void sb_m17_times(sbuf_t *b, const radio_view_t *v)
++{
++	for (int k = 0; k < 2; k++) {
++		uint16_t t = k ? v->m17.dec_t10 : v->m17.enc_t10;
++
++		sb_str(b, k ? " dec " : "enc ");
++		if (t == 0) {
++			sb_chr(b, '-');
++		} else {
++			sb_u32(b, t / 10u, 1);
++			sb_chr(b, '.');
++			sb_u32(b, t % 10u, 1);
++		}
++	}
++	sb_str(b, " ms");
++}
++
++static const char *m17_codec_time(const radio_view_t *v)
++{
++	static char buf[32];
++	sbuf_t b;
++
++	sb_init(&b, buf, sizeof buf);
++	sb_str(&b, "M17 ");
++	sb_m17_times(&b, v);
++	return buf;
++}
++#endif
++
+ // Chips: tone, bandwidth, power, squelch. A dot marks a temporary change
+ #if CONFIG_DMR_TRUNK
+ static void draw_chips_t3(const radio_view_t *v);
+@@ -1444,6 +1480,32 @@ static void draw_chips(const radio_view_t *v, const ui_state_t *s)
  #endif
  		return;
  	}
@@ -2766,6 +3055,17 @@ index 6fc387e..7843c35 100644
 +		x = gfx_text(f, x, y, ui_power_name(v->power, v->ch.tx_hz), pw_temp ? ui_col.warn : ui_col.fg) + f->w;
 +		x = draw_chip_dmon(f, x, y, w, v);
 +		sb_init(&b, buf, sizeof buf);
++		if (v->m17.flags & RADIO_M17_SLOW) {
++			// Codec 2 too slow: voice off, PTT refused. Its time, the number to report, else at least why
++			sb_m17_times(&b, v);
++			if (x + gfx_text_width(f, buf) > w) {
++				sb_init(&b, buf, sizeof buf);
++				sb_str(&b, TR(HOME_CHIP_CPU_SLOW, "CPU slow"));
++			}
++			if (x + gfx_text_width(f, buf) <= w)
++				gfx_text(f, x, y, buf, ui_col.warn);
++			return;
++		}
 +		sb_str(&b, "CAN ");
 +		sb_u32(&b, v->m17.tx_can, 1);
 +		if (x + gfx_text_width(f, buf) <= w)
@@ -2776,7 +3076,25 @@ index 6fc387e..7843c35 100644
  	sb_init(&b, buf, sizeof buf);
  	bool tone_temp = (v->temp & (RADIO_TEMP_TX_TONE | RADIO_TEMP_RX_TONE)) != 0;
  	if (tone_temp)
-@@ -2503,6 +2522,11 @@ static void draw_tx(const radio_view_t *v, const ui_state_t *s)
+@@ -1555,6 +1617,7 @@ static const char *deny_reason(const radio_view_t *v, char *buf, size_t len)
+ 	case TXDENY_REFUSED: sb_str(&b, TR(DENY_WHY_RADIO_REFUSED, "Radio refused to send")); break;
+ 	case TXDENY_BENCH: sb_str(&b, TR(DENY_WHY_AIR_BENCH, "Air bench: PTT off")); break;
+ 	case TXDENY_AIR_NO_TX: sb_str(&b, TR(DENY_WHY_AIR_NO_TX, "This mode: receive only")); break;
++	case TXDENY_CPU: sb_str(&b, TR(DENY_WHY_CPU, "CPU too slow for voice")); break;
+ #if CONFIG_P25_TRUNK
+ 	case TXDENY_TRUNK:
+ 		switch (v->p25.twhy) {
+@@ -1594,6 +1657,9 @@ static const char *deny_action(const radio_view_t *v)
+ 	case TXDENY_REFUSED: return TR(DENY_FIX_RELEASE_AND_RETRY, "Release PTT, try again");
+ 	case TXDENY_BENCH: return TR(DENY_FIX_END_BENCH_ON_PC, "End the bench on the PC");
+ 	case TXDENY_TRUNK: return TR(DENY_FIX_RELEASE_AND_RETRY, "Release PTT, try again");
++#if CONFIG_M17
++	case TXDENY_CPU: return m17_codec_time(v);
++#endif
+ 	default: return TR(DENY_FIX_PICK_ANOTHER_CHANNEL, "Pick another channel");
+ 	}
+ }
+@@ -2503,6 +2569,11 @@ static void draw_tx(const radio_view_t *v, const ui_state_t *s)
  	case RADIO_MODE_YSF:
  		sb_str(&b, v->ysf.talk);
  		break;
@@ -2788,7 +3106,7 @@ index 6fc387e..7843c35 100644
  #endif
  	default:
  		sb_freq(&b, v->ch.tx_hz);
-@@ -2551,6 +2575,12 @@ static void draw_tx(const radio_view_t *v, const ui_state_t *s)
+@@ -2551,6 +2622,16 @@ static void draw_tx(const radio_view_t *v, const ui_state_t *s)
  	case RADIO_MODE_YSF:
  		sb_ysf_dg(&b, v->ysf.tx_dgid, v->ysf.tx_dt);
  		break;
@@ -2797,11 +3115,15 @@ index 6fc387e..7843c35 100644
 +	case RADIO_MODE_M17:
 +		sb_str(&b, "CAN ");
 +		sb_u32(&b, v->m17.tx_can, 1);
++		if (v->m17.enc_t10 != 0 || v->m17.dec_t10 != 0) {
++			sb_chr(&b, ' ');
++			sb_m17_times(&b, v);	// Codec 2's time per 20 ms block (docs/spec/m17.md 6)
++		}
 +		break;
  #endif
  	case RADIO_MODE_FM:
  		if (v->dtmf_digits[0] != '\0') {
-@@ -3944,7 +3974,8 @@ uint8_t ui_quick_kind(int pos, const radio_view_t *v)
+@@ -3944,7 +4025,8 @@ uint8_t ui_quick_kind(int pos, const radio_view_t *v)
  		       (pos == 4 && CONFIG_DMR_PRIVACY && v->ch.mode == RADIO_MODE_DMR)))
  		return QT_AES;
  #endif
@@ -3051,10 +3373,10 @@ index ddb92af..8cff9b4 100644
  |---|---|---|---|---|
 diff --git a/docs/spec/m17.md b/docs/spec/m17.md
 new file mode 100644
-index 0000000..9f5686a
+index 0000000..d07cf18
 --- /dev/null
 +++ b/docs/spec/m17.md
-@@ -0,0 +1,132 @@
+@@ -0,0 +1,134 @@
 +<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 +<!-- Copyright (c) 2026 lyra XE1POC -->
 +
@@ -3169,7 +3491,8 @@ index 0000000..9f5686a
 +|---|---|
 +| Memory | none of its own where the vocoder lends its code window (`hal_vocoder_t.lend_window`, `HAL_VOCODER_WINDOW`: the HR_C7000 platform, 83,456 B, idle while no DMR voice runs). While M17 runs the window holds the engine (about 1.8 KB), Codec 2's state and FFT tables (30,752 B on a 64-bit host, in a 31,744 B arena, `M17_VOICE_ARENA`) and the codec's stack. The vocoder's calls give silence meanwhile; leaving M17 copies its code back from the slot. Without a lending vocoder (the host tests) a static block holds the engine and the arena |
 +| Stack | Codec 2 runs on its own 24 KB (`M17_VOICE_STACK`) at the top of the window, through `hal_vocoder_t.call_on_stack` (`platform/hrc7000/call_on_stack.S`), not on the audio task's: 15,240 B used on a 64-bit host (m17VoiceTest runs it on such a stack). The audio task's stack and the FreeRTOS heap are unchanged |
-+| CPU | host x86-64 with an FPU: about 180 us to encode and 14 us to decode a 20 ms block (m17VoiceTest). The CK803S has no FPU: Codec 2 runs as software floating point there. Not measured; encoding in real time is doubtful |
++| CPU | Codec 2 is floating point and the CK803S has no FPU: libgcc's generic soft-float (fp-bit) runs every operation, over 90 % of the work. Counted on the CK803S code (`-Os`, an instruction set simulator over its disassembly, output checked against the host's): 19.2 million instructions to encode a 20 ms block, 20.1 million to decode one, 22.9 million to make the codec. At 168 MHz and one instruction a cycle at best that is 114 ms and 120 ms for 20 ms of voice: 6 to 9 times too slow, before any flash or cache wait. Host x86-64 with an FPU: about 180 us and 14 us |
++| Too slow | Each encode and decode is timed on the provider's microsecond clock. One over 15 ms (`M17_VOICE_BUDGET_US`) switches the codec off until a restart (`m17VoiceSlow`): no more codec calls, so the audio task, which runs above the radio and UI tasks, no longer keeps them out (before this check a slow codec held it busy without end: the radio froze on PTT). A transmission is cut and unkeyed, PTT refused (`TXDENY_CPU`, "CPU too slow for voice", with "M17 enc X dec Y ms"), received calls stay silent; the call's fields still show. The home screen's chips line shows the times in place of the CAN, the TX screen after the CAN |
 +
 +## 7. Tests
 +
@@ -3185,7 +3508,8 @@ index 0000000..9f5686a
 +- On air: interoperability with any other M17 equipment (radios, MMDVM hotspots, M17 modems). Only this firmware's
 +  own frames have been decoded, by this firmware's own decoder, on the host.
 +- The transmit pulse (RRC 0.2 instead of 0.5, section 2) at another M17 receiver.
-+- Codec 2 real time, its stack and RAM on the radio: no cross build was run.
++- Codec 2 cannot run in real time on this core (section 6): voice needs a fixed-point codec or a core with an FPU.
++  The times on the radio's screen are the measurement to confirm the estimate.
 +- Codec 2 voice quality on the radio's microphone and speaker paths (the microphone level into the encoder).
 diff --git a/hal/hal_air.h b/hal/hal_air.h
 index eb5774a..9cea0d9 100644
@@ -4290,10 +4614,10 @@ index 0000000..4f4db5a
 +}
 diff --git a/tests/host/m17VoiceTest.c b/tests/host/m17VoiceTest.c
 new file mode 100644
-index 0000000..0743a4c
+index 0000000..0b27aa9
 --- /dev/null
 +++ b/tests/host/m17VoiceTest.c
-@@ -0,0 +1,177 @@
+@@ -0,0 +1,208 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// Copyright (c) 2026 lyra XE1POC
 +// M17 voice (core/m17/m17_voice.c) on the vendored Codec 2 (core/codec2): the codec fits its arena, a synthetic
@@ -4366,6 +4690,17 @@ index 0000000..0743a4c
 +	return sizeof(alt_stack) - i;
 +}
 +
++// Clocks for the codec's timing: the host's, and one 20 ms on at each read (a core too slow for Codec 2)
++static uint32_t host_us(void)
++{
++	struct timespec ts;
++
++	clock_gettime(CLOCK_MONOTONIC, &ts);
++	return (uint32_t)(ts.tv_sec * 1000000u + ts.tv_nsec / 1000);
++}
++static uint32_t slow_t;
++static uint32_t slow_us(void) { return slow_t += 20000; }
++
 +int main(void)
 +{
 +	const m17_engine_hooks_t *h = m17VoiceHooks();
@@ -4377,7 +4712,7 @@ index 0000000..0743a4c
 +
 +	m17VoiceInit(NULL);	// no board audio: the callback is driven here
 +	memset(alt_stack, 0xA5, sizeof(alt_stack));
-+	m17VoiceBegin(arena_mem, sizeof(arena_mem), run_on_alt, alt_stack + sizeof(alt_stack));
++	m17VoiceBegin(arena_mem, sizeof(arena_mem), run_on_alt, alt_stack + sizeof(alt_stack), host_us);
 +	m17VoiceAudioBlock(mic, spk, NULL);	// the first block makes the codec
 +	m17VoiceGetStats(&st);
 +	printf("m17 voice: Codec 2 3200 takes %u of %u arena bytes\n", st.arena_used, M17_VOICE_ARENA);
@@ -4464,6 +4799,26 @@ index 0000000..0743a4c
 +		printf("m17 voice: host time per 20 ms block: encode %.1f us, decode %.1f us\n", enc,
 +		       (double)(clock() - t0) / CLOCKS_PER_SEC * 1e6 / 500);
 +	}
++	// The codec's time: measured on every block, within the budget here; then on a core where an encode takes
++	// 20 ms the codec switches itself off after the first one, for good: no more encodes, no frames for the engine
++	m17VoiceGetStats(&st);
++	printf("m17 voice: host create %u us, encode max %u us, decode max %u us\n", st.create_us, st.enc_us_max,
++	       st.dec_us_max);
++	CHECK(st.enc_us_max > 0 && st.dec_us_max > 0 && st.enc_us_max < M17_VOICE_BUDGET_US && !m17VoiceSlow());
++	m17VoiceEnd();
++	m17VoiceBegin(arena_mem, sizeof(arena_mem), run_on_alt, alt_stack + sizeof(alt_stack), slow_us);
++	m17VoiceTx(true);
++	uint32_t before = st.tx_encoded;
++	for (unsigned b = 0; b < 10; b++) {
++		uint8_t d[M17_STREAM_BYTES];
++
++		voice(b, mic);
++		m17VoiceAudioBlock(mic, spk, NULL);
++		CHECK(!h->tx_voice(d, NULL));
++	}
++	m17VoiceGetStats(&st);
++	CHECK(m17VoiceSlow() && st.tx_encoded == before + 1 && st.enc_us_max >= 20000);
++	m17VoiceTx(false);
 +	printf("m17 voice: codec ran %u times on its own stack, %zu of %u bytes used\n", runs, alt_used(),
 +	       (unsigned)M17_VOICE_STACK);
 +	CHECK(runs > 600 && alt_used() < sizeof(alt_stack) - 2048);
@@ -4472,7 +4827,7 @@ index 0000000..0743a4c
 +	return fails != 0;
 +}
 diff --git a/tests/host/radioCoreTest.c b/tests/host/radioCoreTest.c
-index e502651..fcd8f8c 100644
+index e502651..29ee50c 100644
 --- a/tests/host/radioCoreTest.c
 +++ b/tests/host/radioCoreTest.c
 @@ -222,7 +222,7 @@ static void *v_lend(size_t *len)
@@ -4484,7 +4839,24 @@ index e502651..fcd8f8c 100644
  static const char *codec_profile;
  static const char *v_profile(void) { return codec_profile; }
  static uint8_t p_mic(void) { return 0; }
-@@ -2279,7 +2279,7 @@ static void test_vfo_dmr(void)
+@@ -291,6 +291,7 @@ typedef struct {
+ 	uint32_t keyed_violations;	// board.air modulated with the transmitter off (hal_air.h rule 3)
+ } fake_air_t;
+ static fake_air_t fair[2];
++static uint32_t air_clock_step;		// microseconds board.air's clock moves at each read (a slow codec, test_m17)
+ #if CONFIG_P25 && CONFIG_NXDN && CONFIG_YSF
+ static const char *interop_dir;
+ static FILE *interop_capture;
+@@ -489,7 +490,7 @@ static void air_abort(uint8_t i) { fair[i].qn = 0; fair[i].on = false; fair[i].a
+ 	static uint8_t air_space##i(void) { return (uint8_t)(AIR_DEPTH - fair[i].qn); } \
+ 	static void air_end##i(void) { air_end(i); } \
+ 	static void air_abort##i(void) { air_abort(i); } \
+-	static uint32_t air_now##i(void) { return fair[i].now_us; } \
++	static uint32_t air_now##i(void) { return fair[i].now_us += air_clock_step; } \
+ 	static bool air_load##i(uint32_t *w, uint32_t *s) { *w = 1000u + i; *s = 20000u; return true; } \
+ 	static const hal_air_t fake_air##i = { air_fit##i, air_open##i, air_close##i, air_restart##i, air_begin##i, air_queue##i, \
+ 					       air_space##i, air_end##i, air_abort##i, air_now##i, NULL, NULL, air_load##i, NULL, AIR_CHUNK, \
+@@ -2279,7 +2280,7 @@ static void test_vfo_dmr(void)
  	CHECK(debuglink_radio_feature_op(DL_OP_DMR_FIELDS, (const uint8_t[]){ 1, 0xFF, 0 }, 3) == DL_ST_OK);
  	CHECK(sm.view.ch.mode == RADIO_MODE_DMR && sim.started && !radio_nxdn_running());
  #endif
@@ -4493,7 +4865,7 @@ index e502651..fcd8f8c 100644
  	CHECK(debuglink_radio_feature_op(DL_OP_DMR_FIELDS, (const uint8_t[]){ 4, 0xFF, 0 }, 3) ==
  	      (CONFIG_YSF ? DL_ST_OK : DL_ST_UNAVAILABLE));
  #if CONFIG_YSF
-@@ -2287,7 +2287,14 @@ static void test_vfo_dmr(void)
+@@ -2287,7 +2288,14 @@ static void test_vfo_dmr(void)
  	CHECK(debuglink_radio_feature_op(DL_OP_DMR_FIELDS, (const uint8_t[]){ 1, 0xFF, 0 }, 3) == DL_ST_OK);
  	CHECK(sm.view.ch.mode == RADIO_MODE_DMR && sim.started && !radio_ysf_running());
  #endif
@@ -4509,7 +4881,7 @@ index e502651..fcd8f8c 100644
  	CHECK(debuglink_radio_feature_op(DL_OP_DMR_FIELDS, (const uint8_t[]){ 0xFF, 16, 0 }, 3) == DL_ST_BAD_ARG);
  	CHECK(debuglink_radio_feature_op(DL_OP_DMR_FIELDS, (const uint8_t[]){ 0xFF, 0xFF, 3 }, 3) == DL_ST_BAD_ARG);
  	CHECK(debuglink_radio_feature_op(DL_OP_DMR_FIELDS, (const uint8_t[]){ 0xFF, 0xFF }, 2) == DL_ST_BAD_ARG);
-@@ -5288,7 +5295,8 @@ static void test_soft_volume(void)
+@@ -5288,7 +5296,8 @@ static void test_soft_volume(void)
  	CHECK(debuglink_is_feature_op(DL_OP_VOLUME));	// the dispatcher routes it here
  	// VERSION's codec=: a codec stopped for a stub upload (present() false) still reports its profile from flash
  	{
@@ -4519,7 +4891,7 @@ index e502651..fcd8f8c 100644
  		bool was = codec_present;
  		CHECK(strcmp(debuglink_codec_id(NULL), "none") == 0);
  		codec_present = false;
-@@ -11231,6 +11239,97 @@ static void test_air_interop(void)
+@@ -11231,6 +11240,121 @@ static void test_air_interop(void)
  }
  #endif
  
@@ -4609,6 +4981,30 @@ index e502651..fcd8f8c 100644
 +	run(400);
 +	m17_engine_tx_clear(&m17_far_eng);
 +	m17_engine_end(&m17_far_eng);
++
++	// A core too slow for Codec 2 (board.air's clock 20 ms on at each read, so every encode takes 20 ms): the first
++	// encode over the budget switches the codec off, the transmission is cut and unkeyed, PTT is refused with why
++	// and the time measured, and nothing else stops (docs/spec/m17.md 6)
++	CHECK(!m17VoiceSlow() && (sm.view.m17.flags & RADIO_M17_SLOW) == 0);	// (this clock stands still while it encodes)
++	uint32_t encoded = (m17VoiceGetStats(&vs), vs.tx_encoded);
++	air_clock_step = 20000;
++	req(RREQ_PTT, 1);
++	run(600);
++	air_clock_step = 0;
++	m17VoiceGetStats(&vs);
++	CHECK(m17VoiceSlow() && vs.enc_us_max >= 20000 && vs.tx_encoded <= encoded + 2);
++	CHECK(!hw.keyed && sm.view.state == RS_TX_DENIED && sm.view.tx_deny == TXDENY_CPU);
++	CHECK((sm.view.m17.flags & RADIO_M17_SLOW) != 0 && sm.view.m17.enc_t10 >= 200);
++	req(RREQ_PTT, 0);
++	run(200);
++	CHECK(sm.view.state != RS_TX_DENIED && !hw.keyed);
++	req(RREQ_PTT, 1);	// refused at once now: never keyed
++	run(100);
++	CHECK(!hw.keyed && sm.view.state == RS_TX_DENIED && sm.view.tx_deny == TXDENY_CPU);
++	req(RREQ_PTT, 0);
++	run(200);
++	m17VoiceGetStats(&vs);
++	CHECK(vs.tx_encoded <= encoded + 2);	// the codec stays off
 +	aud.feed = aud.feed_signal = false;
 +	cp_radio_name = "";
 +}
@@ -4617,7 +5013,7 @@ index e502651..fcd8f8c 100644
  int main(int argc, char **argv)
  {
  #if CONFIG_P25 && CONFIG_NXDN && CONFIG_YSF
-@@ -11369,6 +11468,9 @@ int main(int argc, char **argv)
+@@ -11369,6 +11493,9 @@ int main(int argc, char **argv)
  #endif
  #if CONFIG_P25 && CONFIG_NXDN && CONFIG_YSF
  	test_air_interop();
