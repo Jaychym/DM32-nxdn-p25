@@ -66,6 +66,8 @@ PATCHES = (
 	'nxdn-dual-monitor.patch',
 	# YSF: receive the call's actual AMBE/IMBE mode and restore the configured TX voice path
 	'ysf-cross-dt-rx.patch',
+	# NXDN96: admit trunked RTCH voice; keep DMon on the selected channel and report its real state
+	'nxdn-trunked-dmon.patch',
 )
 
 
