@@ -64,6 +64,8 @@ PATCHES = (
 	'radiofoundry-856-dual-watch.patch',
 	# NXDN dual watch: retain independent digital-monitor latches across same-mode retunes
 	'nxdn-dual-monitor.patch',
+	# YSF: receive the call's actual AMBE/IMBE mode and restore the configured TX voice path
+	'ysf-cross-dt-rx.patch',
 )
 
 
