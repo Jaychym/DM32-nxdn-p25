@@ -366,7 +366,7 @@ index 0b53ef4..b96bcd3 100644
  }
  
 diff --git a/tests/host/radioCoreTest.c b/tests/host/radioCoreTest.c
-index e17e352..f0b8d17 100644
+index e17e352..a58cc8a 100644
 --- a/tests/host/radioCoreTest.c
 +++ b/tests/host/radioCoreTest.c
 @@ -3037,10 +3037,16 @@ static void test_persist(void)
@@ -425,3 +425,21 @@ index e17e352..f0b8d17 100644
  	CHECK(ui_svc_setting_get(UI_SET_ZONE_SCAN_DWELL) == RADIO_ZONE_SCAN_DWELL_MS);
  	for (size_t i = 0; i < sizeof zone_dwells / sizeof zone_dwells[0]; i++) {
  		CHECK(ui_svc_setting_set(UI_SET_ZONE_SCAN_DWELL, zone_dwells[i]));
+@@ -7252,6 +7264,8 @@ static void test_p25_dual(void)
+ 	CHECK(sm.view.channel_number == 3 && sm.view.scan_phase == SCAN_PH_HOLD);
+ 	p25_engine_tx_stop(&far_eng);
+ 	run(600 + RADIO_DUAL_DELAY_MS + 600);
++	for (int i = 0; i < 10 && sm.view.channel_number != 1; i++)
++		run(RADIO_SCAN_DUAL_MIN_DWELL_MS);	// back on A within one short visit
+ 	CHECK(sm.view.scan == SCAN_DUAL && sm.view.channel_number == 1);	// back on A
+ 	// Another talk group: heard, not played, and the watch goes on
+ 	far_begin(0x2A0, 1002, false, 7);
+@@ -8788,6 +8802,8 @@ static void test_nxdn_dual(void)
+ 	CHECK(sm.view.channel_number == 3 && sm.view.scan_phase == SCAN_PH_HOLD);
+ 	nxdn_engine_tx_stop(&nfar);
+ 	run(600 + RADIO_DUAL_DELAY_MS + 600);
++	for (int i = 0; i < 10 && sm.view.channel_number != 1; i++)
++		run(RADIO_SCAN_DUAL_MIN_DWELL_MS);	// back on A within one short visit
+ 	CHECK(sm.view.scan == SCAN_DUAL && sm.view.channel_number == 1);
+ 	// Another group: not held
+ 	nfar_begin(true, 7, 2002, false, 21);
