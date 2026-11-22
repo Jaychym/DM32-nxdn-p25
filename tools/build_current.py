@@ -68,6 +68,11 @@ PATCHES = (
 	'ysf-cross-dt-rx.patch',
 	# NXDN96: admit trunked RTCH voice; keep DMon on the selected channel and report its real state
 	'nxdn-trunked-dmon.patch',
+	# FD6818: clear the FM receive sub-audio on entering DMR; a toned FM channel left it keyed on every digital TX
+	'digital-tx-subaudio-off.patch',
+	# Codec 2 (LGPL-2.1, 3200 bit/s files only) and M17 stream voice as a per-channel mode; built only with --m17
+	'codec2-vendor.patch',
+	'm17-mode.patch',
 )
 
 
@@ -102,6 +107,7 @@ def main():
 	ap.add_argument('--tree', type=Path, default=ROOT / 'build/current')
 	ap.add_argument('--cross', default=os.environ.get('CROSS', str(ROOT / 'toolchain/bin/csky-elf-')))
 	ap.add_argument('--jobs', type=int, default=min(os.cpu_count() or 2, 8))
+	ap.add_argument('--m17', action='store_true', help='build with CONFIG_M17=y (M17 voice; Codec 2 real time on the MCU unverified)')
 	ap.add_argument('--no-mdc1200', action='store_true', help='build with CONFIG_MDC1200=n (MDC-1200 ID on FM channels)')
 	args = ap.parse_args()
 	tree = args.tree.resolve()
@@ -110,7 +116,7 @@ def main():
 	version = out('git', 'rev-parse', '--short=8', 'HEAD', cwd=ROOT)
 	git_time = out('git', 'log', '-1', '--format=%ct', 'HEAD', cwd=ROOT)
 	run('make', '-j%d' % args.jobs, 'BOARD=dm32', 'CROSS=' + args.cross, 'BUILD=build/dm32', 'GITVERSION=' + version,
-	    'GITDIRTY=', 'RFOUNDRY_GIT_TIME=' + git_time, 'CONFIG_MDC1200=' + ('n' if args.no_mdc1200 else 'y'),
+	    'GITDIRTY=', 'RFOUNDRY_GIT_TIME=' + git_time, 'CONFIG_MDC1200=' + ('n' if args.no_mdc1200 else 'y'), 'CONFIG_M17=' + ('y' if args.m17 else 'n'),
 	    'all', 'stack-check', cwd=tree)
 
 
