@@ -443,3 +443,19 @@ index e17e352..a58cc8a 100644
  	CHECK(sm.view.scan == SCAN_DUAL && sm.view.channel_number == 1);
  	// Another group: not held
  	nfar_begin(true, 7, 2002, false, 21);
+diff --git a/tests/host/uiFlowTest.c b/tests/host/uiFlowTest.c
+index 73106cd..f3fed8e 100644
+--- a/tests/host/uiFlowTest.c
++++ b/tests/host/uiFlowTest.c
+@@ -228,9 +228,9 @@ static const flow_t flows[] = {
+ 	{ "10 privacy", "", "quick 6 back", "privacy=1 screen=home", 3, false },
+ 	{ "11 scan start (Tools > Scan)", "", "ok 6 1", "scanning=1", 3, false },
+ 	{ "11 zone scan speed opens from Tools", "", "ok 6 up ok",
+-	  "screen=group shows=Zone_scan_speed shows=Empty-channel_dwell shows=50_ms", 4, false },
++	  "screen=group shows=Zone_scan_speed shows=Empty-channel_dwell shows=25_ms", 4, false },
+ 	{ "11 zone scan speed survives a restart", "ok 6 up ok ok", "reboot ok 6 up",
+-	  "screen=tools shows=Zone_scan_speed shows=75_ms", 3, false },
++	  "screen=tools shows=Zone_scan_speed shows=50_ms", 3, false },
+ 	{ "11 nuisance skip", "ok 6 1", "ctx 1", "pos=4 scanning=1", 2, false },
+ 	{ "11 scan stop", "ok 6 1", "back", "scanning=0", 1, false },
+ 	// Dual watch (docs/ux/dual-watch.md): on in a few presses, PTT on the selected channel, the other one press away
