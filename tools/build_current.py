@@ -60,6 +60,10 @@ PATCHES = (
 	'zone-scan-25ms.patch',
 	# P25/YSF VW: calibrate the software IMBE microphone input to the reference encoder's level
 	'p25-tx-voice-level.patch',
+	# RadioFoundry #856: dual-watch DMR row fits the full color code beside the PTT pill
+	'radiofoundry-856-dual-watch.patch',
+	# NXDN dual watch: retain independent digital-monitor latches across same-mode retunes
+	'nxdn-dual-monitor.patch',
 )
 
 
