@@ -1,0 +1,175 @@
+--- a/boards/dm32/config.mk
++++ b/boards/dm32/config.mk
+@@ -20,6 +20,8 @@
+ CONFIG_DISPLAY_INSET_BOTTOM ?= 5
+ # VOX reads the microphone level through hal_power_t.mic_level, which this board doesn't have yet
+ CONFIG_VOX ?= n
++# Extended reception is an explicit owner choice in Tools > RX past bands, never the default on a first start or reset
++CONFIG_RX_EXT_ON ?= n
+ # Keep two simultaneous TCP connections and omit optional IP services in the default DM-32UV image.
+ TCP_CONNS ?= 2
+ CONFIG_NET_WEBCTL ?= n
+--- a/core/ui/ui_menus.c
++++ b/core/ui/ui_menus.c
+@@ -6788,7 +6788,7 @@
+ // user guide) is the same everywhere. The one a radio may not have (Battery) is last, so no radio has a gap; a build
+ // without diagnostics skips 7
+ enum { T_SCAN, T_POSITION, T_HOTSPOT, T_USB_NET, T_SFR, T_ROAM, T_DIAG, T_APRS, T_BATTERY, T_ZONE_OFFER,
+-       T_ZONE_SCAN, T_COUNT };
++       T_ZONE_SCAN, T_RX_EXT, T_COUNT };
+ 
+ // Defined with the generic settings groups below; appended to Tools so every existing tool keeps its number
+ #if CONFIG_SCAN && CONFIG_UI_SETTINGS
+@@ -6804,7 +6804,8 @@
+ 		return offer_waiting();	// 0 on the keypad: only while another radio's zone waits
+ #endif
+ 	return (i != T_DIAG || CONFIG_DIAG) && (i != T_BATTERY || board_volts() != BOARD_VOLTS_NONE) &&
+-	       (i != T_ZONE_SCAN || (CONFIG_SCAN && CONFIG_UI_SETTINGS)) && i != T_ZONE_OFFER;
++	       (i != T_ZONE_SCAN || (CONFIG_SCAN && CONFIG_UI_SETTINGS)) &&
++	       (i != T_RX_EXT || (CONFIG_RX_EXT && board.rx_ext_count != 0)) && i != T_ZONE_OFFER;
+ }
+ 
+ static uint16_t tools_last;	// the highest tool's number, found on each count (the list counts before the hint)
+@@ -6852,7 +6853,8 @@
+ 		TRN(TOOLS_ROW_SFR, "Single-freq repeater"), TRN(TITLE_ROAMING, "Roaming"),
+ 		TRN(TITLE_DIAGNOSTICS, "Diagnostics"), TRX(WORD_APRS, "APRS"), TRN(TITLE_BATTERY, "Battery"),
+ 		TRN(TOOLS_ROW_SHARES_RECEIVED, "Zones/Chs Received"),
+-		TRN(TOOLS_ROW_ZONE_SCAN_SPEED, "Zone scan speed") };
++		TRN(TOOLS_ROW_ZONE_SCAN_SPEED, "Zone scan speed"),
++		TRN(SET_LABEL_RX_PAST_BANDS, "RX past bands") };
+ 	uint16_t i = tools_row(row);
+ 	if (i >= T_COUNT)
+ 		return;
+@@ -6909,6 +6911,11 @@
+ 		sb_i32(&b, ui_svc_setting_get(UI_SET_ZONE_SCAN_DWELL));
+ 		sb_str(&b, " ms");
+ 		break;
++	case T_RX_EXT:
++#if CONFIG_RX_EXT
++		sb_str(&b, ui_svc_setting_get(UI_SET_RX_EXT) ? TR(VALUE_ON, "On") : TR(VALUE_OFF, "Off"));
++#endif
++		break;
+ 	case T_ROAM:
+ #if CONFIG_DMR_ROAMING
+ 		sb_str(&b, ui_view()->roam.zone_on ? TR(VALUE_ON, "On") : TR(VALUE_OFF, "Off"));
+@@ -6940,6 +6947,19 @@
+ {
+ 	(void)hold;
+ 	switch (tools_row(row)) {
++	case T_RX_EXT:
++#if CONFIG_RX_EXT
++	{
++		int32_t on = ui_svc_setting_get(UI_SET_RX_EXT) == 0;
++		if (ui_svc_setting_set(UI_SET_RX_EXT, on)) {
++			ui_apply_setting(UI_SET_RX_EXT, on);
++			ui_svc_apply(UI_SET_RX_EXT, on);
++		} else {
++			ui_toast(TR(TOAST_SAVE_FAILED, "Couldn't save: try again"));
++		}
++	}
++#endif
++		break;
+ 	case T_ZONE_SCAN:
+ #if CONFIG_SCAN && CONFIG_UI_SETTINGS
+ 		zone_scan_open();
+--- a/tests/host/uiFlowTest.c
++++ b/tests/host/uiFlowTest.c
+@@ -227,6 +227,16 @@
+ 	{ "9 squelch 2 steps (FM)", "down", "quick 2 up up back", "sq=7 screen=home", 5, false },
+ 	{ "10 privacy", "", "quick 6 back", "privacy=1 screen=home", 3, false },
+ 	{ "11 scan start (Tools > Scan)", "", "ok 6 1", "scanning=1", 3, false },
++	{ "11 extended RX appears in Tools", "extended-bands ok 6 up", "",
++	  "screen=tools shows=RX_past_bands shows=On", 3, false },
++	{ "11 extended RX turns off in Tools", "extended-bands ok 6 up", "ok",
++	  "screen=tools shows=RX_past_bands shows=Off", 4, false },
++	{ "11 extended RX Tools choice survives restart", "extended-bands ok 6 up ok reboot ok 6 up", "",
++	  "screen=tools shows=RX_past_bands shows=Off", 6, false },
++	{ "11 extended RX turns back on in Tools", "extended-bands ok 6 up ok", "ok",
++	  "screen=tools toast=Receive_only._Sensitivity_not_rated", 5, false },
++	{ "11 extended RX On choice survives restart", "extended-bands ok 6 up ok ok reboot ok 6 up", "",
++	  "screen=tools shows=RX_past_bands shows=On", 7, false },
+ 	{ "11 zone scan speed opens from Tools", "", "ok 6 up ok",
+ 	  "screen=group shows=Zone_scan_speed shows=Empty-channel_dwell shows=25_ms", 4, false },
+ 	{ "11 zone scan speed survives a restart", "ok 6 up ok ok", "reboot ok 6 up",
+--- a/tests/host/sim/ui_sim.c
++++ b/tests/host/sim/ui_sim.c
+@@ -416,6 +416,7 @@
+ 	{ 16000000, 65000000, false }, { 174000000, 400000000, false }, { 480000000, 1120000000, false },
+ };
+ static const band_t rx_only_bands[] = { { 136000000, 174000000, false }, { 400000000, 480000000, false } };
++static bool rx_ext_on;
+ static const char *const power_names[] = { "50mW", "250mW", "500mW", "750mW", "1W", "2W", "3W", "4W", "5W" };
+ 
+ static bool afsk_tx_start(const uint8_t *t, uint16_t n, uint16_t baud, uint16_t mark, uint16_t space, uint8_t level)
+@@ -437,7 +438,8 @@
+ static const hal_radio_t am_radio = { .rx_am = r_rx_am };
+ 
+ board_t board = {
+-	.name = "Simulator", .bands = bands, .band_count = 3, .power_count = 9, .power_names = power_names,
++	.name = "Simulator", .bands = bands, .band_count = 3, .rx_ext_on = &rx_ext_on,
++	.power_count = 9, .power_names = power_names,
+ 	.power_default = 4, .display = &disp, .power = &power, .afsk = &afsk, .vocoder = &vocoder,
+ };
+ 
+@@ -2524,6 +2526,8 @@
+ 	board.caps = maps[map].caps;
+ 	board.bands = bands;
+ 	board.band_count = sizeof bands / sizeof bands[0];
++	board.rx_ext_count = 0;
++	rx_ext_on = false;
+ 	power.supply_mv = NULL;
+ 	// The MD-9600's panel names its QUICK and CONTEXT keys in the hints
+ 	board.quick_label = map == SIM_MAP_P ? "P1" : NULL;
+@@ -3533,6 +3537,9 @@
+ 	if (strcmp(t, "extended-bands") == 0) {
+ 		board.bands = extended_bands;
+ 		board.band_count = sizeof extended_bands / sizeof extended_bands[0];
++		board.rx_ext_count = 3;
++		ui_svc_setting_set(UI_SET_RX_EXT, 1);	// these flows start extended, as they did before the switch was simulated
++		rx_ext_on = ui_svc_setting_get(UI_SET_RX_EXT) != 0;
+ 		return true;
+ 	}
+ 	if (strcmp(t, "rxonly") == 0) {	// no band may transmit
+--- a/docs/spec/hardware-dm32.md
++++ b/docs/spec/hardware-dm32.md
+@@ -1592,6 +1592,6 @@
+ 
+ ## Receive past the rated bands
+ 
+-16-65, 174-400 and 480-1120 MHz: receive only in FM, enabled by default in this fork ([radio-features.md](radio-features.md) 6.2). Through 740 MHz this follows the FD6818 band table (8.3). The 740-1120 MHz extension is experimental: it reuses the top band-select words, whose row also ends at 1120 MHz in the related FD6818SH driver, but no sensitivity, synthesizer lock or real reception has been measured on a DM-32UV.
++16-65, 174-400 and 480-1120 MHz: receive only in FM, while **Tools > RX past bands** is On ([radio-features.md](radio-features.md) 6.2). The option is Off on a first start and after a factory reset; the saved choice survives a restart. Through 740 MHz this follows the FD6818 band table (8.3). The 740-1120 MHz extension is experimental: it reuses the top band-select words, whose row also ends at 1120 MHz in the related FD6818SH driver, but no sensitivity, synthesizer lock or real reception has been measured on a DM-32UV.
+ 
+ The VFO accepts nine digits above 1 GHz (`112000000` = 1120.00000 MHz); existing entries of up to eight digits keep their 3+5 MHz/decimal meaning. Channel records remain limited to 999.999990 MHz by their eight-BCD-digit 10 Hz fields, so GHz reception is VFO-only rather than truncating a channel to another frequency. PTT remains denied throughout every receive-only extension.
+--- a/docs/spec/radio-features.md
++++ b/docs/spec/radio-features.md
+@@ -748,7 +748,7 @@
+ 
+ | Rule | Detail |
+ |---|---|
+-| Setting | Settings > Advanced > RX past bands. Stored in `settings_t.cp_flags`; a factory reset returns it to its default, which `CONFIG_RX_EXT_ON` sets (on in this tree, off in RadioFoundry's). Hidden on a board with no range. Older stored settings take the enabled default once when this build first loads them. The owner can turn it off after that. |
++| Setting | **Tools > RX past bands** toggles it directly; the same switch remains in Settings > Advanced. Stored in `settings_t.cp_flags`; a factory reset returns it to the default selected by `CONFIG_RX_EXT_ON` (the DM-32UV sets it off). Both rows are hidden on a board with no range. Older stored settings take an enabled default once when such a build first loads them; an owner's explicit On or Off choice survives later boots. |
+ | Table | Everything that reads the bands uses `board_band_count()`: the VFO's tuning and wrap, the keypad entry, VFO scan, the channel editor, `rigctld` and the debug link's `bands=`. |
+ | Transmit | Never: `board_in_band(hz, true)` skips the entries, so PTT gives `TXDENY_BAND`. |
+ | Modes | FM only, as in any receive-only band: the channel editor refuses DMR there. |
+--- a/docs/user/17-settings.md
++++ b/docs/user/17-settings.md
+@@ -189,7 +189,7 @@
+ | Backlight tests | Only in builds with `CONFIG_BACKLIGHT_TEST` ([Build configuration](../build-config.md)): a bench tool for measuring the backlight, in English only. **OK** steps through the pages the radio supports. **Compare value**: the knob steps 1, **Up** / **Down** 50 (1 on a radio whose channel knob has end stops), digits type a value (it applies when it has as many digits as the maximum; **#** applies a shorter one, **Back** deletes a digit), **\*** changes the PWM rate, holding **OK** switches to full and back; it shows the duty and the on and off time each period. **Brightness**: 0 to 100 % in steps of 10, kept as the Brightness setting (10 % for 0). **PWM rate**: the rates the radio has, at that brightness; the standard rate again on leaving. How to use them: [Backlight curve](../testing/backlight-curve.md) |
+ | Factory reset | Puts every setting back to its default ([below](#factory-reset)) |
+ | Crash log | What the last crash left, and sending it to the developers ([below](#crash-log)) |
+-| RX past bands | Only on radios with a range for it: receive above the radio's rated bands, FM only. Off by default. Sensitivity isn't rated there, and the radio never transmits there |
++| RX past bands | Only on radios with a range for it: receive above the radio's rated bands, FM only. **Tools > RX past bands** is a direct On/Off shortcut for this same setting. On the DM-32UV it starts Off and the choice is kept after a restart. Sensitivity isn't rated there, and the radio never transmits there |
+ | Freq trim | Moves the radio's receive and transmit frequency together, for a radio that is off frequency. Measure the error (a frequency counter, a service monitor, or a hotspot's BER test) and enter it with the sign reversed. The page shows what the trim comes to in Hz at 440 MHz and 144 MHz: a radio 2 kHz high at 440 MHz takes about -4.5 ppm (-1980 Hz). The page shows the trim in large type over a slider from -10 to +10, with "+ to increase frequency" under it where the display has room. Up and Down (or the knob) step 0.1 ppm, # flips the sign, digits type it (# 4 5 OK is -4.5 ppm). Takes effect once you stop changing it. Only on radios that have it ([which radios](../feature-matrix.md)). Range -10.0 to +10.0 ppm in 0.1 ppm steps, default 0 |
+ | Hardware | Only on radios that need it: facts about the radio the firmware can't detect, such as a board revision (one the radio detects isn't listed). **OK** steps through the choices, holding **OK** stores the one shown. "Not set" shows in the warning color until one is stored, and the radio won't transmit until then. A choice other than the one the radio runs applies from the next start-up |
+ 
+--- a/tests/hil/features.toml
++++ b/tests/hil/features.toml
+@@ -76,7 +76,7 @@
+ hardware = "a receiver chip whose documents give a range past the rated bands"
+ spec = "docs/spec/radio-features.md"
+ 
+-# The switch of Settings > Advanced > RX past bands starts on (settings.c): no hardware of its own
++# The RX past bands switch (Tools, or Settings > Advanced) starts on in the feature-test build: no hardware of its own
+ [feature.rx_ext_on]
+ switch = "RX_EXT_ON"
+ spec = "docs/spec/radio-features.md"

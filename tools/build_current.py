@@ -77,6 +77,8 @@ PATCHES = (
 	'm17-fixed-tx.patch',
 	# DM-32UV: experimental FM RX through 1120 MHz, nine-digit GHz VFO entry, always RX-only
 	'dm32-rx-1120.patch',
+	# DM-32UV: optional extended RX in Tools, off until the owner enables it and persistent across restarts
+	'dm32-rx-tools.patch',
 )
 
 
