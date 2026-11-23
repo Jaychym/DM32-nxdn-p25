@@ -85,6 +85,8 @@ PATCHES = (
 	'p25-tx-limiter.patch',
 	# User guide: the ninth VFO digit for GHz RX, and the Tools > RX past bands gate that refuses it while Off
 	'vfo-ghz-entry-doc.patch',
+	# RX past bands: every mode there (VFO and channels), and GHz channel records with a 0xA/0xB marker nibble
+	'rx-ext-ghz-channels.patch',
 )
 
 

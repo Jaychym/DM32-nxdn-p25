@@ -1,0 +1,454 @@
+diff --git a/core/codeplug/codeplug.c b/core/codeplug/codeplug.c
+index c335118..3d52012 100644
+--- a/core/codeplug/codeplug.c
++++ b/core/codeplug/codeplug.c
+@@ -213,11 +213,24 @@ static uint32_t to_bcd(uint32_t v, uint8_t digits)
+ 	return w;
+ }
+ 
+-// Frequency field: BCD of 10 Hz units as a LE word (438.500 MHz = bytes 00 00 85 43)
++// Frequency field: BCD of 10 Hz units as a LE word (438.500 MHz = bytes 00 00 85 43). A channel at 1 GHz or more
++// keeps the full 10 Hz resolution in the low seven digits; the top nibble is 0xA or 0xB — never a BCD digit — and
++// adds 1000 or 1100 MHz, so the field reaches 1199.99999 MHz. Firmware without it reads the field as malformed BCD
++// and skips the record: a GHz channel never wraps into another frequency there.
++#define FREQ_GHZ_MARK	0xAu
++#define FREQ_GHZ_BASE	1000000000u
++#define FREQ_MAX	1199999990u
+ static bool freq(const uint8_t *p, uint32_t *hz)
+ {
+-	uint32_t v;
+-	if (!bcd(le32(p), 8, &v) || v == 0) {
++	uint32_t w = le32(p), top = w >> 28, v;
++	if (top >= FREQ_GHZ_MARK) {
++		if (top > FREQ_GHZ_MARK + 1u || !bcd(w & 0x0FFFFFFFu, 7, &v)) {
++			return false;
++		}
++		*hz = FREQ_GHZ_BASE + ((top - FREQ_GHZ_MARK) * 10000000u + v) * 10u;
++		return true;
++	}
++	if (!bcd(w, 8, &v) || v == 0) {
+ 		return false;
+ 	}
+ 	*hz = v * 10u;
+@@ -226,7 +239,13 @@ static bool freq(const uint8_t *p, uint32_t *hz)
+ 
+ static void put_freq(uint8_t *p, uint32_t hz)
+ {
+-	uint32_t w = to_bcd(hz / 10u, 8);
++	uint32_t w;
++	if (hz >= FREQ_GHZ_BASE) {
++		uint32_t rem = hz / 10u - FREQ_GHZ_BASE / 10u;	// 0..19999999: its top digit rides in the marker nibble
++		w = to_bcd(rem % 10000000u, 7) | ((FREQ_GHZ_MARK + rem / 10000000u) << 28);
++	} else {
++		w = to_bcd(hz / 10u, 8);
++	}
+ 	p[0] = (uint8_t)w;
+ 	p[1] = (uint8_t)(w >> 8);
+ 	p[2] = (uint8_t)(w >> 16);
+@@ -1069,9 +1088,10 @@ uint16_t codeplug_free_channel(void)
+ bool codeplug_set_channel(uint16_t number, const channel_t *ch)
+ {
+ 	uint8_t r[CH_SIZE];
+-	// Eight BCD digits in 10 Hz units top out at 999999990 Hz: never wrap a GHz channel into another frequency.
+-	if (number < 1 || number > CH_MAX || ch->rx_hz == 0 || ch->tx_hz == 0 || ch->rx_hz >= 1000000000u ||
+-	    ch->tx_hz >= 1000000000u) {
++	// The frequency field tops out at FREQ_MAX (its GHz marker reaches 1199.99999 MHz): never wrap a channel past
++	// it into another frequency.
++	if (number < 1 || number > CH_MAX || ch->rx_hz == 0 || ch->tx_hz == 0 || ch->rx_hz > FREQ_MAX ||
++	    ch->tx_hz > FREQ_MAX) {
+ 		return false;
+ 	}
+ 	codeplug_tag_t tag;
+diff --git a/docs/spec/codeplug-native.md b/docs/spec/codeplug-native.md
+index d9051b4..97086ad 100644
+--- a/docs/spec/codeplug-native.md
++++ b/docs/spec/codeplug-native.md
+@@ -84,9 +84,10 @@ Rules:
+   not from the bytes in the slot. Only an existing channel keeps the bytes the model doesn't own.
+ - **Zones.** With no zone stored there is one virtual zone, "All channels". The first `codeplug_set_zone(0, ...)`
+   replaces it with a stored zone table, using the 80-channel zone layout.
+-- **Validation.** A channel number out of range or a malformed frequency (0, 1 GHz or more), a zone naming a
+-  channel that isn't stored, or a list naming a contact index out of range is refused. The caller gets `false` and
+-  nothing is written. Band limits are checked when the radio tunes, not at storage.
++- **Validation.** A channel number out of range or a frequency the record can't hold (0, or past 1199.99999 MHz —
++  the GHz marker form's end, `open-firmware-cps.md` 7.3.3), a zone naming a channel that isn't stored, or a list
++  naming a contact index out of range is refused. The caller gets `false` and nothing is written. Band limits are
++  checked when the radio tunes, not at storage.
+ 
+ `codeplug_openfw_decode()` and `codeplug_openfw_encode()` expose the 56-byte channel record conversion for the CPS
+ shim's VFO handling (`cps-protocol.md` 2.3).
+diff --git a/docs/spec/hardware-dm32.md b/docs/spec/hardware-dm32.md
+index da45f23..e5cb59b 100644
+--- a/docs/spec/hardware-dm32.md
++++ b/docs/spec/hardware-dm32.md
+@@ -1594,4 +1594,4 @@ calibration (modem-hrc7000.md 10.4).
+ 
+ 16-65, 174-400 and 480-1120 MHz: receive only in FM, while **Tools > RX past bands** is On ([radio-features.md](radio-features.md) 6.2). The option is Off on a first start and after a factory reset; the saved choice survives a restart. Through 740 MHz this follows the FD6818 band table (8.3). The 740-1120 MHz extension is experimental: it reuses the top band-select words, whose row also ends at 1120 MHz in the related FD6818SH driver, but no sensitivity, synthesizer lock or real reception has been measured on a DM-32UV.
+ 
+-The VFO accepts nine digits above 1 GHz (`112000000` = 1120.00000 MHz); existing entries of up to eight digits keep their 3+5 MHz/decimal meaning. Channel records remain limited to 999.999990 MHz by their eight-BCD-digit 10 Hz fields, so GHz reception is VFO-only rather than truncating a channel to another frequency. PTT remains denied throughout every receive-only extension.
++The VFO accepts nine digits above 1 GHz (`112000000` = 1120.00000 MHz); existing entries of up to eight digits keep their 3+5 MHz/decimal meaning. Channel records hold a GHz frequency too, the top nibble of the frequency word a 0xA/0xB marker over seven BCD digits rather than eight (`open-firmware-cps.md` 7.3.3): a build without it reads the record as malformed and skips the channel instead of tuning another frequency. Every mode receives there; PTT remains denied throughout every receive-only extension.
+diff --git a/docs/spec/open-firmware-cps.md b/docs/spec/open-firmware-cps.md
+index 5851e99..33b6f48 100644
+--- a/docs/spec/open-firmware-cps.md
++++ b/docs/spec/open-firmware-cps.md
+@@ -422,7 +422,7 @@ assuming 500 ms steps (`codeplug.c` `GEN_HANG_UNIT_MS`, `dmr-voice.md` 7); that
+ | Offset | Size | Field |
+ | --- | --- | --- |
+ | 0x00 | 16 | Name, 0xFF padded. A record is empty when its in-use bit is clear |
+-| 0x10 | 4 | RX frequency: BCD of the frequency in 10 Hz units, stored as a LE 32-bit word (438.500 MHz = 43850000 -> 0x43850000 -> bytes 00 00 85 43) |
++| 0x10 | 4 | RX frequency: BCD of the frequency in 10 Hz units, stored as a LE 32-bit word (438.500 MHz = 43850000 -> 0x43850000 -> bytes 00 00 85 43). At 1 GHz or more the low seven digits keep the 10 Hz units and the top nibble is 0xA or 0xB — never a BCD digit — adding 1000 or 1100 MHz (1120.00000 MHz = 12000000 + 1100 MHz -> 0xB2000000 -> bytes 00 00 00 B2), up to 1199.99999 MHz. A reader without it sees malformed BCD and skips the record: a GHz channel never wraps into another frequency there |
+ | 0x14 | 4 | TX frequency, same encoding |
+ | 0x18 | 1 | Mode: 0 FM, 1 DMR |
+ | 0x19 | 1 | Power: 0 = use the radio's master power; n = power level n-1. qdmr maps 1 min, 3 low, 6 mid, 9 high, 10 max; the levels themselves are per radio. Radios with 9 or more levels read n as level n-1; radios with fewer spread the scale over their levels (2 levels: 1-5 low, 6-10 high) |
+diff --git a/docs/spec/radio-features.md b/docs/spec/radio-features.md
+index ddfa804..86db2ef 100644
+--- a/docs/spec/radio-features.md
++++ b/docs/spec/radio-features.md
+@@ -751,7 +751,7 @@ A board may list receive-only ranges past its rated bands: the last `board_t.rx_
+ | Setting | **Tools > RX past bands** toggles it directly; the same switch remains in Settings > Advanced. Stored in `settings_t.cp_flags`; a factory reset returns it to the default selected by `CONFIG_RX_EXT_ON` (the DM-32UV sets it off). Both rows are hidden on a board with no range. Older stored settings take an enabled default once when such a build first loads them; an owner's explicit On or Off choice survives later boots. |
+ | Table | Everything that reads the bands uses `board_band_count()`: the VFO's tuning and wrap, the keypad entry, VFO scan, the channel editor, `rigctld` and the debug link's `bands=`. |
+ | Transmit | Never: `board_in_band(hz, true)` skips the entries, so PTT gives `TXDENY_BAND`. |
+-| Modes | FM only, as in any receive-only band: the channel editor refuses DMR there. |
++| Modes | Every mode the build runs, in the VFO and on stored channels alike; the extension is receive-only, and that is the whole of it. The listen-band rules (AM in the air band, the broadcast receiver) don't apply there. |
+ | Turning it off | The radio core reloads. A VFO past the table returns to a band; a channel there stays stored and doesn't tune. |
+ 
+ A board's ranges come from its receiver chip's documents. Nothing past the rated bands is
+diff --git a/docs/user/07-channels-zones-vfo.md b/docs/user/07-channels-zones-vfo.md
+index 83bbdb9..997bd89 100644
+--- a/docs/user/07-channels-zones-vfo.md
++++ b/docs/user/07-channels-zones-vfo.md
+@@ -143,7 +143,7 @@ Focus a row and press **OK**:
+ | Power, RX CTCSS/DCS, TX CTCSS/DCS, color code, TX time-out | opens a picker: turn the knob (or Up / Down) to the value, **OK** keeps it, **Back** cancels. Color code and time-out also take digits |
+ | RX CTCSS/DCS, TX CTCSS/DCS, typed | type a CTCSS tone with its tenths digit: **8 8 5** is 88.5, **1 3 1 8** is 131.8. Under 60 the digits are whole Hz: **6 7** is 67.0, **1 0 0** is 100.0. Start with **0** for a DCS code: **0 2 3** is D023N. **Back** takes the last digit back. For an inverted DCS code, turn the knob one step: each code's I follows its N (D023N, D023I, D025N) |
+ | Zones | opens every zone, marked "In" where the channel is. **OK** puts the channel in a zone or takes it out, saved at once. A new channel shows the row once saved |
+-| RX, TX, own ID | type the digits, **OK** keeps them, **Back** takes the last digit back. Digits outside the radio's bands are refused as you type. A new RX moves TX with it, so a repeater keeps its offset. If the new RX is in another band (UHF to VHF), or TX would land outside the band, TX is set to the new RX |
++| RX, TX, own ID | type the digits, **OK** keeps them, **Back** takes the last digit back. Digits outside the radio's bands are refused as you type; above 1 GHz that's nine digits, as in the VFO, with **Tools > RX past bands** On. A new RX moves TX with it, so a repeater keeps its offset. If the new RX is in another band (UHF to VHF), or TX would land outside the band, TX is set to the new RX. A frequency the radio only receives, GHz included, saves as an RX only channel in whatever mode you pick |
+ | Name | opens text entry (below) |
+ | TX contact, RX group list | opens the list of contacts or group lists; type letters to find one |
+ 
+@@ -251,8 +251,8 @@ what you typed as you go.
+   bands is refused while **Tools > RX past bands** is Off.
+ - Up to eight digits (10 Hz) — nine on a radio with receive above 1 GHz, where a ninth digit switches the whole
+   entry to four MHz digits: **1 1 2 0 0 0 0 0 0** is 1120.00000 MHz (the first digits read as 112 MHz until the
+-  ninth lands). Above 1 GHz needs **Tools > RX past bands** On and tunes receive only; a channel can't hold a GHz
+-  frequency. After 10 s without a key, the entry is dropped.
++  ninth lands). Above 1 GHz needs **Tools > RX past bands** On and tunes receive only. After 10 s without a key,
++  the entry is dropped.
+ 
+ <img src="../ux/screens/160x120i5/home_vfo_entry.png" width="200" alt="Typing a VFO frequency">
+ 
+diff --git a/docs/user/17-settings.md b/docs/user/17-settings.md
+index 7d1f15c..891c20e 100644
+--- a/docs/user/17-settings.md
++++ b/docs/user/17-settings.md
+@@ -189,7 +189,7 @@ When the keys lock by themselves and what still works while they are locked ([Ke
+ | Backlight tests | Only in builds with `CONFIG_BACKLIGHT_TEST` ([Build configuration](../build-config.md)): a bench tool for measuring the backlight, in English only. **OK** steps through the pages the radio supports. **Compare value**: the knob steps 1, **Up** / **Down** 50 (1 on a radio whose channel knob has end stops), digits type a value (it applies when it has as many digits as the maximum; **#** applies a shorter one, **Back** deletes a digit), **\*** changes the PWM rate, holding **OK** switches to full and back; it shows the duty and the on and off time each period. **Brightness**: 0 to 100 % in steps of 10, kept as the Brightness setting (10 % for 0). **PWM rate**: the rates the radio has, at that brightness; the standard rate again on leaving. How to use them: [Backlight curve](../testing/backlight-curve.md) |
+ | Factory reset | Puts every setting back to its default ([below](#factory-reset)) |
+ | Crash log | What the last crash left, and sending it to the developers ([below](#crash-log)) |
+-| RX past bands | Only on radios with a range for it: receive above the radio's rated bands, FM only. **Tools > RX past bands** is a direct On/Off shortcut for this same setting. On the DM-32UV it starts Off and the choice is kept after a restart. Sensitivity isn't rated there, and the radio never transmits there |
++| RX past bands | Only on radios with a range for it: receive above the radio's rated bands, in every mode, and store channels there (RX only). **Tools > RX past bands** is a direct On/Off shortcut for this same setting. On the DM-32UV it starts Off and the choice is kept after a restart. Sensitivity isn't rated there, and the radio never transmits there |
+ | Freq trim | Moves the radio's receive and transmit frequency together, for a radio that is off frequency. Measure the error (a frequency counter, a service monitor, or a hotspot's BER test) and enter it with the sign reversed. The page shows what the trim comes to in Hz at 440 MHz and 144 MHz: a radio 2 kHz high at 440 MHz takes about -4.5 ppm (-1980 Hz). The page shows the trim in large type over a slider from -10 to +10, with "+ to increase frequency" under it where the display has room. Up and Down (or the knob) step 0.1 ppm, # flips the sign, digits type it (# 4 5 OK is -4.5 ppm). Takes effect once you stop changing it. Only on radios that have it ([which radios](../feature-matrix.md)). Range -10.0 to +10.0 ppm in 0.1 ppm steps, default 0 |
+ | Hardware | Only on radios that need it: facts about the radio the firmware can't detect, such as a board revision (one the radio detects isn't listed). **OK** steps through the choices, holding **OK** stores the one shown. "Not set" shows in the warning color until one is stored, and the radio won't transmit until then. A choice other than the one the radio runs applies from the next start-up |
+ 
+diff --git a/site/static/js/codeplug/fields.js b/site/static/js/codeplug/fields.js
+index 169c951..ce1a242 100644
+--- a/site/static/js/codeplug/fields.js
++++ b/site/static/js/codeplug/fields.js
+@@ -23,15 +23,32 @@ export function toBcd(v, digits) {
+ 	return w;
+ }
+ 
+-// Frequency: BCD of 10 Hz units as a LE word (438.500 MHz = bytes 00 00 85 43); null if malformed or 0
++// Frequency: BCD of 10 Hz units as a LE word (438.500 MHz = bytes 00 00 85 43). At 1 GHz or more the low seven
++// digits keep the 10 Hz units and the top nibble is 0xA or 0xB — never a BCD digit — adding 1000 or 1100 MHz, so the
++// field reaches 1199.99999 MHz; firmware without it reads the field as malformed BCD and skips the record, so a GHz
++// channel never wraps into another frequency there. Null if malformed or 0
++export const FREQ_GHZ_BASE = 1e9, FREQ_MAX = 1199999990;
++const FREQ_GHZ_MARK = 0xA;
+ export function getFreq(b, off) {
+ 	const w = (b[off] | (b[off + 1] << 8) | (b[off + 2] << 16) | (b[off + 3] << 24)) >>> 0;
++	const top = w >>> 28;
++	if (top >= FREQ_GHZ_MARK) {
++		if (top > FREQ_GHZ_MARK + 1) return null;
++		const v = bcd(w & 0x0FFFFFFF, 7);
++		return v === null ? null : FREQ_GHZ_BASE + ((top - FREQ_GHZ_MARK) * 10000000 + v) * 10;
++	}
+ 	const v = bcd(w, 8);
+ 	return v ? v * 10 : null;
+ }
+ 
+ export function putFreq(b, off, hz) {
+-	const w = toBcd(Math.round(hz / 10), 8);
++	let w;
++	if (hz >= FREQ_GHZ_BASE) {
++		const rem = Math.round(hz / 10) - FREQ_GHZ_BASE / 10;	// 0..19999999: its top digit rides in the marker nibble
++		w = toBcd(rem % 10000000, 7) + (FREQ_GHZ_MARK + Math.floor(rem / 10000000)) * 0x10000000;
++	} else {
++		w = toBcd(Math.round(hz / 10), 8);
++	}
+ 	b[off] = w & 0xFF;
+ 	b[off + 1] = (w >>> 8) & 0xFF;
+ 	b[off + 2] = (w >>> 16) & 0xFF;
+@@ -155,11 +172,11 @@ export function mhz(hz) {
+ 	return hz == null ? "" : (hz / 1e6).toFixed(5).replace(/0{1,2}$/, "");
+ }
+ 
+-// "446.00625" or "446006250" (Hz) to Hz on the 10 Hz grid; null if it isn't a frequency below 1 GHz
++// "446.00625" or "446006250" (Hz) to Hz on the 10 Hz grid; null if it isn't a frequency the field holds (FREQ_MAX)
+ export function parseFreq(text) {
+ 	const s = String(text ?? "").trim();
+ 	if (!/^\d+(\.\d+)?$/.test(s)) return null;
+ 	const n = Number(s);
+ 	const hz = n < 1e4 ? Math.round(n * 1e5) * 10 : Math.round(n / 10) * 10;
+-	return hz > 0 && hz < 1e9 ? hz : null;
++	return hz > 0 && hz <= FREQ_MAX ? hz : null;
+ }
+diff --git a/site/static/js/codeplug/model.js b/site/static/js/codeplug/model.js
+index 523ed97..4ea65c6 100644
+--- a/site/static/js/codeplug/model.js
++++ b/site/static/js/codeplug/model.js
+@@ -14,7 +14,7 @@ import {
+ 	LIST_SIZE, decodeList, encodeList, DTMF_CONTACTS, decodeDtmf, encodeDtmf, validDtmf, APRS_BASE, APRS_SIZE,
+ 	decodeAprs, encodeAprs, decodeGeneral, encodeGeneral, VFO, LUCZ,
+ } from "./records.js";
+-import { parseTone } from "./fields.js";
++import { parseTone, FREQ_MAX } from "./fields.js";
+ import { readHeader } from "./iddb.js";
+ import { decodeArea, keyValid, KEYS } from "./kv.js";
+ import { decodeModes, encodeModes, syncModes, removeModes, validateModes, MODE_LIMITS } from "./channelmodes.js";
+@@ -325,7 +325,7 @@ export function validate(m, { bands = null, features = null } = {}) {
+ 		if (!c.name) err("channels", c, "name", "no_name");
+ 		if (c.name.length > LIMITS.name) err("channels", c, "name", "too_long", { max: LIMITS.name });
+ 		for (const f of ["rxHz", "txHz"]) {
+-			if (!(c[f] > 0 && c[f] < 1e9)) err("channels", c, f, "bad_freq");
++			if (!(c[f] > 0 && c[f] <= FREQ_MAX)) err("channels", c, f, "bad_freq");
+ 			else if (bands && !bands.some(([lo, hi]) => c[f] >= lo && c[f] <= hi)) warn("channels", c, f, "out_of_band");
+ 		}
+ 		for (const f of ["rxTone", "txTone"]) if (parseTone(c[f]) === null) err("channels", c, f, "bad_tone");
+diff --git a/site/tests/codeplug.test.mjs b/site/tests/codeplug.test.mjs
+index 487dc09..a2fef0e 100644
+--- a/site/tests/codeplug.test.mjs
++++ b/site/tests/codeplug.test.mjs
+@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
+ 
+ import { CodeplugImage, CODEPLUG_SPAN } from "../static/js/codeplug/image.js";
+ import { decode, encode, empty, remove, validate, newChannel, newContact, refNumber, listenBand } from "../static/js/codeplug/model.js";
+-import { getTone, putTone, parseTone, parseFreq, mhz, getCoord, coordBytes } from "../static/js/codeplug/fields.js";
++import { getTone, putTone, parseTone, parseFreq, mhz, getCoord, coordBytes, getFreq, putFreq } from "../static/js/codeplug/fields.js";
+ import * as iddb from "../static/js/codeplug/iddb.js";
+ import { blankChannel, decodeChannel, encodeChannel } from "../static/js/codeplug/records.js";
+ import { targets } from "../static/js/flasher/restore.js";
+@@ -107,6 +107,20 @@ test("tone, frequency and coordinate fields", () => {
+ 	assert.equal(parseFreq("446.00625"), 446006250);
+ 	assert.equal(parseFreq("438500000"), 438500000);
+ 	assert.equal(parseFreq("x"), null);
++	// The frequency field past 1 GHz: a 0xA/0xB marker nibble over seven BCD digits (open-firmware-cps.md 7.3), the
++	// full 10 Hz resolution kept; an old firmware reads the word as malformed BCD, never as another frequency
++	const f4 = new Uint8Array(4);
++	for (const hz of [146500000, 999999990, 1000000000, 1099999990, 1120000000, 1123456780, 1199999990]) {
++		putFreq(f4, 0, hz);
++		assert.equal(getFreq(f4, 0), hz);
++	}
++	putFreq(f4, 0, 1120000000);
++	assert.equal(f4[3] & 0xF0, 0xB0);	// 1100 MHz marker
++	putFreq(f4, 0, 1000000000);
++	assert.equal(f4[3] & 0xF0, 0xA0);	// 1000 MHz marker
++	assert.equal(parseFreq("1120.00000"), 1120000000);
++	assert.equal(parseFreq("1120000000"), 1120000000);
++	assert.equal(parseFreq("1200000000"), null);	// past the field
+ 	assert.equal(mhz(446006250), "446.00625");
+ 	assert.equal(mhz(438500000), "438.500");
+ 	for (const x of [0, 33.7489, -84.3880, -0.0001]) {
+@@ -150,7 +164,10 @@ function rich() {
+ 	];
+ 	m.channels.push(...chs);
+ 	const far = newChannel({ name: "Bank 3", rxHz: 430000000, txHz: 430000000, number: 300 });
+-	m.channels.push(far);
++	// Receive only past 1 GHz: the marker-nibble frequency field, written by the editor and read back by the radio's
++	// own code (open-firmware-cps.md 7.3)
++	const ghz = newChannel({ name: "GHz RX", rxHz: 1120000000, txHz: 1120000000, rxOnly: true });
++	m.channels.push(far, ghz);
+ 	m.zones.push({ name: "Home", channels: [chs[0], chs[2], far] }, { name: "Weather", channels: [chs[3]] });
+ 	return m;
+ }
+diff --git a/tests/host/codeplugEditTest.c b/tests/host/codeplugEditTest.c
+index 51335af..a54044d 100644
+--- a/tests/host/codeplugEditTest.c
++++ b/tests/host/codeplugEditTest.c
+@@ -220,15 +220,32 @@ static void test_materialize(void)
+ 	CHECK(codeplug_init() == CODEPLUG_OPENFW && codeplug_channel_count() == 1024);
+ 	CHECK(codeplug_channel(129, &back) && same_channel(&c, &back));
+ 	CHECK(sim_flash_data[FL + 0x7B1B0] == 0x01);	// bank 1 bitmap: its channel 0
+-	// The frequency record is eight BCD digits in 10 Hz units: its exact maximum round-trips, GHz input is refused
++	// The frequency record is eight BCD digits in 10 Hz units: its exact maximum round-trips. At 1 GHz and more the
++	// top nibble is a 0xA/0xB marker over seven BCD digits, up to 1199.99999 MHz; a channel past that is refused
+ 	// without modifying the previous channel rather than wrapping into an unrelated frequency
+ 	c = make("BCD edge", 999999990, 999999990);
+ 	c.rx_only = true;
+ 	CHECK(codeplug_set_channel(5, &c) && codeplug_channel(5, &back) && same_channel(&c, &back));
+-	c = make("GHz VFO only", 1120000000, 1120000000);
++	// GHz round-trips at the band's own end and at the field's, 10 Hz resolution kept, and the stored word is the
++	// marker form an old firmware reads as malformed BCD rather than as another frequency
++	c = make("GHz RX", 1120000000, 1120000000);
++	c.rx_only = true;
++	CHECK(codeplug_set_channel(5, &c) && codeplug_channel(5, &back) && same_channel(&c, &back));
++	CHECK((sim_flash_data[EE + 0x3790u + 4u * 56u + 0x13u] & 0xF0u) == 0xB0u);	// RX field's top nibble: 1100 MHz marker
++	c = make("GHz base", 1000000000, 1000000000);
++	c.rx_only = true;
++	CHECK(codeplug_set_channel(5, &c) && codeplug_channel(5, &back) && same_channel(&c, &back));
++	CHECK((sim_flash_data[EE + 0x3790u + 4u * 56u + 0x13u] & 0xF0u) == 0xA0u);	// 1000 MHz marker
++	c = make("GHz max", 1199999990, 1199999990);
++	c.rx_only = true;
++	CHECK(codeplug_set_channel(5, &c) && codeplug_channel(5, &back) && same_channel(&c, &back));
++	c = make("GHz fine", 1123456780, 1123456780);
++	c.rx_only = true;
++	CHECK(codeplug_set_channel(5, &c) && codeplug_channel(5, &back) && same_channel(&c, &back));
++	c = make("Past the field", 1200000000, 1200000000);
+ 	c.rx_only = true;
+ 	CHECK(!codeplug_set_channel(5, &c));
+-	CHECK(codeplug_channel(5, &back) && back.rx_hz == 999999990 && back.tx_hz == 999999990);
++	CHECK(codeplug_channel(5, &back) && back.rx_hz == 1123456780 && back.tx_hz == 1123456780);
+ 	// Refused
+ 	c.rx_hz = 0;
+ 	CHECK(!codeplug_set_channel(5, &c));
+diff --git a/tests/host/radioCoreTest.c b/tests/host/radioCoreTest.c
+index 7403470..5f55d65 100644
+--- a/tests/host/radioCoreTest.c
++++ b/tests/host/radioCoreTest.c
+@@ -5770,6 +5770,128 @@ static void test_rx_ext(void)
+ 	CHECK(sm.view.vfo && board_in_band(sm.view.ch.rx_hz, false));
+ }
+ 
++#if CONFIG_P25
++static void setup_codeplug_p25(void);
++static void p25_defaults(void);
++#endif
++
++// Past the table every mode the build has is accepted, not FM only: the extension is receive-only, and that is the
++// whole of it — PTT is denied there whatever the mode, exactly as on FM
++static void test_rx_ext_modes(void)
++{
++	setup_codeplug();
++	start();
++	req(RREQ_VFO, 1);
++	run(20);
++	board_rx_ext_set(true);
++	int tx0;
++	static const uint32_t ext_hz[] = { 500000000, 1120000000 };
++	for (unsigned f = 0; f < sizeof(ext_hz) / sizeof(ext_hz[0]); f++) {
++		req(RREQ_VFO_SET, (int)ext_hz[f]);
++		run(50);
++		CHECK(sm.view.vfo && sm.view.ch.rx_hz == ext_hz[f]);
++#if CONFIG_DMR && CONFIG_VFO_DMR
++		req(RREQ_MODE, RADIO_MODE_DMR);
++		run(50);
++		CHECK(sm.view.ch.mode == RADIO_MODE_DMR);
++		tx0 = hw.tx_calls;
++		req(RREQ_PTT, 1);
++		CHECK(sm.view.state == RS_TX_DENIED && sm.view.tx_deny == TXDENY_BAND && hw.tx_calls == tx0);
++		req(RREQ_PTT, 0);
++		run(20);
++		req(RREQ_MODE, RADIO_MODE_FM);
++		run(50);
++		CHECK(sm.view.ch.mode == RADIO_MODE_FM);
++#endif
++#if CONFIG_P25
++		req(RREQ_MODE, RADIO_MODE_P25);
++		run(50);
++		CHECK(sm.view.ch.mode == RADIO_MODE_P25 && radio_p25_running());
++		tx0 = hw.tx_calls;
++		req(RREQ_PTT, 1);
++		CHECK(sm.view.state == RS_TX_DENIED && sm.view.tx_deny == TXDENY_BAND && hw.tx_calls == tx0);
++		req(RREQ_PTT, 0);
++		run(20);
++		req(RREQ_MODE, RADIO_MODE_FM);
++		run(50);
++#endif
++#if CONFIG_NXDN
++		req(RREQ_MODE, RADIO_MODE_NXDN);
++		run(50);
++		CHECK(sm.view.ch.mode == RADIO_MODE_NXDN && radio_nxdn_running());
++		tx0 = hw.tx_calls;
++		req(RREQ_PTT, 1);
++		CHECK(sm.view.state == RS_TX_DENIED && sm.view.tx_deny == TXDENY_BAND && hw.tx_calls == tx0);
++		req(RREQ_PTT, 0);
++		run(20);
++		req(RREQ_MODE, RADIO_MODE_FM);
++		run(50);
++#endif
++#if CONFIG_YSF
++		req(RREQ_MODE, RADIO_MODE_YSF);
++		run(50);
++		CHECK(sm.view.ch.mode == RADIO_MODE_YSF && radio_ysf_running());
++		tx0 = hw.tx_calls;
++		req(RREQ_PTT, 1);
++		CHECK(sm.view.state == RS_TX_DENIED && sm.view.tx_deny == TXDENY_BAND && hw.tx_calls == tx0);
++		req(RREQ_PTT, 0);
++		run(20);
++		req(RREQ_MODE, RADIO_MODE_FM);
++		run(50);
++#endif
++#if CONFIG_M17
++		req(RREQ_MODE, RADIO_MODE_M17);
++		run(50);
++		CHECK(sm.view.ch.mode == RADIO_MODE_M17 && radio_m17_running());
++		tx0 = hw.tx_calls;
++		req(RREQ_PTT, 1);
++		CHECK(sm.view.state == RS_TX_DENIED && sm.view.tx_deny == TXDENY_BAND && hw.tx_calls == tx0);
++		req(RREQ_PTT, 0);
++		run(20);
++		req(RREQ_MODE, RADIO_MODE_FM);
++		run(50);
++#endif
++		(void)tx0;
++	}
++	board_rx_ext_set(false);
++	req(RREQ_RELOAD, 0);
++	run(20);
++#if CONFIG_DMR
++	// A stored channel past 1 GHz keeps its mode: the record holds it (codeplugEditTest round-trips it), the tuner
++	// takes it while the extension is on, and PTT is the band's refusal, not RX Only's
++	setup_codeplug();
++	add(3, "DMR GHz", 1120000000, RADIO_MODE_DMR, false, 2);
++	start();
++	board_rx_ext_set(true);
++	req(RREQ_ZONE_POS, 2);
++	run(50);
++	CHECK(!sm.view.vfo && sm.view.ch.rx_hz == 1120000000 && sm.view.ch.mode == RADIO_MODE_DMR);
++	tx0 = hw.tx_calls;
++	req(RREQ_PTT, 1);
++	CHECK(sm.view.state == RS_TX_DENIED && sm.view.tx_deny == TXDENY_BAND && hw.tx_calls == tx0);
++	req(RREQ_PTT, 0);
++	run(20);
++	board_rx_ext_set(false);
++#endif
++#if CONFIG_P25
++	setup_codeplug_p25();
++	add(3, "P25 GHz", 1120000000, RADIO_MODE_P25, false, 2);
++	start();
++	p25_defaults();
++	board_rx_ext_set(true);
++	req(RREQ_ZONE_POS, 2);
++	run(50);
++	CHECK(!sm.view.vfo && sm.view.ch.rx_hz == 1120000000 && sm.view.ch.mode == RADIO_MODE_P25 &&
++	      radio_p25_running());
++	tx0 = hw.tx_calls;
++	req(RREQ_PTT, 1);
++	CHECK(sm.view.state == RS_TX_DENIED && sm.view.tx_deny == TXDENY_BAND && hw.tx_calls == tx0);
++	req(RREQ_PTT, 0);
++	run(20);
++	board_rx_ext_set(false);
++#endif
++}
++
+ // ---- Error paths: the radio refuses to key, a channel without a TX frequency, retuning or scanning while
+ // transmitting, the stack's own refusals, targets that end with their channel, stored emergency settings ----
+ static void test_error_paths(void)
+@@ -11460,6 +11582,7 @@ int main(int argc, char **argv)
+ 	test_soft_volume();
+ 	test_side_keys();
+ 	test_rx_ext();
++	test_rx_ext_modes();
+ 	test_error_paths();
+ 	test_ptt_line_stuck();
+ 	test_hotspot();
