@@ -96,7 +96,7 @@ new file mode 100644
 index 0000000..4482190
 --- /dev/null
 +++ b/core/codec2/codec2_fixed_3200.c
-@@ -0,0 +1,411 @@
+@@ -0,0 +1,426 @@
 +// SPDX-License-Identifier: LGPL-2.1-only
 +// Fixed-point Codec 2 3200 encoder for MCUs without an FPU.
 +// Derived from the Codec 2 analysis, LPC/LSP conversion and scalar quantizers.
@@ -258,12 +258,12 @@ index 0000000..4482190
 +	return index < 0 ? 0 : index > 127 ? 127 : index;
 +}
 +
-+// Normalized autocorrelation. Dynamic scaling preserves quiet speech and keeps 80 products in 32 bits.
-+static int analyse_pitch(const int16_t *x, int *voiced, int previous)
++// Voicing of a 10 ms half: its normalized autocorrelation peak over the pitch lags. Dynamic scaling preserves quiet
++// speech and keeps 80 products in 32 bits.
++static int analyse_voicing(const int16_t *x)
 +{
-+	int16_t scores[141];
 +	int32_t energy = 1;
-+	int best = 20, best_score = 0;
++	int best_score = 0;
 +	int peak = 0, shift = 0;
 +
 +	for (int n = -160; n < 80; n++) {
@@ -284,37 +284,54 @@ index 0000000..4482190
 +		}
 +		// 2*corr/(E+Edelayed) is bounded by one and does not favour level changes.
 +		int score = corr > 0 ? (int)(((int64_t)corr * 65536) / (energy + delayed)) : 0;
-+		scores[p - 20] = (int16_t)(score > 32767 ? 32767 : score);
-+		if (score > best_score) {
++		if (score > best_score)
 +			best_score = score;
-+			best = p;
++	}
++	return energy > (128 << (2 * shift)) && best_score >= 18022; // about -5.2 dB normalized correlation
++}
++
++// Pitch period of the 20 ms block (sn[160..319], lags up to 160 into the history) by YIN's cumulative mean normalized
++// difference r: the first minimum under 0.15, or with none the deepest; a minimum within 20 % of the previous period
++// wins if it is no more than 0.15 above that. The autocorrelation peak this replaces favoured short lags (formants) and
++// sent the pitch up an octave on vowels: a high-pitched voice. Samples are scaled to 10 bits so a difference fits 32 bits
++static int analyse_pitch(const int16_t *sn, int previous)
++{
++	const int16_t *x = sn + 160;
++	int32_t r[161];			// normalized difference, Q16
++	int64_t cum = 0;
++	int peak = 0, shift = 0;
++
++	for (int n = 0; n < 320; n++) {
++		int a = sn[n] < 0 ? -sn[n] : sn[n];
++		if (a > peak) peak = a;
++	}
++	while ((peak >> shift) > 1023 && shift < 5) shift++;
++	for (int p = 1; p <= 160; p++) {
++		int32_t d = 0;
++		for (int n = 0; n < 160; n++) {
++			int32_t e = (x[n] >> shift) - (x[n - p] >> shift);
++			d += e * e;
 +		}
++		cum += d;
++		r[p] = cum > 0 ? (int32_t)(((int64_t)d * p * 65536) / cum) : 65536;
 +	}
-+	// Reject octave jumps when a candidate near the previous voiced pitch is nearly as strong.
-+	if (previous >= 20 && previous <= 160 &&
-+	    best > previous + previous / 2) {
-+		int lo = previous - previous / 4;
-+		int hi = previous + previous / 4;
-+		int near = previous;
-+		if (lo < 20) lo = 20;
-+		if (hi > 160) hi = 160;
-+		for (int p = lo; p <= hi; p++)
-+			if (scores[p - 20] > scores[near - 20]) near = p;
-+		if (scores[near - 20] >= best_score - best_score / 4)
-+			best = near;
++	int first = 0, deepest = 0, near = 0;
++	for (int p = 21; p < 160; p++) {
++		if (r[p] > r[p - 1] || r[p] > r[p + 1])
++			continue;
++		if (first == 0 && r[p] < 9830)	// 0.15
++			first = p;
++		if (deepest == 0 || r[p] < r[deepest])
++			deepest = p;
++		int dist = p > previous ? p - previous : previous - p;
++		if (dist * 5 <= previous && (near == 0 || r[p] < r[near]))
++			near = p;
 +	}
-+	// Prefer the shortest period near the selected peak, avoiding octave-down choices on vowels.
-+	int selected_score = scores[best - 20];
-+	int threshold = selected_score - (3 * selected_score) / 20;
-+	int shortest = best / 2 - 2;
-+	if (shortest < 20) shortest = 20;
-+	for (int p = shortest; p < best; p++) {
-+		if (scores[p - 20] >= threshold) {
-+			best = p;
-+			break;
-+		}
-+	}
-+	*voiced = energy > (128 << (2 * shift)) && best_score >= 18022; // about -5.2 dB normalized correlation
++	int best = first ? first : deepest;
++	if (best == 0)
++		return previous;
++	if (near && r[near] <= r[best] + 9830)
++		best = near;
 +	return best;
 +}
 +
@@ -466,24 +483,22 @@ index 0000000..4482190
 +void codec2_fixed_3200_encode(struct CODEC2 *c2, unsigned char *bits, short speech[])
 +{
 +	unsigned nbit = 0;
-+	int voiced[2], period[2], hz[LPC];
++	int voiced[2], hz[LPC];
 +	uint64_t raw;
 +	int32_t residual;
 +
 +	memmove(c2->fixed_sn, c2->fixed_sn + 160, 160 * sizeof(int16_t));
 +	memcpy(c2->fixed_sn + 160, speech, 160 * sizeof(int16_t));
-+	period[0] = analyse_pitch(c2->fixed_sn + 160, &voiced[0], c2->fixed_pitch);
-+	if (voiced[0]) c2->fixed_pitch = (int16_t)period[0];
-+	else period[0] = c2->fixed_pitch;
-+	period[1] = analyse_pitch(c2->fixed_sn + 240, &voiced[1], c2->fixed_pitch);
-+	if (voiced[1]) c2->fixed_pitch = (int16_t)period[1];
-+	else period[1] = c2->fixed_pitch;
++	voiced[0] = analyse_voicing(c2->fixed_sn + 160);
++	voiced[1] = analyse_voicing(c2->fixed_sn + 240);
++	if (voiced[0] || voiced[1])
++		c2->fixed_pitch = (int16_t)analyse_pitch(c2->fixed_sn, c2->fixed_pitch);
 +	analyse_lpc(c2->fixed_sn, hz, &raw, &residual);
 +
 +	memset(bits, 0, 8);
 +	pack(bits, &nbit, voiced[0], 1);
 +	pack(bits, &nbit, voiced[1], 1);
-+	pack(bits, &nbit, pitch_index(period[1]), 7);
++	pack(bits, &nbit, pitch_index(c2->fixed_pitch), 7);
 +	pack(bits, &nbit, energy_index(raw, residual), 5);
 +	int previous = 0;
 +	for (int i = 0; i < LPC; i++) {
