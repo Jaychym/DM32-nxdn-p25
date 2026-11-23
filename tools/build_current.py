@@ -81,6 +81,8 @@ PATCHES = (
 	'dm32-rx-tools.patch',
 	# CPS CSV: keep conventional NXDN channels as NXDN (rate, RAN and squelch), not FM
 	'nxdn-csv-mode.patch',
+	# P25 TX (and YSF VW, same voice path): 4:1 soft limiter above a 3/4-scale knee instead of hard clipping
+	'p25-tx-limiter.patch',
 )
 
 

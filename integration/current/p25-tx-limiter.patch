@@ -1,0 +1,76 @@
+--- a/core/p25/p25Voice.c
++++ b/core/p25/p25Voice.c
+@@ -38,7 +38,8 @@
+ static uint8_t tx_gen;
+ static uint8_t tx_head, tx_tail;
+ static uint16_t mic_gain_q8 = 256;	// p25VoiceSetMicGain: the mic samples times this / 256 before encoding
+-#define P25_TX_PREAMP	4u		// 12 dB PCM calibration into the software IMBE encoder, with saturation below
++#define P25_TX_PREAMP	4u		// 12 dB PCM calibration into the software IMBE encoder, with the limiter below
++#define P25_TX_KNEE	24576		// 3/4 scale: above it peaks are compressed 4:1 toward the rail, not clipped flat
+ 
+ // Audio callback state
+ static uint8_t cb_tx_gen;		// the transmission the encoder runs for (even: none)
+@@ -223,6 +224,13 @@
+ 	for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
+ 		int32_t v = ((int32_t)mic[i] * (int32_t)gain) / 256;
+ 
++		// Over the knee (a loud talker, a high mic-gain step: the calibration alone puts a strong vowel past
++		// full scale) compress 4:1 toward the rail. The peaks stay rounded where a hard clip left a flat
++		// top, and the flat top was the strain in the transmitted audio
++		if (v > P25_TX_KNEE)
++			v = P25_TX_KNEE + (v - P25_TX_KNEE) / 4;
++		else if (v < -P25_TX_KNEE)
++			v = -P25_TX_KNEE + (v + P25_TX_KNEE) / 4;
+ 		v = v > 32767 ? 32767 : v < -32768 ? -32768 : v;
+ 		scaled[i] = (int16_t)v;
+ 		if ((uint32_t)(v < 0 ? -v : v) > peak) {
+--- a/tests/host/p25VoiceTest.c
++++ b/tests/host/p25VoiceTest.c
+@@ -323,7 +323,23 @@
+ 	p25VoiceGetStats(&s);
+ 	CHECK(unity > 1000 && s.tx_mic_peak >= 2 * unity - 16 && s.tx_mic_peak <= 2 * unity, "mic peak %u, with gain %u",
+ 	      (unsigned)unity, (unsigned)s.tx_mic_peak);
+-	// Maximum gain on a loud block saturates; it must not wrap around into quiet or negative samples
++	// A loud talker at the default gain: the calibration alone puts the block past full scale, and the
++	// limiter must round the peak 4:1 above its knee, not leave a flat top at the rail
++	p25VoiceTx(false);
++	p25VoiceSetMicGain(5);
++	p25VoiceTx(true);
++	mic_n = 0;
++	raw = tx_blocks(2, 2500);
++	p25VoiceGetStats(&s);
++	{
++		const uint32_t knee = 24576;	// P25_TX_KNEE
++		uint32_t over = 4 * raw;
++		uint32_t want = over > knee ? knee + (over - knee) / 4 : over;
++		CHECK(over > 32767, "the loud block would not reach the rail without the limiter: raw peak %u", (unsigned)raw);
++		CHECK(s.tx_mic_peak >= want - 2 && s.tx_mic_peak <= want && s.tx_mic_peak < 32767,
++		      "limited peak %u, expected %u (raw %u)", (unsigned)s.tx_mic_peak, (unsigned)want, (unsigned)raw);
++	}
++	// Maximum gain on a loud block still saturates; it must not wrap around into quiet or negative samples
+ 	p25VoiceTx(false);
+ 	p25VoiceSetMicGain(10);
+ 	p25VoiceTx(true);
+--- a/docs/spec/p25.md
++++ b/docs/spec/p25.md
+@@ -133,12 +133,14 @@
+ the receiver will reconstruct: pitch code, voicing bits, the gain vector, the block DCT coefficients with the
+ standard's bit allocation. `imbe_unpack(imbe_pack(x))` gives back every frame's bits.
+ 
+-Before encoding, the P25 voice path applies a fixed 12 dB (4x) PCM calibration, then the microphone gain, with
+-saturation. The previous level was about 14 dB below the pinned Yazev IMBE reference encoder on the same harmonic
+-signal. With the calibration, the transmitted frames decoded through both that reference and mbelib measured within
+-2.2 dB of the reference encoder's level. This is a transmit-input calibration only: the decoder and its golden vectors
+-are unchanged. YSF VW uses the same voice path and calibration. The microphone setting remains 2 dB per step around
+-step 5.
++Before encoding, the P25 voice path applies a fixed 12 dB (4x) PCM calibration, then the microphone gain. Above a
++knee at 3/4 scale a limiter compresses peaks 4:1 toward full scale, with saturation only past it: the calibration
++alone puts a strong vowel over full scale, and the flat top a hard clip left there was audible as strain in the
++transmitted audio. The previous level was about 14 dB below the pinned Yazev IMBE reference encoder on the same
++harmonic signal. With the calibration, the transmitted frames decoded through both that reference and mbelib
++measured within 2.2 dB of the reference encoder's level. This is a transmit-input calibration only: the decoder and
++its golden vectors are unchanged. YSF VW uses the same voice path, calibration and limiter. The microphone setting
++remains 2 dB per step around step 5.
+ 
+ The gain code sets the mean of a frame's log amplitudes, and its lowest value is a floor. A quiet frame with a few
+ harmonics far above the rest (hum, rumble) has a mean under it. The quantizer then raises the weak harmonics to a
