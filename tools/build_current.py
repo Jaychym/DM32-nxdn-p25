@@ -87,6 +87,8 @@ PATCHES = (
 	'vfo-ghz-entry-doc.patch',
 	# RX past bands: every mode there (VFO and channels), and GHz channel records with a 0xA/0xB marker nibble
 	'rx-ext-ghz-channels.patch',
+	# NXDN48/NXDN96 Type-C trunking, listen only: CAC decode, VCALL_ASSGN follower (DFA or channel plan), editor fields
+	'nxdn-trunking.patch',
 )
 
 

@@ -1,0 +1,3080 @@
+diff --git a/core/nxdn/nxdn.h b/core/nxdn/nxdn.h
+index 94c62e8..383b66c 100644
+--- a/core/nxdn/nxdn.h
++++ b/core/nxdn/nxdn.h
+@@ -69,6 +69,9 @@
+ 
+ // Message types (6.4.1)
+ #define NXDN_MSG_VCALL		0x01
++#define NXDN_MSG_VCALL_ASSGN	0x04		// trunked (Type-C), outbound on the control channel's CAC
++#define NXDN_MSG_VCALL_ASSGN_DUP 0x05
++#define NXDN_MSG_SITE_INFO	0x18
+ #define NXDN_MSG_VCALL_IV	0x03
+ #define NXDN_MSG_TX_REL_EX	0x07
+ #define NXDN_MSG_TX_REL		0x08
+@@ -116,8 +119,8 @@ static inline uint8_t nxdn_msg_type(const uint8_t *msg) { return msg[0] & 0x3F;
+ // ── Frame fields. hard: the frame (NXDN_FRAME_BYTES), soft: one value per symbol (AIR_SOFT_OUTER at +3) or NULL ──
+ // The decoders' memory, the caller's: the Viterbi decisions and the depunctured soft bits of a FACCH1, the longest
+ typedef struct {
+-	uint16_t dec[96];
+-	int8_t soft[192];
++	uint16_t dec[176];
++	int8_t soft[352];
+ } nxdn_fec_work_t;
+ 
+ // FSW and LICH; the rest of the frame is left as it was
+@@ -131,6 +134,23 @@ int nxdn_sacch_get(const uint8_t *hard, const int8_t *soft, nxdn_fec_work_t *w,
+ void nxdn_facch1_put(uint8_t *frame, uint8_t half, const uint8_t in[NXDN_FACCH1_BYTES]);
+ int nxdn_facch1_get(const uint8_t *hard, const int8_t *soft, uint8_t half, nxdn_fec_work_t *w,
+ 		    uint8_t out[NXDN_FACCH1_BYTES]);
++// CAC, the outbound control channel (4.5, RCCH): SR (8) and a 144-bit message in 155 bits behind the LICH, CRC-16,
++// punctured to 300 bits. out/in: NXDN_CAC_BYTES, MSB first (SR in byte 0, the message from byte 1)
++#define NXDN_CAC_BITS		155
++#define NXDN_CAC_BYTES		20
++#define NXDN_CAC_MSG_BYTES	18
++#define NXDN_USC_CAC		0		// the functional channel of an outbound RCCH frame
++void nxdn_cac_put(uint8_t *frame, const uint8_t in[NXDN_CAC_BYTES]);
++int nxdn_cac_get(const uint8_t *hard, const int8_t *soft, nxdn_fec_work_t *w, uint8_t out[NXDN_CAC_BYTES]);
++// Long CAC, what a subscriber sends on the control channel (inbound RCCH): SR (8) and a 128-bit message in 136 bits,
++// CRC-16, punctured 5 of each 26 coded bits to 252, 21 x 12. A burst is FSW, LICH and the long CAC (144 symbols)
++#define NXDN_LCAC_BITS		136
++#define NXDN_LCAC_BYTES		17
++#define NXDN_LCAC_MSG_BYTES	16
++#define NXDN_USC_LCAC		1		// the functional channel of an inbound RCCH frame, long CAC
++#define NXDN_LCAC_SYMS		(NXDN_SACCH_SYM + 126)
++void nxdn_lcac_put(uint8_t *frame, const uint8_t in[NXDN_LCAC_BYTES]);
++int nxdn_lcac_get(const uint8_t *hard, const int8_t *soft, nxdn_fec_work_t *w, uint8_t out[NXDN_LCAC_BYTES]);
+ // n = 0..3. The 72 bits as on air, descrambled: their FEC is the voice path's (docs/spec/nxdn.md 5)
+ void nxdn_vch_put(uint8_t *frame, uint8_t n, const uint8_t in[NXDN_EHR_BYTES]);
+ void nxdn_vch_get(const uint8_t *hard, uint8_t n, uint8_t out[NXDN_EHR_BYTES]);
+@@ -167,6 +187,11 @@ typedef struct {
+ 	uint8_t coasted;	// frames in a row placed without a LICH
+ 	nxdn_fec_work_t work;	// the decoders' memory (the call layer's too)
+ 	uint32_t ran_rejects;	// frames of another RAN dropped
++	// Trunked: outbound control channel frames (RCCH, CAC) are taken too and their message (NXDN_CAC_MSG_BYTES,
++	// CRC held, of our RAN) handed here instead of to frame. NULL: a conventional receiver, RCCH dropped
++	void (*cac)(const uint8_t *msg, void *ctx);
++	void *cac_ctx;
++	uint32_t cac_ok, cac_fail;
+ } nxdn_rx_t;
+ 
+ extern const air_mode_t nxdn_air_mode;		// 4800 bit/s (2400 symbols/s, 6.25 kHz channel)
+@@ -238,10 +263,12 @@ typedef struct {
+ 	bool ending;
+ 	bool rate9600;		// 9600 bit/s, EHR: every second frame is FACCH1 (TS 1-B 4.1.2.1)
+ 	uint8_t ran, dir;
++	uint8_t rf;		// the LICH's RF channel type: RDCH (conventional), RTCH (a trunked traffic channel)
+ 	uint8_t sf_frame;	// frame of the superframe, 0..3
+ 	uint8_t nvoice;		// VCH filled in the frame in hand
+ 	uint16_t nsyms, ready, sent;
+-	uint8_t msg[NXDN_FACCH1_BYTES];	// VCALL, as FACCH1 and SACCH carry it
++	bool burst;		// one control channel burst (nxdn_call_tx_burst), not a call
++	uint8_t msg[NXDN_LCAC_BYTES];	// VCALL, as FACCH1 and SACCH carry it; a burst's SR and long CAC message
+ 	uint8_t rel[NXDN_FACCH1_BYTES];	// TX_REL
+ 	uint8_t frame[NXDN_FRAME_BYTES];
+ #if CONFIG_AIR_AES
+@@ -259,6 +286,9 @@ void nxdn_call_tx_begin(nxdn_call_tx_t *t, const nxdn_vcall_t *v, uint8_t ran, u
+ void nxdn_call_tx_begin_enc(nxdn_call_tx_t *t, const nxdn_vcall_t *v, uint8_t ran, uint8_t dir, bool rate9600,
+ 			    const uint8_t *key, const uint8_t iv[8]);
+ #endif
++// One inbound control channel burst (trunking): the preamble, then FSW, LICH and a long CAC with msg
++// (NXDN_LCAC_MSG_BYTES) under SR ran; then done
++void nxdn_call_tx_burst(nxdn_call_tx_t *t, const uint8_t *msg, uint8_t ran);
+ uint16_t nxdn_call_tx_ready(const nxdn_call_tx_t *t, uint16_t *first);
+ const uint8_t *nxdn_call_tx_syms(const nxdn_call_tx_t *t);
+ void nxdn_call_tx_sent(nxdn_call_tx_t *t, uint16_t n);
+diff --git a/core/nxdn/nxdn_call.c b/core/nxdn/nxdn_call.c
+index 92dbe6e..ea5521f 100644
+--- a/core/nxdn/nxdn_call.c
++++ b/core/nxdn/nxdn_call.c
+@@ -273,7 +273,7 @@ void nxdn_call_rx_init(nxdn_call_rx_t *c, uint8_t ran, const nxdn_call_sink_t *s
+ }
+ 
+ // ── Transmit (TS 1-B 4.1.3, figure 4.1-7) ──
+-enum { TX_PRE, TX_HEAD, TX_SF, TX_END, TX_DONE };
++enum { TX_PRE, TX_HEAD, TX_SF, TX_END, TX_DONE, TX_BURST };
+ 
+ // A FACCH1 frame of a superframe at 9600 bit/s: the second and fourth (TS 1-B 4.1.2.1)
+ static bool facch_frame(const nxdn_call_tx_t *t)
+@@ -316,7 +316,7 @@ static void tx_frame(nxdn_call_tx_t *t, uint8_t state)
+ 	case TX_HEAD:
+ 	case TX_END:
+ 		// Non-superframe: SACCH IDLE alone (structure 4/4), the message twice in FACCH1
+-		nxdn_frame_begin(t->frame, NXDN_LICH(NXDN_RF_RDCH, NXDN_USC_SACCH_NS, NXDN_STEAL_BOTH, t->dir));
++		nxdn_frame_begin(t->frame, NXDN_LICH(t->rf, NXDN_USC_SACCH_NS, NXDN_STEAL_BOTH, t->dir));
+ 		sacch(t, 3, idle, 0);
+ 		nxdn_facch1_put(t->frame, 0, state == TX_HEAD ? t->msg : t->rel);
+ 		nxdn_facch1_put(t->frame, 1, state == TX_HEAD ? tx_second(t) : t->rel);
+@@ -332,7 +332,7 @@ static void tx_frame(nxdn_call_tx_t *t, uint8_t state)
+ #endif
+ 		if (facch_frame(t)) {
+ 			// (what a FACCH1 frame carries in a call is open: the VCALL again, nxdn.md 9)
+-			nxdn_frame_begin(t->frame, NXDN_LICH(NXDN_RF_RDCH, NXDN_USC_SACCH_SF, NXDN_STEAL_BOTH, t->dir));
++			nxdn_frame_begin(t->frame, NXDN_LICH(t->rf, NXDN_USC_SACCH_SF, NXDN_STEAL_BOTH, t->dir));
+ 			sacch(t, t->sf_frame, sf_msg, (uint16_t)(18 * t->sf_frame));
+ 			nxdn_facch1_put(t->frame, 0, t->msg);
+ 			nxdn_facch1_put(t->frame, 1, tx_second(t));
+@@ -340,11 +340,16 @@ static void tx_frame(nxdn_call_tx_t *t, uint8_t state)
+ 		} else {
+ 			// Nothing of a voice frame goes out before its first VCH: an end that comes first sends the release
+ 			// frame right after the frame before
+-			nxdn_frame_begin(t->frame, NXDN_LICH(NXDN_RF_RDCH, NXDN_USC_SACCH_SF, NXDN_STEAL_NONE, t->dir));
++			nxdn_frame_begin(t->frame, NXDN_LICH(t->rf, NXDN_USC_SACCH_SF, NXDN_STEAL_NONE, t->dir));
+ 			sacch(t, t->sf_frame, sf_msg, (uint16_t)(18 * t->sf_frame));
+ 			t->ready = 0;
+ 		}
+ 		break;
++	case TX_BURST:
++		nxdn_frame_begin(t->frame, NXDN_LICH(NXDN_RF_RCCH, NXDN_USC_LCAC, 0, NXDN_DIR_INBOUND));
++		nxdn_lcac_put(t->frame, t->msg);
++		t->nsyms = t->ready = NXDN_LCAC_SYMS;
++		break;
+ 	default:
+ 		t->nsyms = t->ready = 0;
+ 		break;
+@@ -358,6 +363,7 @@ void nxdn_call_tx_begin(nxdn_call_tx_t *t, const nxdn_vcall_t *v, uint8_t ran, u
+ 	memset(t, 0, sizeof *t);
+ 	t->ran = ran;
+ 	t->dir = dir;
++	t->rf = NXDN_RF_RDCH;
+ 	t->rate9600 = rate9600;
+ 	nxdn_vcall_build(v, t->msg, sizeof t->msg);
+ 	rel.msg = NXDN_MSG_TX_REL;
+@@ -372,6 +378,7 @@ void nxdn_call_tx_begin_enc(nxdn_call_tx_t *t, const nxdn_vcall_t *v, uint8_t ra
+ 	nxdn_vcall_t rel = *v;
+ 
+ 	memset(t, 0, sizeof *t);
++	t->rf = NXDN_RF_RDCH;
+ 	t->ran = ran;
+ 	t->dir = dir;
+ 	t->rate9600 = rate9600;
+@@ -403,7 +410,7 @@ void nxdn_call_tx_sent(nxdn_call_tx_t *t, uint16_t n)
+ 		return;
+ 	switch (t->state) {
+ 	case TX_PRE:
+-		tx_frame(t, TX_HEAD);
++		tx_frame(t, t->burst ? TX_BURST : TX_HEAD);
+ 		break;
+ 	case TX_HEAD:
+ 		t->sf_frame = 0;
+@@ -474,6 +481,17 @@ void nxdn_call_tx_end(nxdn_call_tx_t *t, const uint8_t silence[NXDN_EHR_BYTES])
+ 		nxdn_call_tx_voice(t, silence);
+ }
+ 
++void nxdn_call_tx_burst(nxdn_call_tx_t *t, const uint8_t *msg, uint8_t ran)
++{
++	memset(t, 0, sizeof *t);
++	t->ran = ran;
++	t->burst = true;
++	t->ending = true;
++	t->msg[0] = NXDN_SR(3, ran);	// a single long CAC: structure 4/4
++	memcpy(&t->msg[1], msg, NXDN_LCAC_MSG_BYTES);
++	tx_frame(t, TX_PRE);
++}
++
+ bool nxdn_call_tx_done(const nxdn_call_tx_t *t)
+ {
+ 	return t->state == TX_DONE;
+diff --git a/core/nxdn/nxdn_codeplug.c b/core/nxdn/nxdn_codeplug.c
+index 165bf6f..d613a68 100644
+--- a/core/nxdn/nxdn_codeplug.c
++++ b/core/nxdn/nxdn_codeplug.c
+@@ -28,6 +28,14 @@ void nxdn_conv_decode(const uint8_t *b, int len, nxdn_conv_t *out)
+ 		out->tx_ran = rx != 0 ? rx : (uint8_t)NXDN_CP_TX_RAN_DEFAULT;
+ 	out->aes = len >= 4 && (b[3] & NXDN_CP_ENC_AES) != 0;
+ 	out->kid = out->aes && len >= 5 ? (uint8_t)(b[4] & NXDN_CP_KID_MAX) : 0u;
++	// Trunking (bytes 5-11, nxdn-trunking.md 3): a shorter block is conventional
++	uint8_t t = len >= 6 ? b[5] : 0u;
++	out->trunk = (t & NXDN_CP_TRUNK) != 0;
++	out->trunk_all = out->trunk && (t & NXDN_CP_TRUNK_ALL) != 0;
++	out->plan_base_hz = len >= 10 ? (uint32_t)b[6] | (uint32_t)b[7] << 8 | (uint32_t)b[8] << 16 | (uint32_t)b[9] << 24 : 0u;
++	out->plan_spacing_hz = len >= 12 ? (uint32_t)(b[10] | b[11] << 8) * NXDN_CP_SPACING_UNIT : 0u;
++	if (out->plan_spacing_hz == 0)
++		out->plan_base_hz = 0;	// no plan without a spacing
+ }
+ 
+ void nxdn_conv_encode(const nxdn_conv_t *c, uint8_t out[NXDN_CP_CONV_LEN])
+@@ -92,7 +100,7 @@ static void talk_target(const channel_t *ch, uint16_t *target, bool *unit)
+ 
+ bool nxdn_conv_load(uint16_t number, const channel_t *ch, nxdn_conv_cfg_t *out)
+ {
+-	uint8_t b[NXDN_CP_CONV_LEN + 8u + CODEPLUG_TAG_HEAD_MAX];
++	uint8_t b[NXDN_CP_TRUNK_LEN + 8u + CODEPLUG_TAG_HEAD_MAX];
+ 	const int cap = (int)(sizeof b - CODEPLUG_TAG_HEAD_MAX);
+ 	int len;
+ 
+@@ -110,7 +118,7 @@ bool nxdn_conv_load(uint16_t number, const channel_t *ch, nxdn_conv_cfg_t *out)
+ bool nxdn_conv_save(uint16_t number, const channel_t *ch, const nxdn_conv_t *conv)
+ {
+ 	channel_t c = *ch;
+-	uint8_t blk[NXDN_CP_CONV_LEN];
++	uint8_t blk[NXDN_CP_SAVE_LEN];
+ 	// A channel of the kind already keeps the system it names
+ 	uint8_t system = ch->kind == CODEPLUG_KIND_NXDN ? ch->system : CODEPLUG_SYSTEM_NONE;
+ 	codeplug_tag_t t = { .kind = CODEPLUG_KIND_NXDN, .system = system, .flags = ch->rx_only ? 0u : CODEPLUG_TAG_TX };
+@@ -122,6 +130,7 @@ bool nxdn_conv_save(uint16_t number, const channel_t *ch, const nxdn_conv_t *con
+ 	c.mode = RADIO_MODE_DMR;
+ 	c.rx_only = true;
+ 	nxdn_conv_encode(conv, blk);
++	blk[5] = (uint8_t)((conv->trunk ? NXDN_CP_TRUNK : 0u) | (conv->trunk && conv->trunk_all ? NXDN_CP_TRUNK_ALL : 0u));
+ 	// A tag of the kind that followed the record keeps its fallback, its other flags and what it stores after this
+ 	// block (an editor's or a later firmware's); else a new one
+ 	return codeplug_set_channel(number, &c) && (codeplug_tag_rewrite(number, c.name, &t, blk, sizeof blk) ||
+diff --git a/core/nxdn/nxdn_codeplug.h b/core/nxdn/nxdn_codeplug.h
+index 599f489..3310d97 100644
+--- a/core/nxdn/nxdn_codeplug.h
++++ b/core/nxdn/nxdn_codeplug.h
+@@ -18,11 +18,16 @@
+ #define NXDN_CP_UNIT_MAX	65519u	// the IDs above are special (TS 1-B)
+ 
+ // A conventional channel's parameter block (2)
+-#define NXDN_CP_CONV_LEN	5u
++#define NXDN_CP_CONV_LEN	5u	// the conventional part (nxdn_conv_encode)
++#define NXDN_CP_SAVE_LEN	6u	// what the radio writes: and byte 5 (trunking); 6-11 (the plan) are the editor's, kept
++#define NXDN_CP_TRUNK_LEN	12u
+ #define NXDN_CP_4800		0x04u	// byte 0: 4800 bit/s, else 9600
+ #define NXDN_CP_ENC_AES		0x01u	// byte 3: AES-256 (docs/spec/air-encryption.md): sent encrypted, heard decrypted; byte 4
+ 					// the key id (6 bits) of a key of the keyring (codeplug_traffic_key, system 0xFF)
+ #define NXDN_CP_KID_MAX		63u
++#define NXDN_CP_TRUNK		0x01u	// byte 5: Type-C trunked, the RX frequency is the control channel (nxdn-trunking.md)
++#define NXDN_CP_TRUNK_ALL	0x02u	// ... every group call of the site is followed
++#define NXDN_CP_SPACING_UNIT	125u	// bytes 10-11: the channel plan's spacing in 125 Hz
+ enum { NXDN_SQUELCH_RAN, NXDN_SQUELCH_SELECTIVE };
+ typedef struct {
+ 	bool rate9600;
+@@ -31,6 +36,10 @@ typedef struct {
+ 	uint8_t squelch;	// NXDN_SQUELCH_*
+ 	bool aes;		// AES-256 on this channel
+ 	uint8_t kid;		// its key id (0-63)
++	bool trunk;		// Type-C trunked: the RX frequency is the site's control channel
++	bool trunk_all;		// ... every group followed, else the channel's group (and calls to us)
++	uint32_t plan_base_hz;	// channel numbers without DFA: base + number x spacing; 0 none (bytes 6-9)
++	uint32_t plan_spacing_hz;
+ } nxdn_conv_t;
+ 
+ // Decode len bytes of a block (a short one, or none, takes the defaults); never fails: a value out of range is read as
+diff --git a/core/nxdn/nxdn_engine.c b/core/nxdn/nxdn_engine.c
+index d3774ae..aeaee71 100644
+--- a/core/nxdn/nxdn_engine.c
++++ b/core/nxdn/nxdn_engine.c
+@@ -183,6 +183,8 @@ bool nxdn_engine_begin(nxdn_engine_t *e, const hal_air_t *air, const nxdn_engine
+ 	e->ctx = ctx;
+ 	e->mode = nxdn_engine_mode(cfg->rate9600);
+ 	nxdn_call_rx_init(&e->rx, cfg->rx_ran, &sink, e);
++	e->rx.rx.cac = hooks->rx_cac;
++	e->rx.rx.cac_ctx = ctx;
+ #if CONFIG_AIR_AES
+ 	nxdn_call_rx_set_key(&e->rx, cfg->aes_key, cfg->aes_kid);
+ #endif
+@@ -243,15 +245,28 @@ bool nxdn_engine_tx_prepare(nxdn_engine_t *e)
+ #endif
+ 		// A subscriber unit sends inbound, direct or through a repeater (table 5.2-2)
+ 		nxdn_call_tx_begin(&e->tx, &v, e->cfg.tx_ran, NXDN_DIR_INBOUND, e->cfg.rate9600);
++		if (e->cfg.trunk)
++			e->tx.rf = NXDN_RF_RTCH;
+ 	}
+ 	return air_session_tx_prime(&e->session);
+ }
+ 
++bool nxdn_engine_tx_burst(nxdn_engine_t *e, const uint8_t *msg)
++{
++	if (!air_session_is_open(&e->session) || !(e->session.fit & AIR_FIT_TX) ||
++	    air_session_tx_state(&e->session) != AIR_TX_IDLE)
++		return false;
++	e->tx_stop = e->tx_ended = true;	// one burst: nothing to end
++	nxdn_call_tx_burst(&e->tx, msg, e->cfg.tx_ran);
++	return air_session_tx_prime(&e->session);
++}
++
+ bool nxdn_engine_tx_go(nxdn_engine_t *e)
+ {
+ 	if (!air_session_tx_go(&e->session))
+ 		return false;
+-	e->view.tx_calls++;
++	if (!e->tx_ended)	// (a trunking burst is not a call)
++		e->view.tx_calls++;
+ 	return true;
+ }
+ 
+diff --git a/core/nxdn/nxdn_engine.h b/core/nxdn/nxdn_engine.h
+index ac82ebb..aa0d652 100644
+--- a/core/nxdn/nxdn_engine.h
++++ b/core/nxdn/nxdn_engine.h
+@@ -19,6 +19,9 @@ typedef struct {
+ 	void (*rx_update)(const nxdn_call_t *c, void *ctx);
+ 	void (*rx_voice)(const uint8_t ehr[NXDN_EHR_BYTES], void *ctx);
+ 	void (*rx_end)(void *ctx);
++	// Trunked: a control channel message (CAC, NXDN_CAC_MSG_BYTES) of our RAN, from the provider's task. NULL: the
++	// receiver drops control channel frames
++	void (*rx_cac)(const uint8_t *msg, void *ctx);
+ 	// Transmit, from the provider's task: the next 72-bit voice frame with its FEC, false when none is ready. NULL:
+ 	// every frame is `silence`
+ 	bool (*tx_voice)(uint8_t ehr[NXDN_EHR_BYTES], void *ctx);
+@@ -40,6 +43,7 @@ typedef struct {
+ 	uint8_t tx_call_type;	// NXDN_CALL_GROUP or NXDN_CALL_INDIVIDUAL
+ 	uint16_t tx_dst;	// the group or unit we call
+ 	bool emergency;
++	bool trunk;		// a trunked traffic channel: what we send is RTCH, not RDCH
+ 	const uint8_t *silence;	// a voice frame of silence (NXDN_EHR_BYTES), from the vocoder
+ #if CONFIG_AIR_AES
+ 	const uint8_t *aes_key;	// this channel's AES-256 key (32 octets, valid while the engine runs), or NULL
+@@ -97,6 +101,9 @@ void nxdn_engine_set(nxdn_engine_t *e, const nxdn_engine_cfg_t *cfg);
+ // the transmitter off (hal_radio_t.tx_off), then clear
+ bool nxdn_engine_tx_prepare(nxdn_engine_t *e);
+ bool nxdn_engine_tx_go(nxdn_engine_t *e);
++// Trunking: one inbound control channel burst with msg (NXDN_LCAC_MSG_BYTES) on the TX RAN, primed as prepare does;
++// then hal_radio_t.tx() on the control channel's inbound frequency and go. False: not idle, no transmit fit
++bool nxdn_engine_tx_burst(nxdn_engine_t *e, const uint8_t *msg);
+ void nxdn_engine_tx_stop(nxdn_engine_t *e);
+ void nxdn_engine_tx_abort(nxdn_engine_t *e);
+ air_tx_state_t nxdn_engine_tx_state(const nxdn_engine_t *e);
+diff --git a/core/nxdn/nxdn_frame.c b/core/nxdn/nxdn_frame.c
+index 572503d..4dda5f9 100644
+--- a/core/nxdn/nxdn_frame.c
++++ b/core/nxdn/nxdn_frame.c
+@@ -101,16 +101,24 @@ static const fec_conv_code_t code = { 0x19, 0x17 };
+ typedef struct {
+ 	uint8_t data_bits, crc_width;
+ 	uint16_t crc_poly;
+-	uint8_t period, g2_keep;	// bit k (MSB first of `period`): G2 of input k in the period is sent
++	uint8_t period;
++	uint16_t g2_keep;		// bit k (MSB first of `period`): G2 of input k in the period is sent
+ 	uint8_t cols;
+ 	uint16_t sym0;			// its first symbol in the frame
+-	uint8_t coded;			// bits on air
++	uint16_t coded;			// bits on air
+ } chan_t;
+ 
+ // SACCH (4.5.2, figure 4.5-4): 26 + 6 + 4 = 36 -> 72 -> punctured 111111 / 110110 -> 60, 5 x 12
+ static const chan_t sacch = { 26, 6, CRC6_POLY, 6, 0x36, 12, NXDN_SACCH_SYM, 60 };
+ // FACCH1 (figure 4.5-5): 80 + 12 + 4 = 96 -> 192 -> punctured 11 / 01 -> 144, 9 x 16
+ static const chan_t facch1 = { 80, 12, CRC12_POLY, 2, 0x01, 16, NXDN_VCH_SYM(0), 144 };
++// CAC (outbound RCCH): 155 + 16 + 4 = 175 -> 350 -> punctured, of each 14 coded bits the 4th and 12th erased (G2 of
++// inputs 1 and 5 of 7) -> 300, 25 x 12. Behind the LICH, where the SACCH is on a traffic channel
++#define CRC16_POLY	0x1021	// x16 + x12 + x5 + 1
++static const chan_t cac = { NXDN_CAC_BITS, 16, CRC16_POLY, 7, 0x5D, 12, NXDN_SACCH_SYM, 300 };
++// Long CAC (inbound RCCH): 136 + 16 + 4 = 156 -> 312 -> of each 26 coded bits the 2nd, 8th, 10th, 12th and 20th erased
++// (G2 of inputs 0, 3, 4, 5 and 9 of 13) -> 252, 21 x 12
++static const chan_t lcac = { NXDN_LCAC_BITS, 16, CRC16_POLY, 13, 0x0C77, 12, NXDN_SACCH_SYM, 252 };
+ 
+ static bool g2_kept(const chan_t *c, uint16_t i)
+ {
+@@ -121,14 +129,14 @@ static bool g2_kept(const chan_t *c, uint16_t i)
+ // punctured stream goes to air position
+ static uint16_t ileave(const chan_t *c, uint16_t y)
+ {
+-	uint8_t rows = (uint8_t)(c->coded / c->cols);
++	uint16_t rows = (uint16_t)(c->coded / c->cols);
+ 
+ 	return (uint16_t)((y % c->cols) * rows + y / c->cols);
+ }
+ 
+ static void chan_put(const chan_t *c, uint8_t *frame, uint16_t sym0, const uint8_t *data)
+ {
+-	uint8_t in[12] = { 0 }, enc[24];
++	uint8_t in[24] = { 0 }, enc[48];
+ 	uint16_t n = (uint16_t)(c->data_bits + c->crc_width + 4), crc, y = 0;
+ 
+ 	for (uint16_t i = 0; i < c->data_bits; i++)
+@@ -147,7 +155,7 @@ static void chan_put(const chan_t *c, uint8_t *frame, uint16_t sym0, const uint8
+ static int chan_get(const chan_t *c, const uint8_t *hard, const int8_t *soft, uint16_t sym0, nxdn_fec_work_t *w,
+ 		    uint8_t *data)
+ {
+-	uint8_t dec[12];
++	uint8_t dec[24];
+ 	uint16_t n = (uint16_t)(c->data_bits + c->crc_width + 4), y = 0, crc;
+ 	int errs;
+ 
+@@ -175,6 +183,26 @@ int nxdn_sacch_get(const uint8_t *hard, const int8_t *soft, nxdn_fec_work_t *w,
+ 	return chan_get(&sacch, hard, soft, sacch.sym0, w, out);
+ }
+ 
++void nxdn_cac_put(uint8_t *frame, const uint8_t in[NXDN_CAC_BYTES])
++{
++	chan_put(&cac, frame, cac.sym0, in);
++}
++
++int nxdn_cac_get(const uint8_t *hard, const int8_t *soft, nxdn_fec_work_t *w, uint8_t out[NXDN_CAC_BYTES])
++{
++	return chan_get(&cac, hard, soft, cac.sym0, w, out);
++}
++
++void nxdn_lcac_put(uint8_t *frame, const uint8_t in[NXDN_LCAC_BYTES])
++{
++	chan_put(&lcac, frame, lcac.sym0, in);
++}
++
++int nxdn_lcac_get(const uint8_t *hard, const int8_t *soft, nxdn_fec_work_t *w, uint8_t out[NXDN_LCAC_BYTES])
++{
++	return chan_get(&lcac, hard, soft, lcac.sym0, w, out);
++}
++
+ // A FACCH1 takes VCH 1-2 or VCH 3-4 (72 symbols)
+ void nxdn_facch1_put(uint8_t *frame, uint8_t half, const uint8_t in[NXDN_FACCH1_BYTES])
+ {
+diff --git a/core/nxdn/nxdn_rx.c b/core/nxdn/nxdn_rx.c
+index d366d10..ea0976d 100644
+--- a/core/nxdn/nxdn_rx.c
++++ b/core/nxdn/nxdn_rx.c
+@@ -7,6 +7,8 @@
+ 
+ #include "nxdn.h"
+ 
++#include <stddef.h>
++
+ #include "../air/air_syms.h"
+ #include "../../hal/hal_radio.h"
+ 
+@@ -18,13 +20,21 @@ static bool superframe(int16_t lich)
+ 	return lich >= 0 && (NXDN_LICH_USC(lich) == NXDN_USC_SACCH_SF || NXDN_LICH_USC(lich) == NXDN_USC_SACCH_SF_IDLE);
+ }
+ 
+-// A conventional or trunked voice channel's frame: RDCH/RTCH, SACCH (not UDCH)
+-static bool lich_ok(const air_frame_t *f, int lich)
++// An outbound control channel frame: RCCH, CAC, from the site
++static bool cac_lich(int lich)
++{
++	return lich >= 0 && NXDN_LICH_RF(lich) == NXDN_RF_RCCH && NXDN_LICH_USC(lich) == NXDN_USC_CAC &&
++	       NXDN_LICH_DIR(lich) == NXDN_DIR_OUTBOUND;
++}
++
++// A conventional or trunked voice channel's frame: RDCH/RTCH, SACCH (not UDCH); with a CAC hook, RCCH's CAC too
++static bool lich_ok(const nxdn_rx_t *rx, const air_frame_t *f, int lich)
+ {
+ 	uint8_t inner = 0;
+ 
+-	if (lich < 0 || (NXDN_LICH_RF(lich) != NXDN_RF_RDCH && NXDN_LICH_RF(lich) != NXDN_RF_RTCH) ||
+-	    NXDN_LICH_USC(lich) == NXDN_USC_UDCH)
++	if (!(rx->cac && cac_lich(lich)) &&
++	    (lich < 0 || (NXDN_LICH_RF(lich) != NXDN_RF_RDCH && NXDN_LICH_RF(lich) != NXDN_RF_RTCH) ||
++	     NXDN_LICH_USC(lich) == NXDN_USC_UDCH))
+ 		return false;
+ 	for (uint8_t i = 0; i < 8; i++) {
+ 		if (f->soft) {
+@@ -42,8 +52,13 @@ static uint16_t rx_head(const air_frame_t *f, void *ctx)
+ {
+ 	nxdn_rx_t *rx = ctx;
+ 	int lich = nxdn_lich_get(f->hard, f->soft);
+-	bool ok = lich_ok(f, lich);
++	bool ok = lich_ok(rx, f, lich);
+ 
++	if (ok && cac_lich(lich)) {
++		rx->cur_lich = (int16_t)lich;	// the CAC is read whole in rx_frame
++		rx->coasted = 0;
++		return NXDN_FRAME_SYMS;
++	}
+ 	// A frame whose LICH is lost in a fade, in a call's superframes: its voice is still worth trying
+ 	if (!ok && !(superframe(rx->last_lich) && rx->coasted < COAST_FRAMES))
+ 		return 0;
+@@ -67,6 +82,20 @@ static void rx_frame(const air_frame_t *f, void *ctx)
+ 	nxdn_rx_t *rx = ctx;
+ 	nxdn_rx_frame_t fr;
+ 
++	if (rx->cac && cac_lich(rx->cur_lich)) {
++		uint8_t cac[NXDN_CAC_BYTES];
++
++		rx->last_lich = -1;		// no superframe to coast through
++		if (nxdn_cac_get(f->hard, f->soft, &rx->work, cac) < 0) {
++			rx->cac_fail++;
++		} else if (rx->ran != NXDN_RAN_ANY && NXDN_SR_RAN(cac[0]) != rx->ran) {
++			rx->ran_rejects++;
++		} else {
++			rx->cac_ok++;
++			rx->cac(&cac[1], rx->cac_ctx);
++		}
++		return;
++	}
+ 	fr.lich = rx->cur_lich;
+ 	fr.sacch_errs = rx->cur_errs;
+ 	for (uint8_t i = 0; i < NXDN_SACCH_BYTES; i++)
+@@ -160,4 +189,7 @@ void nxdn_rx_init(nxdn_rx_t *rx, uint8_t ran, void (*frame)(const nxdn_rx_frame_
+ 	rx->last_lich = -1;
+ 	rx->coasted = 0;
+ 	rx->ran_rejects = 0;
++	rx->cac = NULL;
++	rx->cac_ctx = NULL;
++	rx->cac_ok = rx->cac_fail = 0;
+ }
+diff --git a/core/nxdn/nxdn_trunk.c b/core/nxdn/nxdn_trunk.c
+new file mode 100644
+index 0000000..9f1ed51
+--- /dev/null
++++ b/core/nxdn/nxdn_trunk.c
+@@ -0,0 +1,391 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// Copyright (c) 2026 lyra XE1POC
++// NXDN Type-C trunking (nxdn_trunk.h)
++#include "nxdn_trunk.h"
++
++#include <string.h>
++
++#include "nxdn.h"
++
++// SITE_INFO's channel access information: RCN 1 = direct frequency assignment, then a step and a base. Base 4 is
++// 750 MHz as DSD-FME reads it (SDRTrunk reads 450 MHz): to confirm on air (nxdn-trunking.md 2)
++static const uint32_t dfa_base_hz[8] = { 0, 100000000u, 330000000u, 400000000u, 750000000u, 0, 0, 0 };
++static const uint16_t dfa_step_hz[4] = { 0, 0, 1250, 3125 };
++
++static uint16_t u16(const uint8_t *m, uint8_t at) { return (uint16_t)(m[at] << 8 | m[at + 1]); }
++static void put16(uint8_t *m, uint8_t at, uint16_t v) { m[at] = (uint8_t)(v >> 8); m[at + 1] = (uint8_t)v; }
++
++// VCALL_ASSGN: type, CC option, call type (3) and voice option (5), source, destination, call timer (6), then the
++// channel: 10 bits, or with DFA 2 bits of bandwidth, the outbound frequency number OFN and the inbound one IFN
++static uint32_t dfa_hz(const nxdn_trunk_t *t, uint16_t fn)
++{
++	uint32_t base = dfa_base_hz[t->base & 7], step = dfa_step_hz[t->step & 3];
++
++	return base != 0 && step != 0 ? base + (uint32_t)fn * step : 0;
++}
++
++static bool dfa_on(const nxdn_trunk_t *t)
++{
++	return t->site_known && t->dfa;
++}
++
++uint32_t nxdn_trunk_chan_hz(const nxdn_trunk_t *t, const uint8_t *msg)
++{
++	if (dfa_on(t))
++		return dfa_hz(t, u16(msg, 8));
++	uint16_t ch = (uint16_t)((msg[7] & 3) << 8 | msg[8]);
++	return t->cfg.base_hz != 0 ? t->cfg.base_hz + (uint32_t)ch * t->cfg.spacing_hz : 0;
++}
++
++// Where we transmit on an assigned channel: DFA's inbound number, else the control channel's duplex offset
++static uint32_t talk_hz(const nxdn_trunk_t *t, const uint8_t *msg, uint32_t rx_hz)
++{
++	if (dfa_on(t))
++		return dfa_hz(t, u16(msg, 10));
++	uint32_t cc_tx = t->cfg.cc_tx_hz ? t->cfg.cc_tx_hz : t->cfg.cc_hz;
++	return rx_hz + (cc_tx - t->cfg.cc_hz);
++}
++
++static void enter(nxdn_trunk_t *t, uint8_t state, uint32_t hz, uint32_t now)
++{
++	t->state = state;
++	t->t_state = now;
++	t->t_heard = now;	// the voice channel's grace for its first frame
++	if (state == NXDN_TRUNK_CONTROL)
++		t->t_cc = now;
++	if (t->tune)
++		t->tune(hz, t->ctx);
++}
++
++void nxdn_trunk_begin(nxdn_trunk_t *t, const nxdn_trunk_cfg_t *cfg, void (*tune)(uint32_t hz, void *ctx),
++		      bool (*send)(uint32_t hz, const uint8_t *msg, void *ctx), void *ctx, uint32_t now)
++{
++	memset(t, 0, sizeof *t);
++	t->cfg = *cfg;
++	t->tune = tune;
++	t->send = send;
++	t->ctx = ctx;
++	t->reg = cfg->tx && cfg->unit_id != 0 ? NXDN_REG_IDLE : NXDN_REG_OFF;
++	t->backoff = NXDN_TRUNK_RETRY_MS;
++	enter(t, NXDN_TRUNK_CONTROL, cfg->cc_hz, now);
++}
++
++void nxdn_trunk_end(nxdn_trunk_t *t)
++{
++	t->state = NXDN_TRUNK_OFF;
++}
++
++static bool wanted(const nxdn_trunk_t *t, uint8_t call_type, uint16_t dst)
++{
++	if (call_type == NXDN_CALL_INDIVIDUAL)
++		return t->cfg.unit_id != 0 && dst == t->cfg.unit_id;
++	return t->cfg.all_groups || dst == NXDN_ID_ALL || (t->cfg.group != 0 && dst == t->cfg.group);
++}
++
++// ── Inbound messages (long CAC, 16 octets) ──
++// REG_REQ: registration option (5 bits) and the location ID's first 19 bits, our unit, the group, subscriber type,
++// version
++static void build_reg(const nxdn_trunk_t *t, uint8_t *m)
++{
++	uint32_t loc = t->location >> 5;	// 19 bits
++
++	memset(m, 0, NXDN_LCAC_MSG_BYTES);
++	m[0] = NXDN_MSG_REG;
++	m[1] = (uint8_t)((loc >> 16) & 7);
++	m[2] = (uint8_t)(loc >> 8);
++	m[3] = (uint8_t)loc;
++	put16(m, 4, t->cfg.unit_id);
++	put16(m, 6, t->cfg.talk_unit ? t->cfg.group : t->cfg.talk_dst);
++}
++
++// VCALL_REQ: CC option, call type and voice option, source, destination
++static void build_vcall_req(const nxdn_trunk_t *t, uint8_t *m)
++{
++	memset(m, 0, NXDN_LCAC_MSG_BYTES);
++	m[0] = NXDN_MSG_VCALL_REQ;
++	m[2] = (uint8_t)((t->cfg.talk_unit ? NXDN_CALL_INDIVIDUAL : NXDN_CALL_GROUP) << 5 |
++			 (t->cfg.rate9600 ? NXDN_VOICE_9600_EHR : NXDN_VOICE_4800_EHR));
++	put16(m, 3, t->cfg.unit_id);
++	put16(m, 5, t->cfg.talk_dst);
++}
++
++// The pending request (registration, or a voice request while PTT asks) goes out once more
++static void send_pending(nxdn_trunk_t *t, uint32_t now)
++{
++	uint8_t m[NXDN_LCAC_MSG_BYTES];
++	uint32_t hz = t->cfg.cc_tx_hz ? t->cfg.cc_tx_hz : t->cfg.cc_hz;
++
++	if (t->req == NXDN_REQ_WAIT) {
++		build_vcall_req(t, m);
++	} else {
++		build_reg(t, m);
++	}
++	t->t_sent = now;
++	if (!t->send || !t->send(hz, m, t->ctx)) {
++		t->send_fail++;
++		return;		// (tried again at the next answer timeout, the try not counted)
++	}
++	t->tries++;
++	t->sent = true;
++	if (t->req == NXDN_REQ_WAIT)
++		t->req_tx++;
++	else
++		t->reg_tx++;
++}
++
++static void start_request(nxdn_trunk_t *t, uint32_t now)
++{
++	t->tries = 0;
++	t->sent = false;
++	send_pending(t, now);
++}
++
++static bool registered(uint8_t cause)
++{
++	// Accepted, or the location accepted with the group failed or refused (with or without a valid ESN)
++	switch (cause) {
++	case 0x01: case 0x04: case 0x05: case 0x21: case 0x24: case 0x25:
++		return true;
++	default:
++		return false;
++	}
++}
++
++static void reg_resp(nxdn_trunk_t *t, const uint8_t *msg, uint32_t now)
++{
++	if (t->reg != NXDN_REG_WAIT || u16(msg, 4) != t->cfg.unit_id)
++		return;
++	t->sent = false;
++	t->cause = msg[8];
++	if (registered(msg[8])) {
++		t->reg = NXDN_REG_READY;
++		t->reg_ok++;
++		t->backoff = NXDN_TRUNK_RETRY_MS;
++	} else {
++		t->reg = NXDN_REG_DENIED;
++		t->denials++;
++		t->t_sent = now;
++	}
++}
++
++static void vcall_resp(nxdn_trunk_t *t, const uint8_t *msg, uint32_t now)
++{
++	uint8_t cause = msg[7];
++
++	if ((t->req != NXDN_REQ_WAIT && t->req != NXDN_REQ_QUEUED) || u16(msg, 3) != t->cfg.unit_id)
++		return;
++	t->sent = false;
++	if (cause == NXDN_CAUSE_VD_ACCEPTED)
++		return;			// the assignment follows
++	if (cause >= NXDN_CAUSE_VD_QUEUE_LO && cause <= NXDN_CAUSE_VD_QUEUE_HI) {
++		if (t->req != NXDN_REQ_QUEUED)
++			t->t_req = now;
++		t->req = NXDN_REQ_QUEUED;
++		return;
++	}
++	t->cause = cause;
++	t->req = NXDN_REQ_DENIED;
++	t->denials++;
++}
++
++static void assign(nxdn_trunk_t *t, const uint8_t *msg, uint32_t now)
++{
++	uint8_t call_type = msg[2] >> 5;
++	uint16_t src = u16(msg, 3), dst = u16(msg, 5);
++	uint16_t chan = dfa_on(t) ? u16(msg, 8) : (uint16_t)((msg[7] & 3) << 8 | msg[8]);
++	uint32_t hz = nxdn_trunk_chan_hz(t, msg);
++
++	t->assigns++;
++	// Ours: the voice request granted
++	if ((t->req == NXDN_REQ_WAIT || t->req == NXDN_REQ_QUEUED) && src == t->cfg.unit_id && dst == t->cfg.talk_dst) {
++		uint32_t thz = hz != 0 ? talk_hz(t, msg, hz) : 0;
++
++		t->sent = false;
++		if (hz == 0 || thz == 0) {
++			t->req = NXDN_REQ_NO_CHAN;
++			return;
++		}
++		t->req = NXDN_REQ_TALK;
++		t->req_ok++;
++		t->talk_hz = thz;
++		t->chan = chan;
++		t->dst = dst;
++		t->src = src;
++		t->unit_call = call_type == NXDN_CALL_INDIVIDUAL;
++		t->voice_hz = hz;
++		enter(t, NXDN_TRUNK_VOICE, hz, now);
++		return;
++	}
++	if (t->req != NXDN_REQ_IDLE || !wanted(t, call_type, dst))
++		return;		// (while asking, the control channel is not left for another call)
++	if (chan == t->left_chan && dst == t->left_dst && now - t->t_left < NXDN_TRUNK_REJOIN_MS) {
++		t->refused = NXDN_TRUNK_REFUSE_REJOIN;
++		return;
++	}
++	if (hz == 0) {
++		t->refused = NXDN_TRUNK_REFUSE_NO_PLAN;
++		t->refusals++;
++		return;
++	}
++	t->refused = NXDN_TRUNK_REFUSE_NONE;
++	t->chan = chan;
++	t->dst = dst;
++	t->src = src;
++	t->unit_call = call_type == NXDN_CALL_INDIVIDUAL;
++	t->voice_hz = hz;
++	t->follows++;
++	enter(t, NXDN_TRUNK_VOICE, hz, now);
++}
++
++void nxdn_trunk_msg(nxdn_trunk_t *t, const uint8_t *msg, uint32_t now)
++{
++	if (t->state != NXDN_TRUNK_CONTROL)
++		return;		// (a CAC that was in the pipe when we left)
++	t->msgs++;
++	switch (nxdn_msg_type(msg)) {
++	case NXDN_MSG_SITE_INFO:
++		// Location ID, bits 8-31; channel access information, bits 88-111: RCN, step (2), base (3)
++		t->site_known = true;
++		t->location = (uint32_t)msg[1] << 16 | (uint32_t)msg[2] << 8 | msg[3];
++		t->dfa = (msg[11] & 0x80) != 0;
++		t->step = (uint8_t)((msg[11] >> 5) & 3);
++		t->base = (uint8_t)((msg[11] >> 2) & 7);
++		break;
++	case NXDN_MSG_VCALL_ASSGN:
++	case NXDN_MSG_VCALL_ASSGN_DUP:
++		assign(t, msg, now);
++		break;
++	case NXDN_MSG_REG:
++		reg_resp(t, msg, now);
++		break;
++	case NXDN_MSG_VCALL_REQ:	// outbound: VCALL_RESP
++		vcall_resp(t, msg, now);
++		break;
++	default:
++		break;
++	}
++}
++
++static void back_to_control(nxdn_trunk_t *t, uint32_t now)
++{
++	t->left_chan = t->chan;
++	t->left_dst = t->dst;
++	t->t_left = now;
++	enter(t, NXDN_TRUNK_CONTROL, t->cfg.cc_hz, now);
++}
++
++// The transmit side's timers, on the control channel
++static void tx_tick(nxdn_trunk_t *t, uint32_t now)
++{
++	if (t->state != NXDN_TRUNK_CONTROL || t->reg == NXDN_REG_OFF)
++		return;
++	if (t->req == NXDN_REQ_WAIT) {
++		if (now - t->t_sent < NXDN_TRUNK_ANSWER_MS)
++			return;
++		if (t->tries >= NXDN_TRUNK_TRIES) {
++			t->req = NXDN_REQ_TIMEOUT;
++			t->timeouts++;
++			t->sent = false;
++		} else {
++			send_pending(t, now);
++		}
++		return;
++	}
++	if (t->req == NXDN_REQ_QUEUED) {
++		if (now - t->t_req >= NXDN_TRUNK_QUEUE_MS) {
++			t->req = NXDN_REQ_TIMEOUT;
++			t->timeouts++;
++		}
++		return;
++	}
++	switch (t->reg) {
++	case NXDN_REG_IDLE:
++		if (t->site_known || now - t->t_cc >= NXDN_TRUNK_SITE_MS) {
++			t->reg = NXDN_REG_WAIT;
++			start_request(t, now);
++		}
++		break;
++	case NXDN_REG_WAIT:
++		if (now - t->t_sent < NXDN_TRUNK_ANSWER_MS)
++			break;
++		if (t->tries < NXDN_TRUNK_TRIES) {
++			send_pending(t, now);
++			break;
++		}
++		t->reg = NXDN_REG_RETRY;
++		t->timeouts++;
++		t->sent = false;
++		break;
++	case NXDN_REG_RETRY:
++	case NXDN_REG_DENIED:
++		if (now - t->t_sent >= t->backoff) {
++			t->backoff = t->backoff * 2 > NXDN_TRUNK_RETRY_MAX ? NXDN_TRUNK_RETRY_MAX : t->backoff * 2;
++			t->reg = NXDN_REG_WAIT;
++			start_request(t, now);
++		}
++		break;
++	default:
++		break;
++	}
++}
++
++void nxdn_trunk_tick(nxdn_trunk_t *t, bool rx_active, uint32_t now)
++{
++	if (t->state == NXDN_TRUNK_VOICE) {
++		if (t->req == NXDN_REQ_TALK) {
++			// Our own channel: the caller transmits and says when it is over; a guard if it never does
++			if (now - t->t_state >= NXDN_TRUNK_TALK_MAX_MS)
++				nxdn_trunk_talk_end(t, now);
++			return;
++		}
++		if (rx_active)
++			t->t_heard = now;
++		if (now - t->t_heard >= NXDN_TRUNK_VOICE_LOST_MS)
++			t->voice_lost++;
++		else if (now - t->t_state >= NXDN_TRUNK_CALL_MAX_MS)
++			t->call_max++;
++		else
++			return;
++		back_to_control(t, now);
++		return;
++	}
++	tx_tick(t, now);
++}
++
++uint8_t nxdn_trunk_can_talk(const nxdn_trunk_t *t)
++{
++	if (t->reg == NXDN_REG_OFF)
++		return NXDN_TALK_OFF;
++	if (t->state == NXDN_TRUNK_OFF)
++		return NXDN_TALK_NO_CC;
++	if (t->reg != NXDN_REG_READY)
++		return NXDN_TALK_NOT_REG;
++	return NXDN_TALK_OK;
++}
++
++void nxdn_trunk_ptt(nxdn_trunk_t *t, bool down, uint32_t now)
++{
++	if (!down) {
++		if (t->req == NXDN_REQ_WAIT || t->req == NXDN_REQ_QUEUED)
++			t->sent = false;
++		if (t->req != NXDN_REQ_TALK)
++			t->req = NXDN_REQ_IDLE;	// a request not granted yet is dropped; a finished one forgotten
++		t->ptt = false;
++		return;
++	}
++	t->ptt = true;
++	if (nxdn_trunk_can_talk(t) != NXDN_TALK_OK || t->req == NXDN_REQ_TALK)
++		return;
++	if (t->state == NXDN_TRUNK_VOICE)
++		back_to_control(t, now);	// listening to a call: ask from the control channel
++	t->req = NXDN_REQ_WAIT;
++	start_request(t, now);
++}
++
++void nxdn_trunk_talk_end(nxdn_trunk_t *t, uint32_t now)
++{
++	if (t->req != NXDN_REQ_TALK)
++		return;
++	t->req = NXDN_REQ_IDLE;
++	back_to_control(t, now);
++}
+diff --git a/core/nxdn/nxdn_trunk.h b/core/nxdn/nxdn_trunk.h
+new file mode 100644
+index 0000000..7e094e5
+--- /dev/null
++++ b/core/nxdn/nxdn_trunk.h
+@@ -0,0 +1,127 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// Copyright (c) 2026 lyra XE1POC
++// NXDN Type-C trunking (docs/spec/nxdn-trunking.md): camp on a site's control channel, read its CAC, follow voice
++// channel assignments (VCALL_ASSGN) for our group, every group, or calls to our unit, and come back when the call's
++// voice stops. Channel numbers become frequencies through the site's direct frequency assignment (SITE_INFO) or,
++// without it, the channel's linear plan. With the transmit side on it also registers (REG_REQ) and, on PTT, asks
++// for a voice channel (VCALL_REQ); the assignment to us puts the caller on the voice channel to transmit. Section
++// numbers are NXDN TS 1-A's; field positions as the open decoders read them (nxdn-trunking.md 2).
++//
++// Pure: no RTOS call, no board call. Time comes in as a millisecond tick; tuning and inbound bursts go out through
++// the caller's hooks. One task calls everything (the radio task: CAC messages reach it through the caller's queue).
++#ifndef RFOUNDRY_NXDN_TRUNK_H
++#define RFOUNDRY_NXDN_TRUNK_H
++
++#include <stdbool.h>
++#include <stdint.h>
++
++#define NXDN_TRUNK_VOICE_LOST_MS	1000	// no voice frame on the voice channel for this long: back to control
++#define NXDN_TRUNK_CALL_MAX_MS		120000	// on a voice channel at most (listening)
++#define NXDN_TRUNK_REJOIN_MS		1500	// the call just left: its repeated assignments are not followed again
++// The transmit side
++#define NXDN_TRUNK_SITE_MS		2000	// on the control channel without SITE_INFO yet: register anyway
++#define NXDN_TRUNK_ANSWER_MS		1000	// a request without an answer: sent again
++#define NXDN_TRUNK_TRIES		3	// sends of one request
++#define NXDN_TRUNK_RETRY_MS		10000	// registration unanswered or refused: the wait before the next round, doubled
++#define NXDN_TRUNK_RETRY_MAX		60000
++#define NXDN_TRUNK_QUEUE_MS		10000	// a queued voice request: the longest wait for its assignment
++#define NXDN_TRUNK_TALK_MAX_MS		(NXDN_TRUNK_CALL_MAX_MS + 10000)	// on our voice channel at most
++
++// Layer 3 (6.4) as the control channel carries them
++#define NXDN_MSG_VCALL_REQ	0x01	// inbound; outbound the same type is VCALL_RESP
++#define NXDN_MSG_REG		0x20	// REG_REQ inbound, REG_RESP outbound
++#define NXDN_CAUSE_VD_ACCEPTED	0x10
++#define NXDN_CAUSE_VD_QUEUE_LO	0x30	// 0x30-0x3F: queued
++#define NXDN_CAUSE_VD_QUEUE_HI	0x3F
++
++enum { NXDN_TRUNK_OFF, NXDN_TRUNK_CONTROL, NXDN_TRUNK_VOICE };
++// Why the last wanted assignment was not followed
++enum { NXDN_TRUNK_REFUSE_NONE, NXDN_TRUNK_REFUSE_NO_PLAN, NXDN_TRUNK_REFUSE_REJOIN };
++// Registration (reg)
++enum {
++	NXDN_REG_OFF,		// the transmit side is off
++	NXDN_REG_IDLE,		// to register once the control channel is heard
++	NXDN_REG_WAIT,		// REG_REQ sent, waiting for REG_RESP
++	NXDN_REG_READY,		// registered
++	NXDN_REG_DENIED,	// refused (cause): tried again later
++	NXDN_REG_RETRY,		// no answer: tried again later
++};
++// A voice request (req)
++enum {
++	NXDN_REQ_IDLE,
++	NXDN_REQ_WAIT,		// VCALL_REQ sent (or to be sent), waiting for the assignment
++	NXDN_REQ_QUEUED,	// the site queued it
++	NXDN_REQ_TALK,		// assigned: on our voice channel, talk_hz is where to transmit
++	NXDN_REQ_DENIED,	// refused (cause)
++	NXDN_REQ_TIMEOUT,	// no answer, or queued too long
++	NXDN_REQ_NO_CHAN,	// assigned a channel whose frequencies can't be known
++};
++// nxdn_trunk_can_talk
++enum { NXDN_TALK_OK, NXDN_TALK_OFF, NXDN_TALK_NO_CC, NXDN_TALK_NOT_REG };
++
++typedef struct {
++	uint32_t cc_hz;		// the control channel
++	uint32_t cc_tx_hz;	// its inbound frequency (where bursts go); 0 = cc_hz
++	uint32_t base_hz;	// channel numbers without DFA: base_hz + number x spacing_hz; 0 none
++	uint32_t spacing_hz;
++	uint16_t group;		// the group followed, 0 none
++	uint16_t unit_id;	// ours: individual calls to it are followed; the source of what we send
++	bool all_groups;	// every group call of the site
++	// The transmit side
++	bool tx;		// register and ask for voice channels (unit_id set)
++	uint16_t talk_dst;	// what PTT calls: a group, or a unit with talk_unit
++	bool talk_unit;
++	bool rate9600;		// the voice option asked for
++} nxdn_trunk_cfg_t;
++
++typedef struct {
++	void (*tune)(uint32_t hz, void *ctx);
++	// One inbound burst on hz: msg is a long CAC message (NXDN_LCAC_MSG_BYTES). False: it can't go now (sent again
++	// at the next try)
++	bool (*send)(uint32_t hz, const uint8_t *msg, void *ctx);
++	void *ctx;
++	nxdn_trunk_cfg_t cfg;
++	uint8_t state;		// NXDN_TRUNK_*
++	uint8_t refused;	// NXDN_TRUNK_REFUSE_* of the last wanted assignment not followed
++	bool site_known;	// SITE_INFO heard: dfa, step and base below are the site's
++	bool dfa;
++	uint8_t step, base;
++	uint32_t location;	// the site's location ID (24 bits)
++	uint32_t t_state, t_heard, t_left, t_cc;
++	// The call followed (now, or last)
++	uint32_t voice_hz;
++	uint16_t chan, dst, src;
++	bool unit_call;
++	uint16_t left_chan, left_dst;
++	// The transmit side
++	uint8_t reg, req;	// NXDN_REG_*, NXDN_REQ_*
++	uint8_t cause;		// the last refusal's cause
++	uint8_t tries;
++	bool sent;		// the pending request went: waiting for its answer
++	bool ptt;
++	uint32_t t_sent, t_req, backoff;
++	uint32_t talk_hz;	// our voice channel's transmit frequency
++	uint32_t msgs, assigns, follows, refusals, voice_lost, call_max;
++	uint32_t reg_tx, reg_ok, req_tx, req_ok, denials, timeouts, send_fail;
++} nxdn_trunk_t;
++
++// Tune to the control channel and listen there
++void nxdn_trunk_begin(nxdn_trunk_t *t, const nxdn_trunk_cfg_t *cfg, void (*tune)(uint32_t hz, void *ctx),
++		      bool (*send)(uint32_t hz, const uint8_t *msg, void *ctx), void *ctx, uint32_t now);
++void nxdn_trunk_end(nxdn_trunk_t *t);
++// A CAC message (NXDN_CAC_MSG_BYTES) from the control channel
++void nxdn_trunk_msg(nxdn_trunk_t *t, const uint8_t *msg, uint32_t now);
++// At least every 100 ms. rx_active: the engine is receiving a call (voice is coming on the channel tuned)
++void nxdn_trunk_tick(nxdn_trunk_t *t, bool rx_active, uint32_t now);
++// The frequency of an assignment's channel field (its message), 0 when it can't be known (tests and the view)
++uint32_t nxdn_trunk_chan_hz(const nxdn_trunk_t *t, const uint8_t *msg);
++
++// ── The transmit side (cfg.tx) ──
++uint8_t nxdn_trunk_can_talk(const nxdn_trunk_t *t);	// NXDN_TALK_*
++// PTT pressed: a VCALL_REQ for cfg.talk_dst goes out (from a voice channel heard, back to control first); released
++// before the assignment: dropped
++void nxdn_trunk_ptt(nxdn_trunk_t *t, bool down, uint32_t now);
++// Our transmission on the assigned channel ended (or never started): back to the control channel
++void nxdn_trunk_talk_end(nxdn_trunk_t *t, uint32_t now);
++
++#endif
+diff --git a/core/radio/radio_nxdn.c b/core/radio/radio_nxdn.c
+index fee7594..ab97051 100644
+--- a/core/radio/radio_nxdn.c
++++ b/core/radio/radio_nxdn.c
+@@ -11,6 +11,8 @@
+ #include "radio/radio_bands.h"
+ #include "nxdn/nxdn_engine.h"
+ #include "nxdn/nxdn_codeplug.h"
++#include "nxdn/nxdn_trunk.h"
++#include "hal_time.h"
+ #include "codeplug/codeplug_modes.h"
+ #include "dmr/ambe/ambeVoice.h"
+ #include "dmr/call/dmr_call.h"
+@@ -39,7 +41,7 @@ static nxdn_engine_t own_mem;
+ 
+ static const radio_nxdn_settings_t defaults = {
+ 	.rate9600 = true, .rx_ran = NXDN_RAN_ANY, .tx_ran = 1, .rx_gid = 0, .unit_id = 0, .unit_call = false,
+-	.tx_dst = 1, .emergency = false,
++	.tx_dst = 1, .emergency = false, .trunk = RADIO_NXDN_TRUNK_OFF,
+ };
+ static radio_nxdn_settings_t set;
+ static radio_nxdn_settings_t quick;
+@@ -50,6 +52,19 @@ static nxdn_call_stats_t call_base;	// the call layer's counters already counted
+ static air_session_stats_t air_base;
+ static uint32_t rx_calls_base, tx_calls_base, filler_base, rejects_base;
+ 
++// A Type-C trunked channel (docs/spec/nxdn-trunking.md): the follower runs in the radio task; the provider's task hands
++// it the control channel's messages through a queue it alone writes (head) and the radio task alone reads (tail)
++#define CAC_QUEUE	8	// a CAC every 40 or 80 ms, the radio task's tick far faster
++static bool trunked;
++static nxdn_trunk_t trunk;
++static uint8_t cac_q[CAC_QUEUE][NXDN_CAC_MSG_BYTES];
++static volatile uint8_t cac_head, cac_tail;
++static uint32_t cac_dropped;
++// The inbound burst the follower asked last (its send hook): want moves past done until radio_sm sends or drops it
++static uint8_t burst_want, burst_done;
++static uint32_t burst_hz;
++static uint8_t burst_msg[NXDN_LCAC_MSG_BYTES];
++
+ void radio_nxdn_init(void)
+ {
+ 	set = defaults;
+@@ -73,6 +88,8 @@ void radio_nxdn_set_settings(const radio_nxdn_settings_t *s)
+ 		set.tx_ran = 1;
+ 	if (set.unit_id > RADIO_NXDN_UNIT_MAX)
+ 		set.unit_id = 0;
++	if (set.trunk > RADIO_NXDN_TRUNK_ALL)
++		set.trunk = RADIO_NXDN_TRUNK_OFF;
+ }
+ 
+ void radio_nxdn_set_quick(const radio_nxdn_settings_t *s, uint8_t mask, bool vfo)
+@@ -86,6 +103,9 @@ void radio_nxdn_set_quick(const radio_nxdn_settings_t *s, uint8_t mask, bool vfo
+ 		to->unit_call = false;
+ 		to->tx_dst = s->tx_dst;
+ 	}
++	if ((mask & RADIO_NXDN_QUICK_TRUNK) && vfo)
++		set.trunk = s->trunk <= RADIO_NXDN_TRUNK_ALL ? s->trunk : RADIO_NXDN_TRUNK_OFF;	// the VFO's alone
++	mask &= (uint8_t)~RADIO_NXDN_QUICK_TRUNK;
+ 	quick_mask = vfo ? 0 : (uint8_t)(quick_mask | mask);
+ }
+ 
+@@ -143,9 +163,65 @@ void radio_nxdn_monitor(bool on)
+ 
+ static void params_channel(const channel_t *ch, uint16_t number, nxdn_engine_cfg_t *c);
+ 
++// The follower's set-up from a trunked channel (nxdn-trunking.md 3): its RX frequency is the control channel, its
++// talk group the one followed, every group with the block's flag or digital monitor. False: a conventional channel
++static uint8_t trunk_mode;	// RADIO_NXDN_TRUNK_* of the channel running (before digital monitor)
++
++// The VFO's: its RX frequency is the control channel, DFA only (no plan), the settings' group and unit ID
++static bool trunk_cfg_vfo(const channel_t *ch, nxdn_trunk_cfg_t *t)
++{
++	uint8_t variant = ch->vfo_digital & VFO_DIG_NXDN_MASK;
++	bool rate = variant != 0 ? variant == VFO_VARIANT_SECOND : set.rate9600;
++	uint16_t unit = set.unit_id ? set.unit_id : nxdn_radio_unit_id();
++
++	if (set.trunk == RADIO_NXDN_TRUNK_OFF)
++		return false;
++	memset(t, 0, sizeof *t);
++	t->cc_hz = ch->rx_hz;
++	t->cc_tx_hz = ch->tx_hz;
++	t->group = set.unit_call ? 0 : set.tx_dst;
++	t->unit_id = unit;
++	t->all_groups = set.trunk == RADIO_NXDN_TRUNK_ALL || monitor;
++	t->tx = !ch->rx_only && ch->tx_hz != 0 && unit != 0 && (radio_nxdn_fit(rate) & AIR_FIT_TX) != 0;
++	t->talk_dst = set.tx_dst;
++	t->talk_unit = set.unit_call;
++	t->rate9600 = rate;
++	trunk_mode = set.trunk;
++	return true;
++}
++
++static bool trunk_cfg(const channel_t *ch, uint16_t number, nxdn_trunk_cfg_t *t)
++{
++	nxdn_conv_cfg_t cc;
++
++	if (number == 0)
++		return trunk_cfg_vfo(ch, t);
++	if (!nxdn_conv_load(number, ch, &cc) || !cc.conv.trunk)
++		return false;
++	memset(t, 0, sizeof *t);
++	trunk_mode = cc.conv.trunk_all ? RADIO_NXDN_TRUNK_ALL : RADIO_NXDN_TRUNK_GROUP;
++	t->cc_hz = ch->rx_hz;
++	t->base_hz = cc.conv.plan_base_hz;
++	t->spacing_hz = cc.conv.plan_spacing_hz;
++	t->group = cc.target_unit ? 0 : cc.target;
++	t->unit_id = cc.unit_id;
++	t->all_groups = cc.conv.trunk_all || monitor;
++	// The transmit side: the channel allows it (its tag), it has an inbound frequency and we have a unit ID
++	t->cc_tx_hz = ch->tx_hz;
++	t->tx = !ch->rx_only && ch->tx_hz != 0 && cc.unit_id != 0 && (radio_nxdn_fit(cc.conv.rate9600) & AIR_FIT_TX) != 0;
++	t->talk_dst = cc.target;
++	t->talk_unit = cc.target_unit;
++	t->rate9600 = cc.conv.rate9600;
++	return true;
++}
++
+ static void params(const channel_t *ch, uint16_t number, nxdn_engine_cfg_t *c)
+ {
+ 	params_channel(ch, number, c);
++	if (trunked) {
++		c->rx_gid = 0;		// on a voice channel the follower chose: every call there plays
++		c->trunk = true;	// and what we send there is RTCH
++	}
+ 	if (monitor) {
+ 		c->rx_ran = NXDN_RAN_ANY;	// every RAN, every group and unit call; what is sent stays
+ 		c->rx_gid = 0;
+@@ -295,12 +371,70 @@ static nxdn_engine_t *mem_get(void)
+ #endif
+ }
+ 
++// The engine's CAC hook (provider's task): into the queue; a full queue drops the message (the site repeats them)
++static void cac_in(const uint8_t *msg, void *ctx)
++{
++	uint8_t h = cac_head;
++
++	(void)ctx;
++	if ((uint8_t)(h - cac_tail) >= CAC_QUEUE) {
++		cac_dropped++;
++		return;
++	}
++	memcpy(cac_q[h % CAC_QUEUE], msg, NXDN_CAC_MSG_BYTES);
++	__atomic_signal_fence(__ATOMIC_SEQ_CST);
++	cac_head = (uint8_t)(h + 1);
++}
++
++// The follower's tune hook (radio task): the receiver, then the engine told. A frequency the radio can't receive stays
++// untuned: nothing is heard there and the follower comes back
++static void trunk_tune(uint32_t hz, void *ctx)
++{
++	static const subtone_t no_tone = { TONE_NONE, 0 };
++
++	(void)ctx;
++	if (hz != 0 && board_in_band(hz, false) && !radio_listen_band(hz))
++		board.radio->rx(hz, RADIO_BW_12K5, &no_tone);
++	cac_tail = cac_head;	// what is queued is of the channel left
++	if (eng != NULL)
++		nxdn_engine_retuned(eng);
++}
++
++// The follower's send hook (radio task): radio_sm keys the burst at its next tick. One not sent yet is replaced
++static bool trunk_send(uint32_t hz, const uint8_t *msg, void *ctx)
++{
++	(void)ctx;
++	memcpy(burst_msg, msg, NXDN_LCAC_MSG_BYTES);
++	burst_hz = hz;
++	burst_want++;
++	return true;
++}
++
++// Radio task, every poll: the queued control channel messages, then the follower's timers
++static void trunk_service(bool rx_active)
++{
++	uint32_t now = hal_millis();
++
++	while (cac_tail != cac_head) {
++		uint8_t t = cac_tail;
++
++		__atomic_signal_fence(__ATOMIC_SEQ_CST);
++		nxdn_trunk_msg(&trunk, cac_q[t % CAC_QUEUE], now);
++		if (cac_tail != t)
++			break;		// the message retuned (and emptied the queue)
++		cac_tail = (uint8_t)(t + 1);
++	}
++	nxdn_trunk_tick(&trunk, rx_active, now);
++}
++
+ bool radio_nxdn_begin(const channel_t *ch, uint16_t number)
+ {
+ 	nxdn_engine_cfg_t cfg;
++	nxdn_trunk_cfg_t tcfg;
+ 
+ 	radio_nxdn_end();
+ 	stats.begins++;
++	trunked = trunk_cfg(ch, number, &tcfg);
+ 	params(ch, number, &cfg);
+ 	eng = mem_get();
+ 	if (eng == NULL || board.air == NULL || nxdn_engine_fit(board.air, cfg.rate9600) == 0) {
+@@ -313,13 +447,17 @@ bool radio_nxdn_begin(const channel_t *ch, uint16_t number)
+ 	nxdn_engine_hooks_t hooks = voice_hooks;
+ 
+ 	hooks.tx_iv = tx_iv;
+-#define VOICE_HOOKS	hooks
+ #else
+-#define VOICE_HOOKS	voice_hooks
++	nxdn_engine_hooks_t hooks = voice_hooks;
+ #endif
++	cac_head = cac_tail = 0;
++	if (trunked)
++		hooks.rx_cac = cac_in;
++#define VOICE_HOOKS	hooks
+ 	if (!nxdn_engine_begin(eng, board.air, &cfg, &VOICE_HOOKS, NULL)) {
+ 		ambeVoiceStop();
+ 		eng = NULL;
++		trunked = false;
+ 		stats.begin_fails++;
+ 		return false;
+ 	}
+@@ -332,6 +470,9 @@ bool radio_nxdn_begin(const channel_t *ch, uint16_t number)
+ 	memset(&call_base, 0, sizeof(call_base));
+ 	memset(&air_base, 0, sizeof(air_base));
+ 	rx_calls_base = tx_calls_base = filler_base = rejects_base = 0;
++	burst_want = burst_done = 0;
++	if (trunked)
++		nxdn_trunk_begin(&trunk, &tcfg, trunk_tune, trunk_send, NULL, hal_millis());
+ 	return true;
+ }
+ 
+@@ -342,6 +483,9 @@ void radio_nxdn_end(void)
+ 	nxdn_engine_end(eng);	// the provider closed: no hook runs after this
+ 	ambeVoiceStop();
+ 	eng = NULL;
++	if (trunked)
++		nxdn_trunk_end(&trunk);
++	trunked = false;
+ }
+ 
+ bool radio_nxdn_running(void)
+@@ -361,6 +505,15 @@ void radio_nxdn_apply(const channel_t *ch, uint16_t number)
+ 
+ 	if (eng == NULL || nxdn_engine_tx_state(eng) != AIR_TX_IDLE)
+ 		return;
++	nxdn_trunk_cfg_t tcfg;
++	bool want = trunk_cfg(ch, number, &tcfg);
++
++	if (want != trunked || (want && tcfg.cc_hz != trunk.cfg.cc_hz)) {
++		radio_nxdn_begin(ch, number);	// trunked now or no longer, or another site: start over
++		return;
++	}
++	if (trunked)
++		trunk.cfg = tcfg;	// the group, the plan, digital monitor, what PTT calls
+ 	params(ch, number, &cfg);
+ 	if (cfg.rate9600 != eng->cfg.rate9600) {
+ 		radio_nxdn_begin(ch, number);	// the mode is the session's: a new rate is a new session
+@@ -435,6 +588,11 @@ static void settings_view(radio_nxdn_view_t *n)
+ 	n->tx_ran = s.tx_ran;
+ 	n->talk = s.tx_dst;
+ 	n->fit = (uint16_t)radio_nxdn_fit(s.rate9600);
++	n->trunk = eng != NULL ? (trunked ? trunk_mode : RADIO_NXDN_TRUNK_OFF) : set.trunk;
++	n->tstate = !trunked || eng == NULL ? RADIO_NXDN_TS_OFF :
++		trunk.req == NXDN_REQ_TALK ? RADIO_NXDN_TS_TALK :
++		trunk.state == NXDN_TRUNK_VOICE ? RADIO_NXDN_TS_VOICE :
++		trunk.reg != NXDN_REG_OFF && trunk.reg != NXDN_REG_READY ? RADIO_NXDN_TS_UNREG : RADIO_NXDN_TS_CONTROL;
+ 	if (s.unit_call)
+ 		n->flags |= RADIO_NXDN_TALK_UNIT;
+ 	if (s.rate9600)
+@@ -453,6 +611,8 @@ bool radio_nxdn_poll(radio_nxdn_view_t *v)
+ 	} else {
+ 		nxdn_engine_view(eng, &ev);
+ 		count(&ev);
++		if (trunked)
++			trunk_service(ev.rx_active);
+ 		memset(&n, 0, sizeof(n));
+ 		n.flags = RADIO_NXDN_ON;
+ 		if (ev.rx_active) {
+@@ -478,9 +638,76 @@ bool radio_nxdn_poll(radio_nxdn_view_t *v)
+ 	return changed;
+ }
+ 
++// A trunked channel transmits only with its follower's transmit side (nxdn-trunking.md 4)
+ static bool nxdn_no_tx(void)
+ {
+-	return eng != NULL && (eng->session.fit & AIR_FIT_TX) == 0;
++	return eng != NULL && ((eng->session.fit & AIR_FIT_TX) == 0 || (trunked && !trunk.cfg.tx));
++}
++
++bool radio_nxdn_trunked(void)
++{
++	return eng != NULL && trunked;
++}
++
++bool radio_nxdn_trunk_tx(void)
++{
++	return radio_nxdn_trunked() && trunk.cfg.tx;
++}
++
++uint8_t radio_nxdn_trunk_ptt(bool down)
++{
++	static const uint8_t WHY[] = { RADIO_NXDNT_WHY_NONE, RADIO_NXDNT_WHY_OFF, RADIO_NXDNT_WHY_NO_CC,
++				       RADIO_NXDNT_WHY_NOT_REG };
++
++	if (!radio_nxdn_trunked())
++		return RADIO_NXDNT_WHY_OFF;
++	if (down) {
++		uint8_t why = WHY[nxdn_trunk_can_talk(&trunk)];
++		if (why != RADIO_NXDNT_WHY_NONE)
++			return why;
++	}
++	nxdn_trunk_ptt(&trunk, down, hal_millis());
++	return RADIO_NXDNT_WHY_NONE;
++}
++
++uint8_t radio_nxdn_trunk_talk(uint32_t *hz)
++{
++	if (!radio_nxdn_trunked())
++		return RADIO_NXDNT_FAIL;
++	switch (trunk.req) {
++	case NXDN_REQ_WAIT:
++	case NXDN_REQ_QUEUED:
++		return RADIO_NXDNT_WAIT;
++	case NXDN_REQ_TALK:
++		*hz = trunk.talk_hz;	// (the tune hook retuned the receiver at once)
++		return RADIO_NXDNT_GO;
++	default:
++		return RADIO_NXDNT_FAIL;
++	}
++}
++
++void radio_nxdn_trunk_talk_end(void)
++{
++	if (radio_nxdn_trunked())
++		nxdn_trunk_talk_end(&trunk, hal_millis());
++}
++
++uint32_t radio_nxdn_trunk_burst_hz(void)
++{
++	return radio_nxdn_trunked() && burst_done != burst_want ? burst_hz : 0;
++}
++
++bool radio_nxdn_trunk_burst_start(void)
++{
++	if (!radio_nxdn_trunked())
++		return false;
++	burst_done = burst_want;
++	return nxdn_engine_tx_burst(eng, burst_msg);
++}
++
++void radio_nxdn_trunk_burst_drop(void)
++{
++	burst_done = burst_want;
+ }
+ 
+ static bool nxdn_tx_prepare(void)
+diff --git a/core/radio/radio_nxdn.h b/core/radio/radio_nxdn.h
+index b91515c..e824d92 100644
+--- a/core/radio/radio_nxdn.h
++++ b/core/radio/radio_nxdn.h
+@@ -26,8 +26,13 @@ typedef struct {
+ 	bool unit_call;		// PTT calls the unit tx_dst (individual), else the group tx_dst
+ 	uint16_t tx_dst;
+ 	bool emergency;		// what we send has the emergency bit
++	uint8_t trunk;		// the VFO (nxdn-trunking.md 3): RADIO_NXDN_TRUNK_*; its RX frequency is then the control channel
+ } radio_nxdn_settings_t;
+ 
++#define RADIO_NXDN_TRUNK_OFF	0	// conventional
++#define RADIO_NXDN_TRUNK_GROUP	1	// Type-C trunked: our group, all calls and calls to us
++#define RADIO_NXDN_TRUNK_ALL	2	// ... every group of the site
++
+ #define RADIO_NXDN_RAN_MAX	63
+ #define RADIO_NXDN_UNIT_MAX	65519u	// the IDs above are special (TS 1-B)
+ 
+@@ -53,7 +58,10 @@ typedef struct {
+ 	uint16_t src;		// the caller's unit ID, 0 not known yet
+ 	uint16_t dst;		// the group or unit called
+ 	uint16_t talk;		// what PTT calls (the settings' tx_dst): a group, or a unit with RADIO_NXDN_TALK_UNIT
++	uint8_t trunk;		// RADIO_NXDN_TRUNK_* in force (the VFO's setting when the engine is off)
++	uint8_t tstate;		// trunked: RADIO_NXDN_TS_*
+ } radio_nxdn_view_t;
++enum { RADIO_NXDN_TS_OFF, RADIO_NXDN_TS_CONTROL, RADIO_NXDN_TS_VOICE, RADIO_NXDN_TS_TALK, RADIO_NXDN_TS_UNREG };
+ 
+ // Counters for the debug link (any task reads them; the radio task writes them while NXDN runs)
+ typedef struct {
+@@ -86,6 +94,7 @@ void radio_nxdn_set_settings(const radio_nxdn_settings_t *s);	// radio task (RRE
+ // The Quick menu's changes (RREQ_NXDN_SET with a mask): which fields radio_nxdn_set_quick takes, as P25's
+ #define RADIO_NXDN_QUICK_RAN	0x01u	// the RAN (receive and transmit)
+ #define RADIO_NXDN_QUICK_TG	0x02u	// the group PTT calls
++#define RADIO_NXDN_QUICK_TRUNK	0x04u	// the VFO's trunking (RADIO_NXDN_TRUNK_*)
+ void radio_nxdn_set_quick(const radio_nxdn_settings_t *s, uint8_t mask, bool vfo);	// radio task
+ uint8_t radio_nxdn_quick_settings(radio_nxdn_settings_t *out);	// the mask in force, the values in out (any task)
+ void radio_nxdn_clear_quick(void);
+@@ -109,6 +118,22 @@ void radio_nxdn_monitor(bool on);
+ // Every tick: the view and the counters. True when the view changed
+ bool radio_nxdn_poll(radio_nxdn_view_t *v);
+ 
++// Type-C trunking (docs/spec/nxdn-trunking.md), radio task. The same contract as radio_p25.h's trunk calls
++bool radio_nxdn_trunked(void);		// a trunked channel runs
++bool radio_nxdn_trunk_tx(void);		// ... with the transmit side on
++// PTT pressed or released: pressed, RADIO_NXDNT_WHY_NONE when a voice request goes out, else why not
++enum { RADIO_NXDNT_WHY_NONE, RADIO_NXDNT_WHY_OFF, RADIO_NXDNT_WHY_NO_CC, RADIO_NXDNT_WHY_NOT_REG };
++uint8_t radio_nxdn_trunk_ptt(bool down);
++// After PTT: WAIT while the request waits, GO when assigned and the receiver on the voice channel (*hz: where to
++// transmit), FAIL when it won't come
++enum { RADIO_NXDNT_WAIT, RADIO_NXDNT_GO, RADIO_NXDNT_FAIL };
++uint8_t radio_nxdn_trunk_talk(uint32_t *hz);
++void radio_nxdn_trunk_talk_end(void);
++// An inbound burst the follower asked: its frequency, 0 none. start: the engine primes it; drop: refused
++uint32_t radio_nxdn_trunk_burst_hz(void);
++bool radio_nxdn_trunk_burst_start(void);
++void radio_nxdn_trunk_burst_drop(void);
++
+ void radio_nxdn_stats(radio_nxdn_stats_t *out);
+ void radio_nxdn_reset_stats(void);
+ #endif
+diff --git a/core/radio/radio_sm.c b/core/radio/radio_sm.c
+index e62e95b..fb67e17 100644
+--- a/core/radio/radio_sm.c
++++ b/core/radio/radio_sm.c
+@@ -1264,11 +1264,60 @@ static bool key_tx(uint32_t hz, radio_bw_t bw, uint8_t power, const subtone_t *t
+ 	return board.radio->tx(hz, bw, power, tone);
+ }
+ 
++#define AIR_TRUNK	(CONFIG_P25_TRUNK || CONFIG_NXDN)
++#if AIR_TRUNK
++// A trunked air channel's transmit side: P25's follower (p25-trunking.md 7) or NXDN's (nxdn-trunking.md 4), one
++// contract. talk: 0 wait, 1 go, 2 fail; ptt: 0 when the request goes out
++typedef struct {
++	bool (*tx)(void);
++	uint8_t (*ptt)(bool down);
++	uint8_t (*talk)(uint32_t *hz);
++	void (*talk_end)(void);
++	uint32_t (*burst_hz)(void);
++	bool (*burst_start)(void);
++	void (*burst_drop)(void);
++} trunk_ops_t;
++enum { TRUNK_WAIT, TRUNK_GO, TRUNK_FAIL };
++#if CONFIG_P25_TRUNK
++_Static_assert((int)RADIO_P25T_WAIT == (int)TRUNK_WAIT && (int)RADIO_P25T_GO == (int)TRUNK_GO &&
++	       (int)RADIO_P25T_FAIL == (int)TRUNK_FAIL && (int)RADIO_P25T_WHY_NONE == 0, "P25's trunk contract");
++static const trunk_ops_t p25_trunk_ops = { radio_p25_trunk_tx, radio_p25_trunk_ptt, radio_p25_trunk_talk,
++	radio_p25_trunk_talk_end, radio_p25_trunk_burst_hz, radio_p25_trunk_burst_start, radio_p25_trunk_burst_drop };
++#endif
++#if CONFIG_NXDN
++_Static_assert((int)RADIO_NXDNT_WAIT == (int)TRUNK_WAIT && (int)RADIO_NXDNT_GO == (int)TRUNK_GO &&
++	       (int)RADIO_NXDNT_FAIL == (int)TRUNK_FAIL && (int)RADIO_NXDNT_WHY_NONE == 0, "NXDN's trunk contract");
++static const trunk_ops_t nxdn_trunk_ops = { radio_nxdn_trunk_tx, radio_nxdn_trunk_ptt, radio_nxdn_trunk_talk,
++	radio_nxdn_trunk_talk_end, radio_nxdn_trunk_burst_hz, radio_nxdn_trunk_burst_start, radio_nxdn_trunk_burst_drop };
++#endif
++
++// The trunked channel running now, NULL none
++static const trunk_ops_t *trunk_ops(void)
++{
++#if CONFIG_P25_TRUNK
++	if (radio_p25_trunked()) {
++		return &p25_trunk_ops;
++	}
++#endif
++#if CONFIG_NXDN
++	if (radio_nxdn_trunked()) {
++		return &nxdn_trunk_ops;
++	}
++#endif
++	return NULL;
++}
++#endif
++
+ static uint8_t tx_check(const radio_sm_t *sm)
+ {
+ 	const channel_t *ch = &sm->view.ch;
+ 	// A trunked channel's frequencies are the system's: checked when it keys (p25t_tick, p25t_burst)
++#if AIR_TRUNK
++	const trunk_ops_t *tk = trunk_ops();
++	bool trunk = ch->kind == CODEPLUG_KIND_P25_TRUNK || tk != NULL;
++#else
+ 	bool trunk = ch->kind == CODEPLUG_KIND_P25_TRUNK;
++#endif
+ 	if (sm->set.tx_inhibit || (!trunk && !tx_limit_allows(ch->tx_hz))) {
+ 		return TXDENY_INHIBIT;		// the test TX limit denies PTT as the inhibit does
+ 	}
+@@ -1287,8 +1336,8 @@ static uint8_t tx_check(const radio_sm_t *sm)
+ 	}
+ 	if (trunk) {
+ 		// Its tag's receive only, the system's listen only, or no follower with a transmit side (p25-trunking.md 7)
+-#if CONFIG_P25_TRUNK
+-		if (ch->rx_only || !radio_p25_trunk_tx()) {
++#if AIR_TRUNK
++		if (ch->rx_only || tk == NULL || !tk->tx()) {
+ 			return TXDENY_RX_ONLY;
+ 		}
+ #else
+@@ -6303,7 +6352,7 @@ static void air_stop(radio_sm_t *sm)
+ 		board.radio->tx_off();
+ 	}
+ 	sm->air_tx = false;
+-#if CONFIG_P25_TRUNK
++#if AIR_TRUNK
+ 	sm->p25_req = sm->p25_talk = false;
+ #endif
+ #if CONFIG_P25
+@@ -6438,17 +6487,22 @@ static void air_apply(radio_sm_t *sm)
+ }
+ #endif
+ 
+-#if CONFIG_P25_TRUNK
+-// --- P25 trunked (docs/spec/p25-trunking.md 7): PTT asks the follower for a voice channel; it keys there on the grant.
++#if AIR_TRUNK
++// --- P25 and NXDN trunked (docs/spec/p25-trunking.md 7, nxdn-trunking.md 4): PTT asks the follower for a voice channel; it keys there on the grant.
+ // Between calls the follower's inbound bursts (registration, affiliation, requests) go out on the control channel's
+ // inbound frequency through the same engine and checks ---
+ 
+ // PTT on a trunked channel, tx_check passed
+ static void p25t_ptt(radio_sm_t *sm)
+ {
+-	uint8_t why = radio_p25_trunk_ptt(true);
+-	if (why != RADIO_P25T_WHY_NONE) {
+-		sm->view.p25.twhy = why;	// (the next poll keeps it)
++	const trunk_ops_t *tk = trunk_ops();
++	uint8_t why = tk != NULL ? tk->ptt(true) : 1;
++	if (why != 0) {
++#if CONFIG_P25_TRUNK
++		if (tk == &p25_trunk_ops) {
++			sm->view.p25.twhy = why;	// (the next poll keeps it)
++		}
++#endif
+ 		deny(sm, TXDENY_TRUNK);
+ 		return;
+ 	}
+@@ -6464,57 +6518,62 @@ static bool p25t_tx_ok(uint32_t hz)
+ 
+ // One inbound block: the transmit checks a channel's PTT has (the inhibit, the battery, a hardware option, the band),
+ // then keyed for the burst alone. The view stays idle (no red LED, no TX timer); air_tick switches off at its end
+-static void p25t_burst(radio_sm_t *sm, uint32_t hz)
++static void p25t_burst(radio_sm_t *sm, const trunk_ops_t *tk, uint32_t hz)
+ {
+ 	static const subtone_t none = { TONE_NONE, 0 };
++	const radio_air_ops_t *o = air_ops(sm);
+ 
+ 	if (sm->set.tx_inhibit || !p25t_tx_ok(hz) || board_hwopt_pending() != NULL || sm->batt.level == BATT_CRITICAL ||
+ 	    sm->view.ch.rx_only) {
+-		radio_p25_trunk_burst_drop();
++		tk->burst_drop();
+ 		return;
+ 	}
+-	if (!radio_p25_trunk_burst_start()) {
+-		radio_p25_tx_abort();
+-		sm->air_tx = radio_p25_tx_state() != AIR_TX_IDLE;
++	if (!tk->burst_start()) {
++		o->tx_abort();
++		sm->air_tx = o->tx_state() != AIR_TX_IDLE;
+ 		return;
+ 	}
+ 	sm->air_tx = true;
+ 	if (!key_tx(hz, RADIO_BW_12K5, sm->view.power, &none)) {
+-		radio_p25_tx_abort();		// AIR_TX_DONE follows: air_tick clears it
++		o->tx_abort();			// AIR_TX_DONE follows: air_tick clears it
+ 		return;
+ 	}
+ 	sm->air_keyed = true;
+-	radio_p25_tx_go();			// (false: AIR_TX_DONE already)
++	o->tx_go();				// (false: AIR_TX_DONE already)
+ }
+ 
+ // Every tick on a trunked channel: a request's grant keys the transmitter, its failure denies; bursts between calls.
+ // noinline: inlined, its locals (the keying's) land in the tick's frame and, with link time optimization, in the radio
+ // task's own, which is under the task's deepest path
+-static void __attribute__((noinline)) p25t_tick(radio_sm_t *sm, uint32_t now_ms)
++static void __attribute__((noinline)) p25t_tick(radio_sm_t *sm, const trunk_ops_t *tk, uint32_t now_ms)
+ {
+ 	if (sm->p25_req && !sm->air_tx) {
+ 		uint32_t hz = 0;
+-		uint8_t r = radio_p25_trunk_talk(&hz);
+-		if (r == RADIO_P25T_GO) {
++		uint8_t r = tk->talk(&hz);
++		if (r == (uint8_t)TRUNK_GO) {
+ 			sm->p25_req = false;
+ 			if (!sm->ptt) {
+-				radio_p25_trunk_talk_end();	// released meanwhile
++				tk->talk_end();	// released meanwhile
+ 			} else if (!p25t_tx_ok(hz)) {
+-				radio_p25_trunk_talk_end();
++				tk->talk_end();
+ 				deny(sm, TXDENY_BAND);
+ 			} else {
+ 				sm->p25_talk = true;
+ 				air_key(sm, now_ms, hz);
+ 				if (!sm->air_tx) {
+ 					sm->p25_talk = false;	// refused before the engine began: no AIR_TX_DONE to end it
+-					radio_p25_trunk_talk_end();
++					tk->talk_end();
+ 				}
+ 			}
+ 			changed(sm);
+-		} else if (r == RADIO_P25T_FAIL) {
++		} else if (r == (uint8_t)TRUNK_FAIL) {
+ 			sm->p25_req = false;
+-			radio_p25_trunk_ptt(false);
+-			radio_p25_poll(&sm->view.p25);	// its twhy now
++			tk->ptt(false);
++#if CONFIG_P25_TRUNK
++			if (tk == &p25_trunk_ops) {
++				radio_p25_poll(&sm->view.p25);	// its twhy now
++			}
++#endif
+ 			if (sm->ptt) {
+ 				deny(sm, TXDENY_TRUNK);
+ 			}
+@@ -6522,9 +6581,9 @@ static void __attribute__((noinline)) p25t_tick(radio_sm_t *sm, uint32_t now_ms)
+ 		}
+ 	}
+ 	if (!sm->air_tx && sm->view.state != RS_TX) {
+-		uint32_t hz = radio_p25_trunk_burst_hz();
++		uint32_t hz = tk->burst_hz();
+ 		if (hz != 0) {
+-			p25t_burst(sm, hz);
++			p25t_burst(sm, tk, hz);
+ 		}
+ 	}
+ }
+@@ -6546,10 +6605,12 @@ static void air_tick(radio_sm_t *sm, uint32_t now_ms)
+ 		}
+ 		o->tx_clear();
+ 		sm->air_tx = false;
+-#if CONFIG_P25_TRUNK
++#if AIR_TRUNK
+ 		if (sm->p25_talk) {
+ 			sm->p25_talk = false;
+-			radio_p25_trunk_talk_end();	// back to the control channel
++			if (trunk_ops() != NULL) {
++				trunk_ops()->talk_end();	// back to the control channel
++			}
+ 		}
+ #endif
+ 		air_apply(sm);
+@@ -6562,9 +6623,9 @@ static void air_tick(radio_sm_t *sm, uint32_t now_ms)
+ 		}
+ 		changed(sm);
+ 	}
+-#if CONFIG_P25_TRUNK
+-	if (radio_p25_trunked()) {
+-		p25t_tick(sm, now_ms);
++#if AIR_TRUNK
++	if (trunk_ops() != NULL) {
++		p25t_tick(sm, trunk_ops(), now_ms);
+ 	}
+ #endif
+ 	if (sm->air_tx || sm->view.state == RS_TX || sm->view.state == RS_TX_DENIED) {
+@@ -6712,8 +6773,8 @@ static void ptt_down(radio_sm_t *sm, uint32_t now_ms)
+ #endif
+ #if CONFIG_AIR
+ 	if (air_mode(sm->view.ch.mode)) {
+-#if CONFIG_P25_TRUNK
+-		if (radio_p25_trunked()) {
++#if AIR_TRUNK
++		if (trunk_ops() != NULL) {
+ 			p25t_ptt(sm);		// the grant keys it (p25t_tick)
+ 			return;
+ 		}
+@@ -6796,9 +6857,9 @@ static void ptt_release(radio_sm_t *sm, bool roger, uint32_t now_ms)
+ 	if (sm->host_audio) {
+ 		roger = false;		// the host sends its own audio, tones included
+ 	}
+-#if CONFIG_P25_TRUNK
+-	if (radio_p25_trunked()) {
+-		radio_p25_trunk_ptt(false);	// a request not granted yet is dropped
++#if AIR_TRUNK
++	if (trunk_ops() != NULL) {
++		trunk_ops()->ptt(false);	// a request not granted yet is dropped
+ 		sm->p25_req = false;
+ 	}
+ #endif
+diff --git a/core/radio/radio_sm.h b/core/radio/radio_sm.h
+index cf4eec6..086bfbb 100644
+--- a/core/radio/radio_sm.h
++++ b/core/radio/radio_sm.h
+@@ -343,12 +343,10 @@ typedef struct {
+ 	bool air_keyed;			// board.radio->tx() keyed for it (until tx_off)
+ 	uint32_t air_permit_ms;		// the talk permit before keying started (PTT held, not keyed yet), 0: none
+ #endif
+-#if CONFIG_P25
+-#if CONFIG_P25_TRUNK
+-	bool p25_req;			// PTT on a trunked channel: a voice request waits for its grant
++#if CONFIG_P25_TRUNK || CONFIG_NXDN
++	bool p25_req;			// PTT on a trunked channel (P25 or NXDN): a voice request waits for its grant
+ 	bool p25_talk;			// the transmission runs on the voice channel granted to us
+ #endif
+-#endif
+ #if CONFIG_AIR_RAW
+ 	bool air_bench;			// the debug link's air interface bench has the modem (RREQ_AIR_BENCH)
+ 	bool bench_keyed;		// ... and the transmitter keyed for it (RREQ_AIR_TX)
+diff --git a/core/ui/lang/es.po b/core/ui/lang/es.po
+index 9a2b4ab..8e4a6a8 100644
+--- a/core/ui/lang/es.po
++++ b/core/ui/lang/es.po
+@@ -5237,3 +5237,43 @@ msgstr "Clave AES-256"
+ 
+ msgid "Load AES-256 keys with the CPS"
+ msgstr "Carga las claves AES-256 en el CPS"
++
++#: core/ui/ui_menus.c
++msgctxt "CHAN_LABEL_TRUNK"
++msgid "Trunk"
++msgstr "Troncal"
++
++#: core/ui/ui_menus.c
++msgctxt "CHAN_VALUE_TRUNK_ALL"
++msgid "All groups"
++msgstr "Todos los grupos"
++
++#: core/ui/ui_menus.c
++msgctxt "CHAN_VALUE_TRUNK_GROUP"
++msgid "Group"
++msgstr "Grupo"
++
++#: core/ui/ui_screens.c
++msgctxt "QUICK_LABEL_TRUNK"
++msgid "Trunk"
++msgstr "Tronc"
++
++#: core/ui/ui_screens.c
++msgctxt "QUICK_VALUE_TRUNK_GROUP"
++msgid "Grp"
++msgstr "Grp"
++
++#: core/ui/ui_app.c
++msgctxt "QUICK_TOAST_TRUNK_ALL"
++msgid "Trunk: every group"
++msgstr "Troncal: todos los grupos"
++
++#: core/ui/ui_app.c
++msgctxt "QUICK_TOAST_TRUNK_GROUP"
++msgid "Trunk: this group"
++msgstr "Troncal: este grupo"
++
++#: core/ui/ui_app.c
++msgctxt "QUICK_TOAST_TRUNK_OFF"
++msgid "Trunk off"
++msgstr "Troncal apagado"
+diff --git a/core/ui/lang/fr.po b/core/ui/lang/fr.po
+index 61d18c9..57ba942 100644
+--- a/core/ui/lang/fr.po
++++ b/core/ui/lang/fr.po
+@@ -5231,3 +5231,43 @@ msgstr "Zone non lue radio"
+ msgctxt "SHARE_ERR_OFFER_GONE"
+ msgid "The offer is gone"
+ msgstr "L'offre a expiré"
++
++#: core/ui/ui_menus.c
++msgctxt "CHAN_LABEL_TRUNK"
++msgid "Trunk"
++msgstr "Trunking"
++
++#: core/ui/ui_menus.c
++msgctxt "CHAN_VALUE_TRUNK_ALL"
++msgid "All groups"
++msgstr "Tous les groupes"
++
++#: core/ui/ui_menus.c
++msgctxt "CHAN_VALUE_TRUNK_GROUP"
++msgid "Group"
++msgstr "Groupe"
++
++#: core/ui/ui_screens.c
++msgctxt "QUICK_LABEL_TRUNK"
++msgid "Trunk"
++msgstr "Trunk"
++
++#: core/ui/ui_screens.c
++msgctxt "QUICK_VALUE_TRUNK_GROUP"
++msgid "Grp"
++msgstr "Grp"
++
++#: core/ui/ui_app.c
++msgctxt "QUICK_TOAST_TRUNK_ALL"
++msgid "Trunk: every group"
++msgstr "Trunk : tous les groupes"
++
++#: core/ui/ui_app.c
++msgctxt "QUICK_TOAST_TRUNK_GROUP"
++msgid "Trunk: this group"
++msgstr "Trunk : ce groupe"
++
++#: core/ui/ui_app.c
++msgctxt "QUICK_TOAST_TRUNK_OFF"
++msgid "Trunk off"
++msgstr "Trunk désactivé"
+diff --git a/core/ui/lang/it.po b/core/ui/lang/it.po
+index 333ea92..996961f 100644
+--- a/core/ui/lang/it.po
++++ b/core/ui/lang/it.po
+@@ -5231,3 +5231,43 @@ msgstr "Zona non leggibile qui"
+ msgctxt "SHARE_ERR_OFFER_GONE"
+ msgid "The offer is gone"
+ msgstr "L'offerta non c'è più"
++
++#: core/ui/ui_menus.c
++msgctxt "CHAN_LABEL_TRUNK"
++msgid "Trunk"
++msgstr "Trunking"
++
++#: core/ui/ui_menus.c
++msgctxt "CHAN_VALUE_TRUNK_ALL"
++msgid "All groups"
++msgstr "Tutti i gruppi"
++
++#: core/ui/ui_menus.c
++msgctxt "CHAN_VALUE_TRUNK_GROUP"
++msgid "Group"
++msgstr "Gruppo"
++
++#: core/ui/ui_screens.c
++msgctxt "QUICK_LABEL_TRUNK"
++msgid "Trunk"
++msgstr "Trunk"
++
++#: core/ui/ui_screens.c
++msgctxt "QUICK_VALUE_TRUNK_GROUP"
++msgid "Grp"
++msgstr "Grp"
++
++#: core/ui/ui_app.c
++msgctxt "QUICK_TOAST_TRUNK_ALL"
++msgid "Trunk: every group"
++msgstr "Trunk: tutti i gruppi"
++
++#: core/ui/ui_app.c
++msgctxt "QUICK_TOAST_TRUNK_GROUP"
++msgid "Trunk: this group"
++msgstr "Trunk: questo gruppo"
++
++#: core/ui/ui_app.c
++msgctxt "QUICK_TOAST_TRUNK_OFF"
++msgid "Trunk off"
++msgstr "Trunk spento"
+diff --git a/core/ui/lang/zh.po b/core/ui/lang/zh.po
+index 5b693c9..37f3380 100644
+--- a/core/ui/lang/zh.po
++++ b/core/ui/lang/zh.po
+@@ -5233,3 +5233,43 @@ msgstr "本机无法识别该区域"
+ msgctxt "SHARE_ERR_OFFER_GONE"
+ msgid "The offer is gone"
+ msgstr "该邀请已失效"
++
++#: core/ui/ui_menus.c
++msgctxt "CHAN_LABEL_TRUNK"
++msgid "Trunk"
++msgstr "集群"
++
++#: core/ui/ui_menus.c
++msgctxt "CHAN_VALUE_TRUNK_ALL"
++msgid "All groups"
++msgstr "所有组"
++
++#: core/ui/ui_menus.c
++msgctxt "CHAN_VALUE_TRUNK_GROUP"
++msgid "Group"
++msgstr "本组"
++
++#: core/ui/ui_screens.c
++msgctxt "QUICK_LABEL_TRUNK"
++msgid "Trunk"
++msgstr "集群"
++
++#: core/ui/ui_screens.c
++msgctxt "QUICK_VALUE_TRUNK_GROUP"
++msgid "Grp"
++msgstr "本组"
++
++#: core/ui/ui_app.c
++msgctxt "QUICK_TOAST_TRUNK_ALL"
++msgid "Trunk: every group"
++msgstr "集群：所有组"
++
++#: core/ui/ui_app.c
++msgctxt "QUICK_TOAST_TRUNK_GROUP"
++msgid "Trunk: this group"
++msgstr "集群：本组"
++
++#: core/ui/ui_app.c
++msgctxt "QUICK_TOAST_TRUNK_OFF"
++msgid "Trunk off"
++msgstr "集群关闭"
+diff --git a/core/ui/ui_app.c b/core/ui/ui_app.c
+index 681424b..41550f1 100644
+--- a/core/ui/ui_app.c
++++ b/core/ui/ui_app.c
+@@ -1618,6 +1618,19 @@ static void quick_activate(int tile)
+ 		}
+ 		break;
+ 	}
++#if CONFIG_NXDN
++	case QT_NXDN_TRUNK: {
++		// Off, our group, every group: the VFO's RX frequency is then the control channel
++		uint8_t next = (uint8_t)((view->nxdn.trunk + 1u) % (RADIO_NXDN_TRUNK_ALL + 1u));
++		if (!ui_svc_nxdn_trunk(next))
++			quick_unavailable(kind);
++		else
++			ui_toast(next == RADIO_NXDN_TRUNK_ALL ? TR(QUICK_TOAST_TRUNK_ALL, "Trunk: every group") :
++				next == RADIO_NXDN_TRUNK_GROUP ? TR(QUICK_TOAST_TRUNK_GROUP, "Trunk: this group") :
++				TR(QUICK_TOAST_TRUNK_OFF, "Trunk off"));
++		break;
++	}
++#endif
+ 	case QT_MONITOR:
+ 		if (!ui_svc_monitor(!view->monitor))
+ 			quick_unavailable(kind);
+diff --git a/core/ui/ui_menus.c b/core/ui/ui_menus.c
+index 1519c59..204ddf7 100644
+--- a/core/ui/ui_menus.c
++++ b/core/ui/ui_menus.c
+@@ -2518,7 +2518,7 @@ static const ui_scr_def_t chlist_screen = {
+ // ======================= One channel's settings, edited in place (ui.md 2.1) =======================
+ // Without CONFIG_CHANNEL_EDIT the rows are read only and OK goes to the channel
+ 
+-enum { CE_NAME, CE_NUMBER, CE_MODE, CE_CODE, CE_RATE, CE_DEST, CE_RX, CE_TX, CE_POWER, CE_RX_ONLY, CE_BW, CE_RX_TONE, CE_TX_TONE, CE_VOX,
++enum { CE_NAME, CE_NUMBER, CE_MODE, CE_CODE, CE_RATE, CE_DEST, CE_TRUNK, CE_RX, CE_TX, CE_POWER, CE_RX_ONLY, CE_BW, CE_RX_TONE, CE_TX_TONE, CE_VOX,
+        CE_BURST,
+        CE_ANI, CE_ANI_SEND, CE_ANI_ID, CE_ANI_DECODE,	// an FM channel's signaling ID (MDC-1200): its type, when it is sent, the ID, decode
+        CE_CC, CE_TS, CE_CONTACT, CE_LIST, CE_ID, CE_DMO, CE_BEEP, CE_ALIAS1, CE_ALIAS2, CE_TOT, CE_SCAN, CE_ECO,
+@@ -2649,6 +2649,7 @@ static bool ced_air_changed(uint8_t r)
+ 	if (ced_is_nxdn(&ced_ch))
+ 		return r == CE_CODE ? a->nxdn.rx_ran != b->nxdn.rx_ran || a->nxdn.tx_ran != b->nxdn.tx_ran :
+ 		       r == CE_RATE ? a->nxdn.rate9600 != b->nxdn.rate9600 :
++		       r == CE_TRUNK ? a->nxdn.trunk != b->nxdn.trunk || a->nxdn.trunk_all != b->nxdn.trunk_all :
+ 		       r == CE_AES && (a->nxdn.aes != b->nxdn.aes || a->nxdn.kid != b->nxdn.kid);
+ #endif
+ #if CONFIG_YSF
+@@ -2682,7 +2683,7 @@ static bool ced_changed(uint8_t r)
+ 	if (r >= CE_ZONES)
+ 		return false;
+ #if CONFIG_P25 || CONFIG_NXDN || CONFIG_YSF
+-	if (r == CE_CODE || r == CE_RATE || r == CE_DEST ||
++	if (r == CE_CODE || r == CE_RATE || r == CE_DEST || r == CE_TRUNK ||
+ 	    (r == CE_AES && (ced_is_p25(&ced_ch) || ced_is_nxdn(&ced_ch))))
+ 		return ced_air_changed(r);
+ #endif
+@@ -2770,6 +2771,8 @@ static void ced_air_read(uint16_t number, const channel_t *ch)
+ 			c->tx_ran = v->nxdn.tx_ran;
+ 			c->aes = ch->vfo_nxdn_key != 0;
+ 			c->kid = c->aes ? ch->vfo_nxdn_key - 1u : 0;
++			c->trunk = v->nxdn.trunk != RADIO_NXDN_TRUNK_OFF;
++			c->trunk_all = v->nxdn.trunk == RADIO_NXDN_TRUNK_ALL;
+ 		} else if (nxdn_conv_load(number, ch, &cfg)) {
+ 			*c = cfg.conv;
+ 		} else {
+@@ -3060,8 +3063,8 @@ static void ced_build(void)
+ 		// M17: its CAN and destination only (its source is the radio-wide call sign)
+ 		bool air_row = air && ((!m17 && ((r == CE_CONTACT && CONFIG_DMR) || r == CE_ID)) || (r == CE_DMO && p25) ||
+ 				       (r == CE_CODE && !into) || (r == CE_RATE && (nxdn || ysf) && !into) ||
+-				       (r == CE_DEST && (ysf || m17) && !into));
+-		if (r == CE_CODE || r == CE_RATE || r == CE_DEST ? !air_row : air && (fm_only || (dmr_only && !air_row)))
++				       (r == CE_DEST && (ysf || m17) && !into) || (r == CE_TRUNK && nxdn && !into));
++		if (r == CE_CODE || r == CE_RATE || r == CE_DEST || r == CE_TRUNK ? !air_row : air && (fm_only || (dmr_only && !air_row)))
+ 			continue;
+ 		if (!air_row && ((fm_only && dmr) || (tone && listen) || (dmr_only && !dmr) ||
+ 				 (am && (tone || r == CE_VOX || r == CE_BURST || r == CE_TX || r == CE_RX_ONLY || r == CE_POWER ||
+@@ -3282,7 +3285,7 @@ static void chinfo_item(uint16_t i, ui_item_t *it)
+ {
+ 	static const tr_id_t labels[CE_COUNT] = { TRN(LABEL_NAME, "Name"), TRN(CHAN_LABEL_NUMBER, "Number"),
+ 		TRN(LABEL_MODE, "Mode"), TRX(CHAN_LABEL_NAC, "NAC"), TRN(CHAN_LABEL_RATE, "Rate"),
+-		TRN(CHAN_LABEL_DEST, "Destination"), TRX(CHAN_LABEL_RX, "RX"), TRX(CHAN_LABEL_TX, "TX"), TRN(LABEL_POWER, "Power"),
++		TRN(CHAN_LABEL_DEST, "Destination"), TRN(CHAN_LABEL_TRUNK, "Trunk"), TRX(CHAN_LABEL_RX, "RX"), TRX(CHAN_LABEL_TX, "TX"), TRN(LABEL_POWER, "Power"),
+ 		TRN(WORD_RX_ONLY, "RX only"), TRN(CHAN_LABEL_BANDWIDTH, "Bandwidth"),
+ 		TRN(CHAN_LABEL_RX_TONE, "RX CTCSS/DCS"), TRN(CHAN_LABEL_TX_TONE, "TX CTCSS/DCS"), TRX(WORD_VOX, "VOX"),
+ 		TRN(WORD_TONE_BURST, "Tone burst"),
+@@ -3383,6 +3386,13 @@ static void chinfo_item(uint16_t i, ui_item_t *it)
+ 		sb_str(&b, ced_air.nxdn.rate9600 ? "9600 bit/s" : "4800 bit/s");
+ #endif
+ 		break;
++#if CONFIG_NXDN
++	case CE_TRUNK:
++		// Type-C trunking (nxdn-trunking.md): the RX frequency is the control channel
++		sb_str(&b, !ced_air.nxdn.trunk ? TR(VALUE_OFF, "Off") : ced_air.nxdn.trunk_all ?
++			TR(CHAN_VALUE_TRUNK_ALL, "All groups") : TR(CHAN_VALUE_TRUNK_GROUP, "Group"));
++		break;
++#endif
+ #if CONFIG_YSF || CONFIG_M17
+ 	case CE_DEST:
+ #if CONFIG_M17
+@@ -3611,7 +3621,8 @@ static bool ced_write(uint16_t num, bool as_new)
+ 	if (ced_is_p25(&ced_ch) || ced_is_nxdn(&ced_ch) || ced_is_ysf(&ced_ch) || ced_is_m17(&ced_ch)) {
+ 		if (ced_ch.kind != ced_orig.kind || ced_ch.mode != ced_orig.mode)
+ 			return ui_svc_write_channel_air_own(num, &ced_ch, ced_src, &ced_air);
+-		if (ced_air_changed(CE_CODE) || ced_air_changed(CE_RATE) || ced_air_changed(CE_DEST) || ced_air_changed(CE_AES))
++		if (ced_air_changed(CE_CODE) || ced_air_changed(CE_RATE) || ced_air_changed(CE_DEST) || ced_air_changed(CE_TRUNK) ||
++		    ced_air_changed(CE_AES))
+ 			return ui_svc_write_channel_air(num, &ced_ch, ced_src, &ced_air);
+ 	}
+ #endif
+@@ -4186,6 +4197,13 @@ static void chinfo_select(uint16_t i, bool hold)
+ #endif
+ 		break;
+ #endif
++#if CONFIG_NXDN
++	case CE_TRUNK:
++		// Off, our group, every group
++		ced_air.nxdn.trunk_all = ced_air.nxdn.trunk && !ced_air.nxdn.trunk_all;
++		ced_air.nxdn.trunk = !ced_air.nxdn.trunk || ced_air.nxdn.trunk_all;
++		break;
++#endif
+ #endif
+ 	case CE_TS: c->timeslot = c->timeslot == 2 ? 1 : 2; break;
+ #if CONFIG_DMR
+diff --git a/core/ui/ui_screens.c b/core/ui/ui_screens.c
+index 4078caa..c045a7b 100644
+--- a/core/ui/ui_screens.c
++++ b/core/ui/ui_screens.c
+@@ -4031,6 +4031,10 @@ uint8_t ui_quick_kind(int pos, const radio_view_t *v)
+ 	uint8_t kind = v->ch.mode == RADIO_MODE_DMR ? dmr[pos] : air_mode ? air[pos] : fm[pos];
+ 	if (air_mode && v->ch.mode == RADIO_MODE_YSF && pos == 7)
+ 		kind = QT_YSF_DEST;
++#if CONFIG_NXDN
++	if (v->vfo && v->ch.mode == RADIO_MODE_NXDN && pos == 8)
++		return QT_NXDN_TRUNK;	// in place of Bright (Settings keeps it)
++#endif
+ 	if (v->vfo && (kind == QT_MONITOR || kind == QT_PRIVACY || (air_mode && kind == QT_VOX)))
+ 		return QT_SPLIT;	// the VFO's TX frequency; Monitor stays on its key, privacy on channels
+ 	return kind;
+@@ -4071,6 +4075,7 @@ bool ui_quick_tile(int tile, const radio_view_t *v, const ui_state_t *s, char *l
+ 		[QT_AIR_CODE] = TRN(QUICK_LABEL_CODE, "Code"),
+ 		[QT_AIR_TG] = TRX(QUICK_LABEL_TG, "TG"),
+ 		[QT_YSF_DEST] = TRN(QUICK_LABEL_DEST, TEXT_ALT_OPEN "Destination" TEXT_ALT_NEXT "Dest" TEXT_ALT_CLOSE),
++		[QT_NXDN_TRUNK] = TRN(QUICK_LABEL_TRUNK, "Trunk"),
+ 	};
+ 	uint8_t kind = ui_quick_kind(tile, v);
+ 	bool editing = s->quick_edit && s->quick_focus == tile;
+@@ -4221,6 +4226,16 @@ bool ui_quick_tile(int tile, const radio_view_t *v, const ui_state_t *s, char *l
+ 		}
+ #endif
+ 		return false;
++#if CONFIG_NXDN
++	case QT_NXDN_TRUNK:
++		sb_str(&b, v->nxdn.trunk == RADIO_NXDN_TRUNK_ALL ? TR(QUICK_VALUE_ALL, "All") :
++			v->nxdn.trunk == RADIO_NXDN_TRUNK_GROUP ? TR(QUICK_VALUE_TRUNK_GROUP, "Grp") : TR(VALUE_OFF, "Off"));
++		if (v->nxdn.tstate == RADIO_NXDN_TS_UNREG)
++			sb_chr(&b, '?');	// not registered (yet)
++		else if (v->nxdn.tstate == RADIO_NXDN_TS_VOICE || v->nxdn.tstate == RADIO_NXDN_TS_TALK)
++			sb_chr(&b, '*');	// on a voice channel
++		return true;
++#endif
+ 	case QT_YSF_DEST:
+ #if CONFIG_YSF
+ 		if (v->temp & RADIO_TEMP_AIR)
+diff --git a/core/ui/ui_screens.h b/core/ui/ui_screens.h
+index a48e642..a4b37bd 100644
+--- a/core/ui/ui_screens.h
++++ b/core/ui/ui_screens.h
+@@ -150,6 +150,7 @@ enum {
+ 	QT_AIR_CODE,		// P25 NAC, NXDN RAN or YSF DG-ID (tile 2 on those modes)
+ 	QT_AIR_TG,		// the talk group PTT calls (P25/NXDN, tile 8)
+ 	QT_YSF_DEST,		// the YSF destination PTT calls (tile 8)
++	QT_NXDN_TRUNK,		// the NXDN VFO's Type-C trunking: off, our group, every group (tile 9, nxdn-trunking.md)
+ };
+ // The tile kind at position 0..8 (keys 1..9) for this channel or the VFO
+ uint8_t ui_quick_kind(int pos, const radio_view_t *v);
+diff --git a/core/ui/ui_svc.h b/core/ui/ui_svc.h
+index b7d5f59..52a4b1a 100644
+--- a/core/ui/ui_svc.h
++++ b/core/ui/ui_svc.h
+@@ -89,6 +89,8 @@ bool ui_svc_dmr_color_code(uint8_t cc);
+ // (P25/NXDN) or destination (YSF) PTT calls; false: not a mode or channel these apply to (a trunked channel's too)
+ bool ui_svc_air_code(uint32_t code);
+ bool ui_svc_air_target(uint32_t id);
++// The NXDN VFO's trunking (RADIO_NXDN_TRUNK_*); false: not an NXDN VFO, or not in this build
++bool ui_svc_nxdn_trunk(uint8_t mode);
+ bool ui_svc_ysf_destination(const char *dest);
+ // The VFO's SFR role (CONFIG_SFR, sfr.md 4): a as a channel's SFR byte A; false: not in this build
+ bool ui_svc_vfo_sfr(uint8_t a);
+diff --git a/core/ui/ui_svc_radio.c b/core/ui/ui_svc_radio.c
+index 93e6aab..39bd0e9 100644
+--- a/core/ui/ui_svc_radio.c
++++ b/core/ui/ui_svc_radio.c
+@@ -248,6 +248,23 @@ bool ui_svc_air_target(uint32_t id)
+ 	return false;
+ }
+ 
++bool ui_svc_nxdn_trunk(uint8_t mode)
++{
++#if CONFIG_NXDN
++	radio_get_view(&ui_svc_view);
++	if (ui_svc_view.hotspot || !ui_svc_view.vfo || ui_svc_view.ch.mode != RADIO_MODE_NXDN)
++		return false;
++	radio_nxdn_settings_t s;
++	radio_nxdn_settings(&s);
++	s.trunk = mode;
++	radio_req_nxdn_quick(&s, RADIO_NXDN_QUICK_TRUNK);
++	return true;
++#else
++	(void)mode;
++	return false;
++#endif
++}
++
+ bool ui_svc_ysf_destination(const char *dest)
+ {
+ #if CONFIG_YSF
+diff --git a/core/ui/ui_svc_storage.c b/core/ui/ui_svc_storage.c
+index 021b382..cde94e6 100644
+--- a/core/ui/ui_svc_storage.c
++++ b/core/ui/ui_svc_storage.c
+@@ -1038,6 +1038,7 @@ static bool nxdn_save_now(uint16_t number, const channel_t *ch, const nxdn_conv_
+ 	radio_nxdn_settings(&s);
+ 	nxdn_conv_t conv = { .rate9600 = s.rate9600, .rx_ran = s.rx_ran, .tx_ran = s.tx_ran,
+ 			     .squelch = s.rx_gid != 0 ? NXDN_SQUELCH_SELECTIVE : NXDN_SQUELCH_RAN,
++			     .trunk = s.trunk != RADIO_NXDN_TRUNK_OFF, .trunk_all = s.trunk == RADIO_NXDN_TRUNK_ALL,
+ 			     .aes = ch->vfo_nxdn_key != 0,
+ 			     .kid = ch->vfo_nxdn_key == 0 ? 0 : ch->vfo_nxdn_key - 1u };
+ 	uint8_t variant = ch->vfo_digital & VFO_DIG_NXDN_MASK;
+diff --git a/core/ui/ui_svc_stub.c b/core/ui/ui_svc_stub.c
+index 1668992..3236933 100644
+--- a/core/ui/ui_svc_stub.c
++++ b/core/ui/ui_svc_stub.c
+@@ -31,6 +31,7 @@ WEAK bool ui_svc_dmr_timeslot(uint8_t ts) { (void)ts; return false; }
+ WEAK bool ui_svc_dmr_color_code(uint8_t cc) { (void)cc; return false; }
+ WEAK bool ui_svc_air_code(uint32_t code) { (void)code; return false; }
+ WEAK bool ui_svc_air_target(uint32_t id) { (void)id; return false; }
++WEAK bool ui_svc_nxdn_trunk(uint8_t mode) { (void)mode; return false; }
+ WEAK bool ui_svc_ysf_destination(const char *dest) { (void)dest; return false; }
+ WEAK bool ui_svc_vfo_sfr(uint8_t a) { (void)a; return false; }
+ WEAK bool ui_svc_mode(uint8_t mode) { (void)mode; return false; }
+diff --git a/docs/spec/nxdn-codeplug.md b/docs/spec/nxdn-codeplug.md
+index ba01d14..d4da962 100644
+--- a/docs/spec/nxdn-codeplug.md
++++ b/docs/spec/nxdn-codeplug.md
+@@ -36,6 +36,8 @@ The tag ([channel-modes.md](channel-modes.md) 2): no system, flag bit 0 transmit
+ | 3 | 1 | Bit 0: AES-256 on ([air-encryption.md](air-encryption.md) 3): the channel sends encrypted and plays calls encrypted with its key. Bits 1-7: 0 |
+ | 4 | 1 | Key ID, 0 to 63, of the key in the radio's keyring; read only with bit 0 of byte 3 set |
+ 
++| 5-11 | 7 | Type-C trunking: trunked, follow every group, the channel plan ([nxdn-trunking.md](nxdn-trunking.md) 4). Shorter blocks are conventional; the radio writes octet 5 and keeps 6-11 |
++
+ A zeroed block, or none, is 9600 bit/s, RAN squelch, every RAN received and RAN 1 sent; with the tag's flag bit 0
+ clear, receive only. Both rates use 12.5 kHz channel settings ([nxdn.md](nxdn.md) 9). A block shorter than 5 octets (an
+ older codeplug) reads as clear.
+diff --git a/docs/spec/nxdn-trunking.md b/docs/spec/nxdn-trunking.md
+new file mode 100644
+index 0000000..437b087
+--- /dev/null
++++ b/docs/spec/nxdn-trunking.md
+@@ -0,0 +1,89 @@
++<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
++<!-- Copyright (c) 2026 lyra XE1POC -->
++
++# NXDN Type-C trunking
++
++An NXDN channel (or the NXDN VFO) marked trunked camps on a Type-C site's control channel, reads its CAC, follows
++the voice channel assignments it wants and comes back when the call's voice stops. Where the channel may transmit it
++also registers with the site and, on PTT, asks for a voice channel and transmits on the one assigned. Both rates
++(NXDN48 at 4800 bit/s, NXDN96 at 9600 bit/s) work the same way: the rate is the channel's and is used on the control
++channel and the voice channels alike.
++
++The firmware is `core/nxdn/nxdn_trunk.c` (the follower), `core/nxdn/nxdn_frame.c` (CAC and long CAC),
++`nxdn_rx.c` (control channel frames), `nxdn_call.c` and `nxdn_engine.c` (the inbound burst, RTCH on a traffic
++channel), `core/radio/radio_nxdn.c` (the radio side) and `core/radio/radio_sm.c` (PTT, the grant and the bursts, shared
++with P25 trunking). Section numbers are NXDN TS 1-A's.
++
++Status: host tests only (`tests/host/nxdnTest.c` testCac and testLongCac, `tests/host/nxdnTrunkTest.c`,
++`tests/host/uiFlowTest.c` "NXDN trunk"). **Not verified against a real Type-C site.** The coding of the CAC (CRC-16,
++puncturing, interleaving) agrees with DSD-FME's decoder bit for bit (its CRC check and puncture table); the long CAC,
++the inbound LICH and the message layouts follow SDRTrunk's decoder. Nothing here has been checked against a site's
++own receiver: test first on a system you are authorized to use.
++
++## 1. What it does
++
++| Item | Behaviour |
++|---|---|
++| Control channel | The channel's RX frequency; its TX frequency is the control channel's inbound one. One per channel |
++| Frames taken | LICH RF = RCCH, USC = CAC, direction outbound. RDCH/RTCH as before |
++| CAC (outbound) | 155 bits (SR 8, message 144, 3 spare), CRC-16 x16+x12+x5+1 (register loaded with ones), 4 tail bits, K = 5 code, of each 14 coded bits the 4th and 12th erased (300 bits), 25 x 12 interleaver, behind the LICH |
++| Long CAC (inbound) | 136 bits (SR 8, message 128), the same CRC-16, 4 tail bits, of each 26 coded bits the 2nd, 8th, 10th, 12th and 20th erased (252 bits), 21 x 12 interleaver. LICH 0x08 (RCCH, long CAC, inbound). A burst is the preamble, FSW, LICH and the long CAC (144 symbols), sent as soon as the radio can |
++| RAN | The channel's RX RAN filters the CAC's SR (0: any); bursts carry the TX RAN |
++| Messages read | SITE_INFO (0x18): location ID and channel access information. VCALL_ASSGN (0x04), VCALL_ASSGN_DUP (0x05). REG_RESP (0x20). VCALL_RESP (0x01) |
++| Messages sent | REG_REQ (0x20): the location ID's first 19 bits, our unit, our group. VCALL_REQ (0x01): group or individual call, 4800 or 9600 EHR, our unit, the talk target |
++| Followed | Group calls to the channel's group, calls to all (65535), individual calls to our unit ID; with "every group" or digital monitor, every group call. While a voice request waits, no other call is followed |
++| Voice channel | Tuned at 12.5 kHz like a conventional channel; RTCH frames are taken; every call there plays |
++| Back to control | Listening: no voice for 1 s (also the grace for the first frame), or 120 s on one call. The call just left is not followed again for 1.5 s. Talking: when our transmission ends |
++
++## 2. Channel numbers to frequencies
++
++SITE_INFO bits 88-111 hold the channel access information: bit 88 RCN, 89-90 step, 91-93 base.
++
++| RCN | Assignment field | Receive | Transmit |
++|---|---|---|---|
++| 1 (DFA) | bandwidth (2 bits, 62-63), OFN (16 bits, 64-79), IFN (16 bits, 80-95) | base + OFN x step | base + IFN x step |
++| 0, or no SITE_INFO yet | channel number (10 bits, 62-71) | plan base + number x plan spacing | receive + the control channel's duplex offset (its TX minus its RX) |
++
++DFA base 1: 100 MHz, 2: 330 MHz, 3: 400 MHz, 4: 750 MHz (DSD-FME; SDRTrunk reads 4 as 450 MHz: to confirm on air);
++step 2: 1.25 kHz, 3: 3.125 kHz. Other values, or channel numbers without a plan: not followed (and a voice request
++assigned there fails).
++
++## 3. Transmitting
++
++| Step | Behaviour |
++|---|---|
++| Registration | On the control channel, once SITE_INFO is heard (or after 2 s), REG_REQ goes out; no answer in 1 s: sent again, 3 tries, then a new round after 10 s, doubled up to 60 s. REG_RESP causes 0x01, 0x04, 0x05, 0x21, 0x24, 0x25 register; others are refused and retried the same way |
++| PTT | Refused until registered ("Release PTT, try again"). Registered: VCALL_REQ goes out (from a voice channel heard, back to control first); 3 tries 1 s apart. VCALL_RESP 0x10: wait for the assignment; 0x30-0x3F: queued, up to 10 s; others: refused |
++| Grant | VCALL_ASSGN with our unit as source and our target as destination: the receiver goes to the voice channel and the radio transmits on its inbound frequency (section 2), RTCH, inbound, with the channel's RAN, unit and target, and AES when the channel has it |
++| End | PTT released: the release frame, then back to the control channel. Released before the grant: the request is dropped |
++| Transmit allowed | The channel (its tag) allows transmitting, has a TX frequency, a unit ID and the board transmits the rate; otherwise the channel listens only |
++
++## 4. The codeplug and the radio
++
++The NXDN conventional block (nxdn-codeplug.md 2) grows by seven octets. A block of 5 octets or fewer is conventional.
++
++| Offset | Size | Field |
++|---|---|---|
++| 5 | 1 | Bit 0: trunked (the RX frequency is the control channel). Bit 1: follow every group (read only with bit 0). Bits 2-7: 0 |
++| 6 | 4 | Plan base, Hz, little endian; 0 = no plan |
++| 10 | 2 | Plan spacing in 125 Hz; 0 = no plan |
++
++The radio writes octets 0-5 when it saves a channel; the tag rewrite keeps 6-11 (the plan is the Codeplug Editor's).
++The contact gives the group followed and called (a private contact: an individual call, no group followed). The unit
++ID is the channel's or the radio's (nxdn-codeplug.md 1).
++
++| Where | What |
++|---|---|
++| Codeplug Editor, NXDN channel | Trunked, Follow every group, Channel plan base, Channel plan spacing |
++| Radio, channel editor | Row **Trunk** under Rate: Off, Group, All groups (a press steps through them). Saved with the channel |
++| Radio, VFO quick menu (NXDN) | Tile 9 **Trunk** in place of Bright: Off, Grp, All. The VFO's RX frequency is the control channel, its TX frequency the inbound one, DFA only (no plan), the TG tile's group. The value ends in `?` while not registered and `*` on a voice channel. Saving the VFO as a channel keeps it |
++
++## 5. Limits
++
++- One control channel; no adjacent-site or alternate control channel hunt, no roaming.
++- Bursts go out when the radio is ready, not aligned to the outbound frame timing; a site that needs aligned random
++  access may miss some (they are sent again).
++- No group registration (GRP_REG_REQ), registration clearing, authentication, emergency, data, status or
++  short-message services. Late entry into our own granted channel only through the assignment.
++- Channel-number sites need the linear plan; a site whose numbers are not linear needs a per-channel table (not
++  implemented). The VFO has no plan.
+diff --git a/site/i18n/en.json b/site/i18n/en.json
+index d779558..b4baecd 100644
+--- a/site/i18n/en.json
++++ b/site/i18n/en.json
+@@ -2283,5 +2283,12 @@
+  "editor.m17.dest_help": "The call sign or reflector called, up to 9 characters. Blank or ALL: broadcast.",
+  "editor.m17.src": "Source call sign",
+  "editor.m17.src_help": "Your call sign, sent on every M17 transmission. Blank: the radio's name.",
+- "editor.problem.m17_call_chars": "Use up to 9 characters: A-Z, 0-9, - / . and space."
++ "editor.problem.m17_call_chars": "Use up to 9 characters: A-Z, 0-9, - / . and space.",
++ "editor.nxdn.trunk": "Trunked (Type-C): RX frequency is the control channel",
++ "editor.nxdn.trunk_help": "The radio camps on the control channel (RX frequency; TX frequency is its inbound one), follows voice channel assignments for the channel's group, all calls and calls to this radio, registers and requests a voice channel on PTT where the channel may transmit.",
++ "editor.nxdn.trunk_all": "Follow every group of the site",
++ "editor.nxdn.plan_base": "Channel plan base (no DFA)",
++ "editor.nxdn.plan_help": "For sites that send channel numbers: frequency = base + number x spacing. Leave 0 for sites with direct frequency assignment (DFA).",
++ "editor.nxdn.plan_spacing": "Channel plan spacing (Hz, multiple of 125)",
++ "editor.problem.nxdn_plan_spacing": "A channel plan needs a spacing: without it, channel numbers are not followed."
+ }
+diff --git a/site/i18n/es.json b/site/i18n/es.json
+index fd81ced..012fe36 100644
+--- a/site/i18n/es.json
++++ b/site/i18n/es.json
+@@ -2283,5 +2283,12 @@
+  "editor.m17.dest_help": "El indicativo o reflector llamado, hasta 9 caracteres. Vacío o ALL: difusión.",
+  "editor.m17.src": "Indicativo de origen",
+  "editor.m17.src_help": "Tu indicativo, enviado en cada transmisión M17. Vacío: el nombre de la radio.",
+- "editor.problem.m17_call_chars": "Usa hasta 9 caracteres: A-Z, 0-9, - / . y espacio."
++ "editor.problem.m17_call_chars": "Usa hasta 9 caracteres: A-Z, 0-9, - / . y espacio.",
++ "editor.nxdn.trunk": "Troncal (Type-C): la frecuencia de RX es el canal de control",
++ "editor.nxdn.trunk_help": "La radio se queda en el canal de control (frecuencia de RX; la de TX es su entrada), sigue las asignaciones de canal de voz para el grupo del canal, las llamadas a todos y las llamadas a esta radio, se registra y pide canal de voz con PTT si el canal puede transmitir.",
++ "editor.nxdn.trunk_all": "Seguir todos los grupos del sitio",
++ "editor.nxdn.plan_base": "Base del plan de canales (sin DFA)",
++ "editor.nxdn.plan_help": "Para sitios que envían números de canal: frecuencia = base + número x separación. Déjalo en 0 si el sitio usa asignación directa de frecuencia (DFA).",
++ "editor.nxdn.plan_spacing": "Separación del plan de canales (Hz, múltiplo de 125)",
++ "editor.problem.nxdn_plan_spacing": "Un plan de canales necesita separación: sin ella no se siguen los números de canal."
+ }
+diff --git a/site/i18n/it.json b/site/i18n/it.json
+index 1e3fa68..2e2213f 100644
+--- a/site/i18n/it.json
++++ b/site/i18n/it.json
+@@ -2276,5 +2276,12 @@
+  "editor.ysf.down_help": "Il nominativo di discesa, inviato sulla discesa del ripetitore.",
+  "editor.ysf.up": "Nominativo di salita",
+  "editor.ysf.up_help": "Il nominativo di salita, inviato sulla salita del ripetitore.",
+- "ysf_dest_chars": "Usa fino a 10 caratteri ASCII stampabili."
++ "ysf_dest_chars": "Usa fino a 10 caratteri ASCII stampabili.",
++ "editor.nxdn.trunk": "Trunked (Type-C): RX frequency is the control channel",
++ "editor.nxdn.trunk_help": "The radio camps on the control channel (RX frequency; TX frequency is its inbound one), follows voice channel assignments for the channel's group, all calls and calls to this radio, registers and requests a voice channel on PTT where the channel may transmit.",
++ "editor.nxdn.trunk_all": "Follow every group of the site",
++ "editor.nxdn.plan_base": "Channel plan base (no DFA)",
++ "editor.nxdn.plan_help": "For sites that send channel numbers: frequency = base + number x spacing. Leave 0 for sites with direct frequency assignment (DFA).",
++ "editor.nxdn.plan_spacing": "Channel plan spacing (Hz, multiple of 125)",
++ "editor.problem.nxdn_plan_spacing": "A channel plan needs a spacing: without it, channel numbers are not followed."
+ }
+diff --git a/site/i18n/zh.json b/site/i18n/zh.json
+index 7bb9713..89c34c9 100644
+--- a/site/i18n/zh.json
++++ b/site/i18n/zh.json
+@@ -2276,5 +2276,12 @@
+  "editor.ysf.down_help": "下行呼号，在中继下行发送。",
+  "editor.ysf.up": "上行呼号",
+  "editor.ysf.up_help": "上行呼号，在中继上行发送。",
+- "ysf_dest_chars": "最多使用 10 个可打印 ASCII 字符。"
++ "ysf_dest_chars": "最多使用 10 个可打印 ASCII 字符。",
++ "editor.nxdn.trunk": "Trunked (Type-C): RX frequency is the control channel",
++ "editor.nxdn.trunk_help": "The radio camps on the control channel (RX frequency; TX frequency is its inbound one), follows voice channel assignments for the channel's group, all calls and calls to this radio, registers and requests a voice channel on PTT where the channel may transmit.",
++ "editor.nxdn.trunk_all": "Follow every group of the site",
++ "editor.nxdn.plan_base": "Channel plan base (no DFA)",
++ "editor.nxdn.plan_help": "For sites that send channel numbers: frequency = base + number x spacing. Leave 0 for sites with direct frequency assignment (DFA).",
++ "editor.nxdn.plan_spacing": "Channel plan spacing (Hz, multiple of 125)",
++ "editor.problem.nxdn_plan_spacing": "A channel plan needs a spacing: without it, channel numbers are not followed."
+ }
+diff --git a/site/static/js/codeplug/mode_nxdn.js b/site/static/js/codeplug/mode_nxdn.js
+index 98c0af0..08fa952 100644
+--- a/site/static/js/codeplug/mode_nxdn.js
++++ b/site/static/js/codeplug/mode_nxdn.js
+@@ -5,10 +5,12 @@
+ // layer (channelmodes.js). Bytes to fields and back, and the fields the pages show, as data. Talk targets are the
+ // contact list's: a group contact is a group, a private one a unit.
+ 
+-import { u8, u16, put16, grow } from "./modebytes.js";
++import { u8, u16, u32, put16, put32, grow } from "./modebytes.js";
+ 
+ export const RAN_MAX = 63, TX_RAN_SET = 0x80, TX_RAN_DEFAULT = 1, RATE_4800 = 0x04;
+ export const UNIT_MAX = 65519, ID_ALL = 0xFFFF;
++// Type-C trunking (docs/spec/nxdn-trunking.md 3): byte 5 flags, bytes 6-9 the plan's base (Hz), 10-11 its spacing (125 Hz)
++export const TRUNK = 0x01, TRUNK_ALL = 0x02, SPACING_UNIT = 125, TRUNK_LEN = 12;
+ 
+ // The TX RAN a block that leaves it unset sends: the RX RAN, RAN 1 when that is every RAN (0)
+ const txDefault = (rx) => (rx !== 0 ? rx : TX_RAN_DEFAULT);
+@@ -35,17 +37,27 @@ export function decodeConv(b) {
+ 		// AES-256 (docs/spec/air-encryption.md): byte 3 bit 0 and the key id (6 bits) in byte 4; shorter blocks are clear
+ 		aes: (u8(b, 3) & 1) !== 0,
+ 		keyId: (u8(b, 3) & 1) !== 0 ? u8(b, 4) & 0x3F : 0,
++		trunk: (u8(b, 5) & TRUNK) !== 0,
++		trunkAll: (u8(b, 5) & TRUNK) !== 0 && (u8(b, 5) & TRUNK_ALL) !== 0,
++		planBaseHz: u16(b, 10) ? u32(b, 6) : 0,
++		planSpacingHz: u16(b, 10) * SPACING_UNIT,
+ 	};
+ }
+ 
+ export function encodeConv(p, prev = null) {
+-	const v = grow(prev, 5);
++	// A conventional block stays 5 octets (what older firmware and the radio write); a trunked one carries 12
++	const v = grow(prev, p.trunk ? TRUNK_LEN : 5);
+ 	const rx = p.rxRan >= 0 && p.rxRan <= RAN_MAX ? p.rxRan : 0;
+ 	v[0] = (v[0] & ~7) | (p.squelch === 1 ? 1 : 0) | (p.rate9600 ? 0 : RATE_4800);
+ 	v[1] = rx;
+ 	v[2] = p.txRan === txDefault(rx) ? 0 : TX_RAN_SET | (p.txRan & RAN_MAX);
+ 	v[3] = (v[3] & ~1) | (p.aes ? 1 : 0);
+ 	v[4] = p.aes ? p.keyId & 0x3F : 0;
++	if (v.length >= TRUNK_LEN) {
++		v[5] = (v[5] & ~3) | (p.trunk ? TRUNK : 0) | (p.trunk && p.trunkAll ? TRUNK_ALL : 0);
++		put32(v, 6, p.planBaseHz || 0);
++		put16(v, 10, Math.round((p.planSpacingHz || 0) / SPACING_UNIT) & 0xFFFF);
++	}
+ 	return v;
+ }
+ 
+@@ -69,7 +81,7 @@ export const nxdnKind = {
+ 	defaultTx: true,
+ 	recordFields: ["contact", "dmrId"],
+ 	flags: {},
+-	newParams: () => ({ rate9600: true, squelch: 0, rxRan: 0, txRan: TX_RAN_DEFAULT, aes: false, keyId: 0 }),
++	newParams: () => ({ rate9600: true, squelch: 0, rxRan: 0, txRan: TX_RAN_DEFAULT, aes: false, keyId: 0, trunk: false, trunkAll: false, planBaseHz: 0, planSpacingHz: 0 }),
+ 	decode: decodeConv,
+ 	encode: encodeConv,
+ 	fields: () => [
+@@ -80,9 +92,14 @@ export const nxdnKind = {
+ 		ranField("txRan", "editor.nxdn.tx_ran", { blank: (p) => txDefault(p.rxRan) }),
+ 		{ key: "aes", label: "editor.nxdn.aes", type: "bool", help: "editor.nxdn.aes_help" },
+ 		{ key: "keyId", label: "editor.nxdn.key_id", type: "int", min: 0, max: 63 },
++		{ key: "trunk", label: "editor.nxdn.trunk", type: "bool", help: "editor.nxdn.trunk_help" },
++		{ key: "trunkAll", label: "editor.nxdn.trunk_all", type: "bool" },
++		{ key: "planBaseHz", label: "editor.nxdn.plan_base", type: "freq", zero: true, help: "editor.nxdn.plan_help" },
++		{ key: "planSpacingHz", label: "editor.nxdn.plan_spacing", type: "int", min: 0, max: 8191875 },
+ 	],
+ 	validate(c, p, problem) {
+ 		targetRange(c, problem);
++		if (p.trunk && p.planBaseHz && !p.planSpacingHz) problem.warn("planSpacingHz", "nxdn_plan_spacing");
+ 		if (c.dmrId > UNIT_MAX) problem.warn("dmrId", "nxdn_unit_range", { max: UNIT_MAX });
+ 	},
+ 	settings: {
+diff --git a/site/tests/csv.test.mjs b/site/tests/csv.test.mjs
+index f14791d..f5ca19e 100644
+--- a/site/tests/csv.test.mjs
++++ b/site/tests/csv.test.mjs
+@@ -88,14 +88,14 @@ test("CSV carries a conventional NXDN channel instead of dropping it to FM", ()
+ 	assert.equal(c.mode, "dmr", "the record under the NXDN tag is the safe stand-in");
+ 	assert.equal(c.rxOnly, true);
+ 	assert.equal(c.tagTx, true);
+-	assert.deepEqual(c.params, { rate9600: false, squelch: 1, rxRan: 9, txRan: 5, aes: false, keyId: 0 });
++	assert.deepEqual(c.params, { rate9600: false, squelch: 1, rxRan: 9, txRan: 5, aes: false, keyId: 0, trunk: false, trunkAll: false, planBaseHz: 0, planSpacingHz: 0 });
+ 
+ 	// The encoded tag comes back as NXDN, and export keeps its rate, RANs, squelch and transmit permission.
+ 	const back = decode(encode(m));
+ 	const b = back.channels[0];
+ 	assert.equal(b.kind, 4);
+ 	assert.equal(b.tagTx, true);
+-	assert.deepEqual(b.params, { rate9600: false, squelch: 1, rxRan: 9, txRan: 5, aes: false, keyId: 0 });
++	assert.deepEqual(b.params, { rate9600: false, squelch: 1, rxRan: 9, txRan: 5, aes: false, keyId: 0, trunk: false, trunkAll: false, planBaseHz: 0, planSpacingHz: 0 });
+ 	const rows = parse(exportTable(back, "channels"));
+ 	const col = (name) => rows[0].indexOf(name);
+ 	assert.equal(rows[1][col("Mode")], "NXDN 4800");
+diff --git a/site/tests/modes.test.mjs b/site/tests/modes.test.mjs
+index 122b1d2..f2b9bf8 100644
+--- a/site/tests/modes.test.mjs
++++ b/site/tests/modes.test.mjs
+@@ -426,7 +426,7 @@ test("vectors: NXDN conventional block, unit ID record", () => {
+ 	assert.ok(vectors("nxdnconv").length >= 10);
+ 	for (const l of vectors("nxdnconv")) {
+ 		const [b, ...p] = l.split(" ");
+-		const { aes, keyId, ...rest } = nxdn.decodeConv(bytes(b) ?? new Uint8Array(0));
++		const { aes, keyId, trunk, trunkAll, planBaseHz, planSpacingHz, ...rest } = nxdn.decodeConv(bytes(b) ?? new Uint8Array(0));
+ 		assert.deepEqual(rest, conv(...p), l);
+ 	}
+ 	for (const l of vectors("nxdnaes")) {
+@@ -442,6 +442,16 @@ test("vectors: NXDN conventional block, unit ID record", () => {
+ 		const [rate, rx, tx, sq, b] = l.split(" ");
+ 		assert.equal(hexOf(nxdn.encodeConv(conv(rate, rx, tx, sq))), b, l);
+ 	}
++	assert.ok(vectors("nxdntrunk").length >= 5);
++	for (const l of vectors("nxdntrunk")) {
++		const [b, t, all, base, sp] = l.split(" ");
++		const d = nxdn.decodeConv(bytes(b));
++		assert.deepEqual({ trunk: d.trunk, trunkAll: d.trunkAll, planBaseHz: d.planBaseHz, planSpacingHz: d.planSpacingHz },
++			{ trunk: t === "1", trunkAll: all === "1", planBaseHz: Number(base), planSpacingHz: Number(sp) }, l);
++		// a trunked block encodes back byte for byte; a conventional one stays 5 octets
++		if (d.trunk && d.planSpacingHz) assert.equal(hexOf(nxdn.encodeConv(d)), b, l);
++		if (!d.trunk) assert.equal(nxdn.encodeConv(d).length, 5, l);
++	}
+ 	for (const l of vectors("nxdnunit")) {
+ 		const [b, dmr, unit] = l.split(" ");
+ 		const u = nxdn.decodeUnit(bytes(b)).unitId;
+@@ -600,11 +610,11 @@ test("NXDN: channels and the unit ID round-trip; unknown bytes are kept", () =>
+ 	const d = decode(img);
+ 	const a = d.channels.find((c) => c.name === "NXDN Ops"), b = d.channels.find((c) => c.name === "NXDN Unit");
+ 	assert.equal(a.kind, 4);
+-	assert.deepEqual(a.params, { rate9600: true, squelch: 1, rxRan: 9, txRan: 9, aes: false, keyId: 0 });
++	assert.deepEqual(a.params, { rate9600: true, squelch: 1, rxRan: 9, txRan: 9, aes: false, keyId: 0, trunk: false, trunkAll: false, planBaseHz: 0, planSpacingHz: 0 });
+ 	assert.equal(a.tagTx, true);
+ 	assert.equal(a.mode, "dmr");
+ 	assert.equal(a.rxOnly, true, "the record is the safe stand-in");
+-	assert.deepEqual(b.params, { rate9600: false, squelch: 0, rxRan: 0, txRan: 2, aes: false, keyId: 0 });
++	assert.deepEqual(b.params, { rate9600: false, squelch: 0, rxRan: 0, txRan: 2, aes: false, keyId: 0, trunk: false, trunkAll: false, planBaseHz: 0, planSpacingHz: 0 });
+ 	assert.equal(b.contact.type, "private");
+ 	assert.deepEqual(d.modeSettings[4], { unitId: 1234 });
+ 	assert.deepEqual(encode(d).bytes, img.bytes);
+@@ -612,13 +622,13 @@ test("NXDN: channels and the unit ID round-trip; unknown bytes are kept", () =>
+ 	assert.equal(hexOf(decodeTag(getValue(e, MODE_KEY.tag + a.number - 1)).params), "0109000000");
+ 	assert.equal(hexOf(decodeTag(getValue(e, MODE_KEY.tag + b.number - 1)).params), "0400820000");
+ 	assert.equal(hexOf(getValue(e, MODE_KEY.setting + 4)), "D204");
+-	// a longer block keeps its tail through an edit
++	// a longer block keeps its tail through an edit (past the trunking bytes 5-11, nxdn-trunking.md 3)
+ 	const key = MODE_KEY.tag + a.number - 1;
+-	putArea(img.bytes, setValue(area(img), key, Uint8Array.from([...getValue(area(img), key), 0xAB])));
++	putArea(img.bytes, setValue(area(img), key, Uint8Array.from([...getValue(area(img), key), 0, 0, 0, 0, 0, 0, 0, 0xAB])));
+ 	const d2 = decode(img);
+ 	d2.channels.find((c) => c.name === "NXDN Ops").params.txRan = 5;
+ 	const t = decodeTag(getValue(area(encode(d2)), key)).params;
+-	assert.equal(hexOf(t), "0109850000AB");
++	assert.equal(hexOf(t), "010985000000000000000000AB");
+ 	// a blank unit ID writes no record
+ 	d2.modeSettings[4] = { unitId: 0 };
+ 	assert.equal(getValue(area(encode(d2)), MODE_KEY.setting + 4), null);
+diff --git a/tests/host/Makefile b/tests/host/Makefile
+index 9bbb5be..e872c14 100644
+--- a/tests/host/Makefile
++++ b/tests/host/Makefile
+@@ -122,8 +122,12 @@ p25EngineTestAes: p25EngineTest.c $(CORE)/p25/p25_engine.c $(CORE)/p25/p25_engin
+ 	$(CC) $(CFLAGS) -I$(ROOT)/hal -Wshadow -DCONFIG_P25=1 -DCONFIG_AIR_AES=1 -o $@ p25EngineTest.c $(CORE)/p25/p25_engine.c $(CORE)/air/air_session.c $(CORE)/air/air_framer.c $(P25) $(FEC)
+ 
+ # NXDN frames, their FEC and calls through the framer (core/nxdn); the engine on two made-up providers
+-NXDN    := $(CORE)/nxdn/nxdn_frame.c $(CORE)/nxdn/nxdn_rx.c $(CORE)/nxdn/nxdn_call.c $(CORE)/nxdn/nxdn_aes.c $(CORE)/crypto/aes256.c
+-TESTS   += nxdnTest nxdnEngineTest
++NXDN    := $(CORE)/nxdn/nxdn_frame.c $(CORE)/nxdn/nxdn_rx.c $(CORE)/nxdn/nxdn_call.c $(CORE)/nxdn/nxdn_aes.c $(CORE)/crypto/aes256.c \
++           $(CORE)/nxdn/nxdn_trunk.c
++TESTS   += nxdnTest nxdnEngineTest nxdnTrunkTest
++# NXDN Type-C trunking: the follower of the control channel's assignments (docs/spec/nxdn-trunking.md)
++nxdnTrunkTest: nxdnTrunkTest.c $(CORE)/nxdn/nxdn_trunk.c $(wildcard $(CORE)/nxdn/*.h)
++	$(CC) $(CFLAGS) -I$(ROOT)/hal -Wshadow -o $@ nxdnTrunkTest.c $(CORE)/nxdn/nxdn_trunk.c
+ nxdnTest: nxdnTest.c $(NXDN) $(wildcard $(CORE)/nxdn/*.h) $(CORE)/air/air_framer.c $(FEC) $(CORE)/dmr/ambe/ambeFec.c
+ 	$(CC) $(CFLAGS) -I$(ROOT)/hal -Wshadow -o $@ nxdnTest.c $(NXDN) $(CORE)/air/air_framer.c $(FEC) $(CORE)/dmr/ambe/ambeFec.c
+ nxdnEngineTest: nxdnEngineTest.c $(CORE)/nxdn/nxdn_engine.c $(NXDN) $(wildcard $(CORE)/nxdn/*.h) $(CORE)/air/air_session.c $(CORE)/air/air_framer.c $(CORE)/air/air_softmodem.c $(FEC)
+@@ -263,6 +267,7 @@ run: $(TESTS)
+ 	./p25EngineTest
+ 	./p25EngineTestAes
+ 	./nxdnTest | tail -1
++	./nxdnTrunkTest | tail -1
+ 	./nxdnEngineTest | tail -1
+ 	./nxdnEngineTestAes | tail -1
+ 	./ysfTest | tail -1
+diff --git a/tests/host/nxdnCodeplugTest.c b/tests/host/nxdnCodeplugTest.c
+index 342742b..74fb5d9 100644
+--- a/tests/host/nxdnCodeplugTest.c
++++ b/tests/host/nxdnCodeplugTest.c
+@@ -87,7 +87,7 @@ static void test_vectors(void)
+ 			nxdn_conv_decode(b, unhex(w[1], b, sizeof b), &c);
+ 			CHECK(c.rate9600 == (h(w[2]) != 0) && c.rx_ran == h(w[3]) && c.tx_ran == h(w[4]) && c.squelch == h(w[5]));
+ 		} else if (strcmp(w[0], "nxdnenc") == 0) {
+-			nxdn_conv_t c = { h(w[1]) != 0, (uint8_t)h(w[2]), (uint8_t)h(w[3]), (uint8_t)h(w[4]), false, 0 };
++			nxdn_conv_t c = { h(w[1]) != 0, (uint8_t)h(w[2]), (uint8_t)h(w[3]), (uint8_t)h(w[4]), false, 0, false, false, 0, 0 };
+ 			uint8_t e[NXDN_CP_CONV_LEN];
+ 			nxdn_conv_encode(&c, e);
+ 			CHECK(unhex(w[5], b, sizeof b) == NXDN_CP_CONV_LEN && memcmp(e, b, NXDN_CP_CONV_LEN) == 0);
+@@ -96,10 +96,16 @@ static void test_vectors(void)
+ 			nxdn_conv_decode(b, unhex(w[1], b, sizeof b), &c);
+ 			CHECK(c.aes == (h(w[2]) != 0) && c.kid == h(w[3]));
+ 		} else if (strcmp(w[0], "nxdnaesenc") == 0) {
+-			nxdn_conv_t c = { h(w[1]) != 0, (uint8_t)h(w[2]), (uint8_t)h(w[3]), (uint8_t)h(w[4]), h(w[5]) != 0, (uint8_t)h(w[6]) };
++			nxdn_conv_t c = { h(w[1]) != 0, (uint8_t)h(w[2]), (uint8_t)h(w[3]), (uint8_t)h(w[4]), h(w[5]) != 0, (uint8_t)h(w[6]),
++					  false, false, 0, 0 };
+ 			uint8_t e[NXDN_CP_CONV_LEN];
+ 			nxdn_conv_encode(&c, e);
+ 			CHECK(unhex(w[7], b, sizeof b) == NXDN_CP_CONV_LEN && memcmp(e, b, NXDN_CP_CONV_LEN) == 0);
++		} else if (strcmp(w[0], "nxdntrunk") == 0) {
++			nxdn_conv_t c;
++			nxdn_conv_decode(b, unhex(w[1], b, sizeof b), &c);
++			CHECK(c.trunk == (atoi(w[2]) != 0) && c.trunk_all == (atoi(w[3]) != 0) &&
++			      c.plan_base_hz == strtoul(w[4], NULL, 10) && c.plan_spacing_hz == strtoul(w[5], NULL, 10));
+ 		} else if (strcmp(w[0], "nxdnunit") == 0) {
+ 			int len = unhex(w[1], b, sizeof b);
+ 			CHECK(nxdn_unit_id_decode(b, len == 0 ? -1 : len, h(w[2])) == h(w[3]));
+@@ -254,7 +260,7 @@ static void test_conv_save(void)
+ 	// The block edited on a channel that is NXDN already (the channel editor's RAN and rate): the tag keeps its
+ 	// system, its fallback, its other flags and what its block holds after this firmware's
+ 	{
+-		uint8_t longer[NXDN_CP_CONV_LEN + 3];
++		uint8_t longer[NXDN_CP_SAVE_LEN + 3] = { 0 };
+ 		uint8_t raw[sizeof longer + CODEPLUG_TAG_HEAD_MAX];
+ 		codeplug_tag_t kt = { .kind = CODEPLUG_KIND_NXDN, .system = 2, .fb_chan = 30, .fb_check = 0x1234,
+ 				      .flags = CODEPLUG_TAG_FALLBACK | 0x40u };
+@@ -262,7 +268,7 @@ static void test_conv_save(void)
+ 		channel_t base = make("Keep", 453100000, 458100000);
+ 
+ 		nxdn_conv_encode(&nc, longer);
+-		memcpy(&longer[NXDN_CP_CONV_LEN], "\xA1\xA2\xA3", 3);
++		memcpy(&longer[NXDN_CP_SAVE_LEN], "\xA1\xA2\xA3", 3);
+ 		CHECK(codeplug_set_channel(33, &base) && codeplug_tag_write(33, "Keep", &kt, longer, sizeof longer));
+ 		CHECK(codeplug_channel(33, &r) && r.kind == CODEPLUG_KIND_NXDN && r.system == 2 && r.rx_only);
+ 		strcpy(r.name, "Kept");
+@@ -276,7 +282,7 @@ static void test_conv_save(void)
+ 		CHECK(nxdn_conv_load(33, &r, &back) && !back.conv.rate9600 && back.conv.rx_ran == 21 &&
+ 		      back.conv.tx_ran == 22 && back.conv.squelch == NXDN_SQUELCH_RAN);
+ 		CHECK(codeplug_tag_params(33, &r, raw, sizeof longer) == (int)sizeof longer &&
+-		      memcmp(&raw[NXDN_CP_CONV_LEN], "\xA1\xA2\xA3", 3) == 0);
++		      memcmp(&raw[NXDN_CP_SAVE_LEN], "\xA1\xA2\xA3", 3) == 0);
+ 	}
+ 	// A mixed channel: its record is an FM channel of its own (wide, transmitting), its tag the NXDN side (receive
+ 	// only). The RAN edited on the radio, which holds the channel as it runs (NXDN, narrow, the tag's receive only):
+diff --git a/tests/host/nxdnTest.c b/tests/host/nxdnTest.c
+index 030d3f5..7a38136 100644
+--- a/tests/host/nxdnTest.c
++++ b/tests/host/nxdnTest.c
+@@ -420,6 +420,155 @@ static void testCalls(void)
+ 	      st.lich_fail, st.facch_fail, st.sacch_fail);
+ }
+ 
++// ── CAC: the outbound control channel (Type-C trunking, docs/spec/nxdn-trunking.md 2) ──
++static uint8_t cac_got[8][NXDN_CAC_MSG_BYTES];
++static unsigned cac_n;
++static void on_cac(const uint8_t *msg, void *ctx)
++{
++	(void)ctx;
++	if (cac_n < 8)
++		memcpy(cac_got[cac_n], msg, NXDN_CAC_MSG_BYTES);
++	cac_n++;
++}
++
++static void cac_frame(uint8_t *frame, const uint8_t in[NXDN_CAC_BYTES])
++{
++	memset(frame, 0, NXDN_FRAME_BYTES);
++	nxdn_frame_begin(frame, NXDN_LICH(NXDN_RF_RCCH, NXDN_USC_CAC, 0, NXDN_DIR_OUTBOUND));
++	nxdn_cac_put(frame, in);
++}
++
++static void testCac(void)
++{
++	uint8_t frame[NXDN_FRAME_BYTES], in[NXDN_CAC_BYTES], out[NXDN_CAC_BYTES];
++	unsigned caught = 0;
++
++	for (unsigned run = 0; run < 200; run++) {
++		fill(in, sizeof in);
++		in[NXDN_CAC_BYTES - 1] &= 0xE0;		// 155 bits: the last octet's top three
++		cac_frame(frame, in);
++		CHECK(nxdn_lich_get(frame, NULL) == NXDN_LICH(NXDN_RF_RCCH, NXDN_USC_CAC, 0, NXDN_DIR_OUTBOUND), "CAC LICH kept");
++		CHECK(nxdn_cac_get(frame, NULL, &work, out) == 0 && !memcmp(out, in, sizeof in), "CAC clean");
++		// Bit errors at least 42 apart in the coded stream (the interleaver spreads a burst that far): corrected.
++		// Coded bit y is air bit (y % 12) x 25 + y / 12 of the CAC (25 x 12)
++		unsigned nerr = run % 7;
++		for (unsigned k = 0; k < nerr; k++) {
++			unsigned y = (k * 43 + run * 7) % 300, a = (y % 12) * 25 + y / 12;
++			uint16_t sym = (uint16_t)(NXDN_SACCH_SYM + a / 2);
++			air_sym_put(frame, sym, (uint8_t)(air_sym_get(frame, sym) ^ ((a & 1) ? 1 : 2)));
++		}
++		int e = nxdn_cac_get(frame, NULL, &work, out);
++		CHECK(e >= 0 && !memcmp(out, in, sizeof in), "CAC %u errors: %d", nerr, e);
++		// Garbage: the CRC-16 turns it away
++		cac_frame(frame, in);
++		for (unsigned k = 0; k < 60; k++)
++			flip_sign(frame, (uint16_t)(NXDN_SACCH_SYM + rng() % 150));
++		caught += nxdn_cac_get(frame, NULL, &work, out) < 0 || memcmp(out, in, sizeof in) == 0;
++	}
++	CHECK(caught > 195, "CRC-16 catches %u of 200", caught);
++
++	// Through the framer: a control channel's frames back to back. A conventional receiver drops them all; with the
++	// CAC hook each message comes out, and another RAN's are dropped
++	static uint8_t fbuf[NXDN_FRAME_BYTES];
++	static int8_t fsoft[NXDN_FRAME_SYMS];
++	static nxdn_call_rx_t c;
++	uint8_t msgs[6][NXDN_CAC_BYTES];
++
++	for (unsigned ran = 0; ran < 3; ran++) {
++		for (unsigned hook = 0; hook < 2; hook++) {
++			rng_state = 0xCAC0 + ran;
++			tx_n = 0;
++			noise_syms(100);
++			for (uint16_t i = 0; i < NXDN_PREAMBLE_SYMS; i++)
++				tx_air[tx_n++] = air_sym_get(nxdn_preamble, i);
++			for (unsigned f = 0; f < 6; f++) {
++				fill(msgs[f], NXDN_CAC_BYTES);
++				msgs[f][0] = NXDN_SR(3, 7);		// RAN 7
++				msgs[f][NXDN_CAC_BYTES - 1] &= 0xE0;
++				cac_frame(frame, msgs[f]);
++				for (uint16_t i = 0; i < NXDN_FRAME_SYMS; i++)
++					tx_air[tx_n++] = air_sym_get(frame, i);
++			}
++			noise_syms(400);
++			memset(&got, 0, sizeof got);
++			cac_n = 0;
++			nxdn_call_rx_init(&c, ran == 0 ? NXDN_RAN_ANY : ran == 1 ? 7 : 9, &sink, NULL);
++			if (hook)
++				c.rx.cac = on_cac;
++			air_framer_t fr;
++			air_framer_init(&fr, &nxdn_air_mode, &c.rx, fbuf, fsoft, NXDN_FRAME_SYMS);
++			for (uint32_t at = 0; at < tx_n; at += 48) {
++				uint8_t hard[12] = { 0 };
++				uint16_t n = (uint16_t)(tx_n - at < 48 ? tx_n - at : 48);
++				air_chunk_t ch = { .t_us = at * 417u, .nsyms = n, .sync_at = -1, .hard = hard, .soft = NULL };
++
++				for (uint16_t i = 0; i < n; i++)
++					air_sym_put(hard, i, tx_air[at + i]);
++				air_framer_rx(&fr, &ch);
++			}
++			CHECK(got.starts == 0, "CAC frames are no call (ran %u hook %u)", ran, hook);
++			if (!hook || ran == 2) {
++				CHECK(cac_n == 0, "no CAC handed on (ran %u hook %u): %u", ran, hook, cac_n);
++				continue;
++			}
++			CHECK(cac_n >= 5 && cac_n <= 6, "CAC messages %u of 6 (ran %u)", cac_n, ran);
++			unsigned skip = 6 - (cac_n < 6 ? cac_n : 6);
++			for (unsigned k = 0; k < cac_n && k < 6; k++)
++				CHECK(!memcmp(cac_got[k], &msgs[k + skip][1], NXDN_CAC_MSG_BYTES), "CAC message %u (ran %u)", k, ran);
++		}
++	}
++	CHECK(c.rx.ran_rejects >= 5, "another RAN's CAC dropped: %u", (unsigned)c.rx.ran_rejects);
++}
++
++// ── Long CAC: a subscriber's control channel burst (inbound RCCH) ──
++static void testLongCac(void)
++{
++	uint8_t frame[NXDN_FRAME_BYTES], in[NXDN_LCAC_BYTES], out[NXDN_LCAC_BYTES];
++
++	for (unsigned run = 0; run < 200; run++) {
++		fill(in, sizeof in);
++		memset(frame, 0, sizeof frame);
++		nxdn_frame_begin(frame, NXDN_LICH(NXDN_RF_RCCH, NXDN_USC_LCAC, 0, NXDN_DIR_INBOUND));
++		nxdn_lcac_put(frame, in);
++		CHECK(nxdn_lich_get(frame, NULL) == 0x08, "long CAC LICH 0x08");
++		CHECK(nxdn_lcac_get(frame, NULL, &work, out) == 0 && !memcmp(out, in, sizeof in), "long CAC clean");
++		// Nothing past the long CAC (symbol 144 on) is written
++		for (uint16_t s = NXDN_LCAC_SYMS; s < NXDN_FRAME_SYMS; s++)
++			CHECK(air_sym_get(frame, s) == 0, "long CAC stays in its 126 symbols");
++		unsigned nerr = run % 4;
++		for (unsigned k = 0; k < nerr; k++) {
++			unsigned y = (k * 61 + run * 5) % 252, a = (y % 12) * 21 + y / 12;
++			uint16_t sym = (uint16_t)(NXDN_SACCH_SYM + a / 2);
++			air_sym_put(frame, sym, (uint8_t)(air_sym_get(frame, sym) ^ ((a & 1) ? 1 : 2)));
++		}
++		int e = nxdn_lcac_get(frame, NULL, &work, out);
++		CHECK(e >= 0 && !memcmp(out, in, sizeof in), "long CAC %u errors: %d", nerr, e);
++	}
++
++	// The burst a call transmitter builds: preamble, then FSW, LICH and the long CAC under SR of the TX RAN
++	nxdn_call_tx_t t;
++	uint8_t msg[NXDN_LCAC_MSG_BYTES], syms[NXDN_PREAMBLE_SYMS + NXDN_FRAME_SYMS];
++	uint16_t n = 0;
++
++	fill(msg, sizeof msg);
++	nxdn_call_tx_burst(&t, msg, 9);
++	while (!nxdn_call_tx_done(&t)) {
++		uint16_t first, k = nxdn_call_tx_ready(&t, &first);
++		CHECK(k > 0, "burst symbols ready");
++		if (!k)
++			break;
++		for (uint16_t i = 0; i < k && n < sizeof syms; i++)
++			syms[n++] = air_sym_get(nxdn_call_tx_syms(&t), (uint16_t)(first + i));
++		nxdn_call_tx_sent(&t, k);
++	}
++	CHECK(n == NXDN_PREAMBLE_SYMS + NXDN_LCAC_SYMS, "burst length %u", n);
++	memset(frame, 0, sizeof frame);
++	for (uint16_t i = 0; i < NXDN_LCAC_SYMS; i++)
++		air_sym_put(frame, i, syms[NXDN_PREAMBLE_SYMS + i]);
++	CHECK(nxdn_lich_get(frame, NULL) == 0x08 && nxdn_lcac_get(frame, NULL, &work, out) == 0 &&
++	      out[0] == NXDN_SR(3, 9) && !memcmp(&out[1], msg, sizeof msg), "burst decodes");
++}
++
+ int main(void)
+ {
+ 	testScrambler();
+@@ -429,6 +578,8 @@ int main(void)
+ 	testVch();
+ 	testMessages();
+ 	testCalls();
++	testCac();
++	testLongCac();
+ 	printf("nxdnTest: %d checks, %d failed\n", checks, failures);
+ 	return failures ? 1 : 0;
+ }
+diff --git a/tests/host/nxdnTrunkTest.c b/tests/host/nxdnTrunkTest.c
+new file mode 100644
+index 0000000..125f75e
+--- /dev/null
++++ b/tests/host/nxdnTrunkTest.c
+@@ -0,0 +1,301 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// Copyright (c) 2026 lyra XE1POC
++// NXDN Type-C trunking follower (core/nxdn/nxdn_trunk.c): SITE_INFO's direct frequency assignment, the linear plan,
++// which assignments are followed, the return to the control channel and the rejoin guard.
++#include <stdio.h>
++#include <string.h>
++
++#include "../../core/nxdn/nxdn.h"
++#include "../../core/nxdn/nxdn_trunk.h"
++
++static int failures, checks;
++#define CHECK(c, ...) do { checks++; if (!(c)) { failures++; printf("FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } } while (0)
++
++static uint32_t tuned[16];
++static unsigned ntuned;
++static void tune(uint32_t hz, void *ctx) { (void)ctx; if (ntuned < 16) tuned[ntuned] = hz; ntuned++; }
++
++// VCALL_ASSGN: call type, source, destination; chan10 or (DFA) the 16-bit outbound frequency number
++static void assgn(uint8_t *m, uint8_t type, uint8_t call_type, uint16_t src, uint16_t dst, uint16_t chan, bool dfa)
++{
++	memset(m, 0, NXDN_CAC_MSG_BYTES);
++	m[0] = type;
++	m[2] = (uint8_t)(call_type << 5);
++	m[3] = (uint8_t)(src >> 8); m[4] = (uint8_t)src;
++	m[5] = (uint8_t)(dst >> 8); m[6] = (uint8_t)dst;
++	if (dfa) {
++		m[7] = 0x01;	// call timer bits, bandwidth 01
++		m[8] = (uint8_t)(chan >> 8); m[9] = (uint8_t)chan;
++	} else {
++		m[7] = (uint8_t)(0x14 | ((chan >> 8) & 3));	// call timer bits around the channel's top two
++		m[8] = (uint8_t)chan;
++	}
++}
++
++static void site_info(uint8_t *m, bool dfa, uint8_t step, uint8_t base)
++{
++	memset(m, 0, NXDN_CAC_MSG_BYTES);
++	m[0] = NXDN_MSG_SITE_INFO;
++	m[11] = (uint8_t)((dfa ? 0x80 : 0) | (step & 3) << 5 | (base & 7) << 2);
++}
++
++// ── The transmit side ──
++static uint8_t sent_msg[8][NXDN_LCAC_MSG_BYTES];
++static uint32_t sent_hz[8];
++static unsigned nsent;
++static bool send_ok = true;
++static bool sendf(uint32_t hz, const uint8_t *msg, void *ctx)
++{
++	(void)ctx;
++	if (!send_ok)
++		return false;
++	if (nsent < 8) {
++		memcpy(sent_msg[nsent], msg, NXDN_LCAC_MSG_BYTES);
++		sent_hz[nsent] = hz;
++	}
++	nsent++;
++	return true;
++}
++
++static void reg_resp(uint8_t *m, uint16_t unit, uint8_t cause)
++{
++	memset(m, 0, NXDN_CAC_MSG_BYTES);
++	m[0] = NXDN_MSG_REG;
++	m[4] = (uint8_t)(unit >> 8); m[5] = (uint8_t)unit;
++	m[8] = cause;
++}
++
++static void vcall_resp(uint8_t *m, uint16_t src, uint16_t dst, uint8_t cause)
++{
++	memset(m, 0, NXDN_CAC_MSG_BYTES);
++	m[0] = NXDN_MSG_VCALL_REQ;
++	m[2] = (uint8_t)(NXDN_CALL_GROUP << 5);
++	m[3] = (uint8_t)(src >> 8); m[4] = (uint8_t)src;
++	m[5] = (uint8_t)(dst >> 8); m[6] = (uint8_t)dst;
++	m[7] = cause;
++}
++
++static void testTx(void)
++{
++	nxdn_trunk_t t;
++	uint8_t m[NXDN_CAC_MSG_BYTES];
++	nxdn_trunk_cfg_t cfg = { .cc_hz = 451000000u, .cc_tx_hz = 456000000u, .base_hz = 450000000u, .spacing_hz = 6250,
++				 .group = 100, .unit_id = 321, .tx = true, .talk_dst = 100, .rate9600 = false };
++	uint32_t now = 1000;
++
++	ntuned = 0;
++	nxdn_trunk_begin(&t, &cfg, tune, sendf, NULL, now);
++	CHECK(t.reg == NXDN_REG_IDLE && nxdn_trunk_can_talk(&t) == NXDN_TALK_NOT_REG, "tx: registration first");
++	// SITE_INFO: registration goes out on the inbound frequency, with the location and our unit and group
++	site_info(m, false, 0, 0);
++	m[1] = 0x12; m[2] = 0x34; m[3] = 0x56;
++	nxdn_trunk_msg(&t, m, now);
++	nxdn_trunk_tick(&t, false, now);
++	CHECK(nsent == 1 && sent_hz[0] == 456000000u && sent_msg[0][0] == NXDN_MSG_REG && t.reg == NXDN_REG_WAIT,
++	      "REG_REQ sent: %u", nsent);
++	CHECK(sent_msg[0][4] == 0x01 && sent_msg[0][5] == 0x41 && sent_msg[0][6] == 0 && sent_msg[0][7] == 100 &&
++	      ((uint32_t)(sent_msg[0][1] & 7) << 16 | sent_msg[0][2] << 8 | sent_msg[0][3]) == (0x123456u >> 5), "REG_REQ fields");
++	// No answer: sent again after the answer time, three tries in all, then a later round
++	now += NXDN_TRUNK_ANSWER_MS;
++	nxdn_trunk_tick(&t, false, now);
++	now += NXDN_TRUNK_ANSWER_MS;
++	nxdn_trunk_tick(&t, false, now);
++	CHECK(nsent == 3, "REG_REQ tries: %u", nsent);
++	now += NXDN_TRUNK_ANSWER_MS;
++	nxdn_trunk_tick(&t, false, now);
++	CHECK(t.reg == NXDN_REG_RETRY && nsent == 3, "no answer: retry later");
++	now += NXDN_TRUNK_RETRY_MS;
++	nxdn_trunk_tick(&t, false, now);
++	CHECK(t.reg == NXDN_REG_WAIT && nsent == 4, "next round");
++	// Another unit's answer is not ours; ours registers
++	reg_resp(m, 322, 0x01);
++	nxdn_trunk_msg(&t, m, now);
++	CHECK(t.reg == NXDN_REG_WAIT, "someone else's REG_RESP");
++	reg_resp(m, 321, 0x01);
++	nxdn_trunk_msg(&t, m, now);
++	CHECK(t.reg == NXDN_REG_READY && nxdn_trunk_can_talk(&t) == NXDN_TALK_OK, "registered");
++
++	// PTT: VCALL_REQ for group 100, 4800 EHR
++	nsent = 0;
++	nxdn_trunk_ptt(&t, true, now);
++	CHECK(nsent == 1 && sent_msg[0][0] == NXDN_MSG_VCALL_REQ && sent_msg[0][2] == (NXDN_CALL_GROUP << 5) &&
++	      sent_msg[0][3] == 0x01 && sent_msg[0][4] == 0x41 && sent_msg[0][6] == 100 && t.req == NXDN_REQ_WAIT, "VCALL_REQ");
++	// Accepted, then queued, then the assignment to us: on the voice channel, transmit at its plan + duplex offset
++	vcall_resp(m, 321, 100, NXDN_CAUSE_VD_ACCEPTED);
++	nxdn_trunk_msg(&t, m, now);
++	CHECK(t.req == NXDN_REQ_WAIT, "accepted: wait for the assignment");
++	vcall_resp(m, 321, 100, 0x3F);
++	nxdn_trunk_msg(&t, m, now);
++	CHECK(t.req == NXDN_REQ_QUEUED, "queued");
++	now += 3000;
++	nxdn_trunk_tick(&t, false, now);
++	CHECK(t.req == NXDN_REQ_QUEUED && nsent == 1, "queued: nothing sent again");
++	unsigned before = ntuned;
++	assgn(m, NXDN_MSG_VCALL_ASSGN, NXDN_CALL_GROUP, 321, 100, 40, false);
++	nxdn_trunk_msg(&t, m, now);
++	CHECK(t.req == NXDN_REQ_TALK && t.state == NXDN_TRUNK_VOICE && ntuned == before + 1 && tuned[before] == 450250000u &&
++	      t.talk_hz == 455250000u, "assigned: rx %u tx %u", (unsigned)tuned[before], (unsigned)t.talk_hz);
++	// No voice heard while we talk does not take us back
++	now += 5000;
++	nxdn_trunk_tick(&t, false, now);
++	CHECK(t.state == NXDN_TRUNK_VOICE, "talking holds the channel");
++	nxdn_trunk_ptt(&t, false, now);
++	nxdn_trunk_talk_end(&t, now);
++	CHECK(t.state == NXDN_TRUNK_CONTROL && t.req == NXDN_REQ_IDLE && tuned[ntuned - 1] == cfg.cc_hz, "talk end");
++
++	// Refused
++	nxdn_trunk_ptt(&t, true, now);
++	vcall_resp(m, 321, 100, 0x22);
++	nxdn_trunk_msg(&t, m, now);
++	CHECK(t.req == NXDN_REQ_DENIED && t.cause == 0x22, "denied");
++	nxdn_trunk_ptt(&t, false, now);
++	CHECK(t.req == NXDN_REQ_IDLE, "release clears");
++	// No answer at all: three tries then timeout
++	nsent = 0;
++	nxdn_trunk_ptt(&t, true, now);
++	for (unsigned i = 0; i < 3; i++) {
++		now += NXDN_TRUNK_ANSWER_MS;
++		nxdn_trunk_tick(&t, false, now);
++	}
++	CHECK(t.req == NXDN_REQ_TIMEOUT && nsent == 3, "timeout after %u", nsent);
++	nxdn_trunk_ptt(&t, false, now);
++	// Released before the assignment: the assignment then is not ours to take
++	nxdn_trunk_ptt(&t, true, now);
++	nxdn_trunk_ptt(&t, false, now);
++	assgn(m, NXDN_MSG_VCALL_ASSGN, NXDN_CALL_GROUP, 321, 100, 40, false);
++	before = ntuned;
++	nxdn_trunk_msg(&t, m, now);
++	CHECK(t.req == NXDN_REQ_IDLE && t.state == NXDN_TRUNK_VOICE && t.follows > 0, "released: followed as a listener");
++	now += NXDN_TRUNK_VOICE_LOST_MS;
++	nxdn_trunk_tick(&t, false, now);
++
++	// DFA: the inbound frequency number is where we transmit
++	site_info(m, true, 2, 3);
++	nxdn_trunk_msg(&t, m, now);
++	nxdn_trunk_ptt(&t, true, now);
++	assgn(m, NXDN_MSG_VCALL_ASSGN, NXDN_CALL_GROUP, 321, 100, 40000, true);
++	m[10] = (uint8_t)(44000 >> 8); m[11] = (uint8_t)44000;
++	nxdn_trunk_msg(&t, m, now + 2000);
++	CHECK(t.req == NXDN_REQ_TALK && t.voice_hz == 450000000u && t.talk_hz == 455000000u, "DFA talk %u / %u",
++	      (unsigned)t.voice_hz, (unsigned)t.talk_hz);
++	nxdn_trunk_talk_end(&t, now + 3000);
++	nxdn_trunk_ptt(&t, false, now + 3000);
++
++	// Listen only: no registration, PTT refused
++	cfg.tx = false;
++	nsent = 0;
++	nxdn_trunk_begin(&t, &cfg, tune, sendf, NULL, now);
++	nxdn_trunk_tick(&t, false, now + 5000);
++	CHECK(nsent == 0 && nxdn_trunk_can_talk(&t) == NXDN_TALK_OFF, "listen only");
++}
++
++int main(void)
++{
++	nxdn_trunk_t t;
++	uint8_t m[NXDN_CAC_MSG_BYTES];
++	nxdn_trunk_cfg_t cfg = { .cc_hz = 451000000u, .base_hz = 450000000u, .spacing_hz = 6250, .group = 100,
++				 .unit_id = 321, .all_groups = false };
++	uint32_t now = 1000;
++
++	// Begin: on the control channel
++	nxdn_trunk_begin(&t, &cfg, tune, NULL, NULL, now);
++	CHECK(ntuned == 1 && tuned[0] == cfg.cc_hz && t.state == NXDN_TRUNK_CONTROL, "begin tunes the control channel");
++
++	// Another group: not followed; our group by plan: channel 523 = 450 MHz + 523 x 6.25 kHz
++	assgn(m, NXDN_MSG_VCALL_ASSGN, NXDN_CALL_GROUP, 5, 200, 10, false);
++	nxdn_trunk_msg(&t, m, now);
++	CHECK(ntuned == 1 && t.state == NXDN_TRUNK_CONTROL, "another group stays");
++	assgn(m, NXDN_MSG_VCALL_ASSGN, NXDN_CALL_GROUP, 5, 100, 523, false);
++	nxdn_trunk_msg(&t, m, now);
++	CHECK(ntuned == 2 && tuned[1] == 450000000u + 523u * 6250u && t.state == NXDN_TRUNK_VOICE && t.src == 5,
++	      "our group by plan: %u", (unsigned)tuned[1]);
++
++	// Voice keeps it there; silence for the lost time brings it back
++	for (unsigned i = 0; i < 30; i++) {
++		now += 100;
++		nxdn_trunk_tick(&t, true, now);
++	}
++	CHECK(t.state == NXDN_TRUNK_VOICE, "voice holds the channel");
++	now += NXDN_TRUNK_VOICE_LOST_MS - 100;
++	nxdn_trunk_tick(&t, false, now);
++	CHECK(t.state == NXDN_TRUNK_VOICE, "not lost yet");
++	now += 100;
++	nxdn_trunk_tick(&t, false, now);
++	CHECK(t.state == NXDN_TRUNK_CONTROL && ntuned == 3 && tuned[2] == cfg.cc_hz && t.voice_lost == 1, "back on silence");
++
++	// The same assignment repeated right after: not rejoined; after the guard it is
++	assgn(m, NXDN_MSG_VCALL_ASSGN_DUP, NXDN_CALL_GROUP, 5, 100, 523, false);
++	nxdn_trunk_msg(&t, m, now + 100);
++	CHECK(ntuned == 3 && t.refused == NXDN_TRUNK_REFUSE_REJOIN, "rejoin guard");
++	now += NXDN_TRUNK_REJOIN_MS;
++	nxdn_trunk_msg(&t, m, now);
++	CHECK(ntuned == 4 && t.state == NXDN_TRUNK_VOICE, "followed again after the guard");
++	// A voice channel that never carries voice: back after the grace
++	now += NXDN_TRUNK_VOICE_LOST_MS;
++	nxdn_trunk_tick(&t, false, now);
++	CHECK(t.state == NXDN_TRUNK_CONTROL && ntuned == 5, "no voice at all: back");
++	// A CAC message while on a voice channel (still in the pipe) is ignored
++	t.state = NXDN_TRUNK_VOICE;
++	assgn(m, NXDN_MSG_VCALL_ASSGN, NXDN_CALL_GROUP, 6, 100, 7, false);
++	nxdn_trunk_msg(&t, m, now);
++	CHECK(ntuned == 5, "no assignment taken on a voice channel");
++	t.state = NXDN_TRUNK_CONTROL;
++
++	// All call and an individual call to us are followed; one to another unit isn't
++	now += 5000;
++	assgn(m, NXDN_MSG_VCALL_ASSGN, NXDN_CALL_INDIVIDUAL, 9, 322, 1, false);
++	nxdn_trunk_msg(&t, m, now);
++	CHECK(ntuned == 5, "a unit call to someone else");
++	assgn(m, NXDN_MSG_VCALL_ASSGN, NXDN_CALL_INDIVIDUAL, 9, 321, 1, false);
++	nxdn_trunk_msg(&t, m, now);
++	CHECK(ntuned == 6 && t.unit_call && tuned[5] == 450006250u, "a unit call to us");
++	now += NXDN_TRUNK_VOICE_LOST_MS;
++	nxdn_trunk_tick(&t, false, now);
++	assgn(m, NXDN_MSG_VCALL_ASSGN, NXDN_CALL_GROUP, 9, NXDN_ID_ALL, 2, false);
++	nxdn_trunk_msg(&t, m, now);
++	CHECK(ntuned == 8 && t.state == NXDN_TRUNK_VOICE, "all call");
++	now += NXDN_TRUNK_VOICE_LOST_MS;
++	nxdn_trunk_tick(&t, false, now);
++
++	// DFA: SITE_INFO says step 1.25 kHz, base 400 MHz; the 16-bit number is the frequency, the plan is not used
++	site_info(m, true, 2, 3);
++	nxdn_trunk_msg(&t, m, now);
++	CHECK(t.site_known && t.dfa && t.step == 2 && t.base == 3, "site info");
++	assgn(m, NXDN_MSG_VCALL_ASSGN, NXDN_CALL_GROUP, 5, 100, 40000, true);
++	CHECK(nxdn_trunk_chan_hz(&t, m) == 400000000u + 40000u * 1250u, "DFA frequency %u", (unsigned)nxdn_trunk_chan_hz(&t, m));
++	nxdn_trunk_msg(&t, m, now);
++	CHECK(ntuned == 10 && tuned[9] == 450000000u, "DFA followed: %u", (unsigned)tuned[9]);
++	now += NXDN_TRUNK_VOICE_LOST_MS;
++	nxdn_trunk_tick(&t, false, now);
++	// A site whose base is system specific (0): refused, not tuned to nonsense
++	site_info(m, true, 3, 0);
++	nxdn_trunk_msg(&t, m, now);
++	assgn(m, NXDN_MSG_VCALL_ASSGN, NXDN_CALL_GROUP, 5, 100, 12, true);
++	nxdn_trunk_msg(&t, m, now);
++	CHECK(ntuned == 11 && t.refused == NXDN_TRUNK_REFUSE_NO_PLAN && t.state == NXDN_TRUNK_CONTROL, "unknown base refused");
++
++	// Without a plan, channel numbers can't be followed; with every group, any group is
++	cfg.base_hz = 0;
++	cfg.all_groups = true;
++	nxdn_trunk_begin(&t, &cfg, tune, NULL, NULL, now);
++	assgn(m, NXDN_MSG_VCALL_ASSGN, NXDN_CALL_GROUP, 5, 777, 12, false);
++	nxdn_trunk_msg(&t, m, now);
++	CHECK(t.state == NXDN_TRUNK_CONTROL && t.refused == NXDN_TRUNK_REFUSE_NO_PLAN && t.refusals == 1, "no plan");
++	site_info(m, false, 0, 0);
++	nxdn_trunk_msg(&t, m, now);
++	cfg.base_hz = 440000000u;
++	t.cfg = cfg;
++	assgn(m, NXDN_MSG_VCALL_ASSGN, NXDN_CALL_GROUP, 5, 777, 12, false);
++	nxdn_trunk_msg(&t, m, now);
++	CHECK(t.state == NXDN_TRUNK_VOICE && t.voice_hz == 440075000u, "every group, plan after RCN 0: %u", (unsigned)t.voice_hz);
++	// The longest call: back even with voice
++	for (uint32_t i = 0; i <= NXDN_TRUNK_CALL_MAX_MS / 100; i++) {
++		now += 100;
++		nxdn_trunk_tick(&t, true, now);
++	}
++	CHECK(t.state == NXDN_TRUNK_CONTROL && t.call_max == 1, "call max");
++
++	testTx();
++	printf("nxdnTrunkTest: %d checks, %d failed\n", checks, failures);
++	return failures ? 1 : 0;
++}
+diff --git a/tests/host/uiFlowTest.c b/tests/host/uiFlowTest.c
+index c5e0c16..9056aa4 100644
+--- a/tests/host/uiFlowTest.c
++++ b/tests/host/uiFlowTest.c
+@@ -159,8 +159,15 @@ static const flow_t flows[] = {
+ 	{ "NXDN RAN: typed", "dlmode:nxdn ok 5 up up up ok down down down", "ok 1 7 ok", "focus=RAN shows=17", 4, false },
+ 	{ "NXDN rate: 4800", "dlmode:nxdn ok 5 up up up ok down down down down", "ok", "focus=Rate shows=4800_bit/s", 1,
+ 	  false },
+-	{ "NXDN ID: past 65519 refused", "dlmode:nxdn ok 5 up up up ok down down down down down down down down down down",
++	{ "NXDN ID: past 65519 refused", "dlmode:nxdn ok 5 up up up ok down down down down down down down down down down down",
+ 	  "ok 7 0 0 0 0 ok", "toast=NXDN_IDs_go_up_to_65519", 7, false },
++	// Type-C trunking (nxdn-trunking.md): the row under Rate cycles off, our group, every group
++	{ "NXDN trunk: off", "dlmode:nxdn ok 5 up up up ok down down down down down", "",
++	  "focus=Trunk shows=Off", 0, false },
++	{ "NXDN trunk: group", "dlmode:nxdn ok 5 up up up ok down down down down down", "ok",
++	  "focus=Trunk shows=Group", 1, false },
++	{ "NXDN trunk: every group", "dlmode:nxdn ok 5 up up up ok down down down down down", "ok ok",
++	  "focus=Trunk shows=All_groups", 2, false },
+ 	{ "NXDN RAN: saved with the channel", "dlmode:nxdn ok 5 up up up ok down down down ok 1 7 ok", "long:ok",
+ 	  "writes=1 toast=Saved_as_channel_41", 1, true },
+ 	// From NXDN 9600 the row goes to FM, then round through DMR and P25 to NXDN at 4800 and back to 9600
+diff --git a/tests/vectors/channel-modes.txt b/tests/vectors/channel-modes.txt
+index 481e0f4..dbad89d 100644
+--- a/tests/vectors/channel-modes.txt
++++ b/tests/vectors/channel-modes.txt
+@@ -87,6 +87,15 @@ nxdnconv 0007C5 1 7 7 0
+ nxdnconv 0D3FBF 0 3F 3F 1
+ nxdnconv 0000050A 1 0 1 0
+ #
++# nxdntrunk <block> <trunked> <every group> <plan base Hz> <plan spacing Hz> (decimal): an NXDN channel's trunking
++# bytes 5-11 (nxdn-trunking.md 3); a shorter block is conventional, no plan without a spacing
++nxdntrunk 0000000000 0 0 0 0
++nxdntrunk 000000000001 1 0 0 0
++nxdntrunk 000000000003 1 1 0 0
++nxdntrunk 000000000002 0 0 0 0
++nxdntrunk 0000000000018074D21A3200 1 0 450000000 6250
++nxdntrunk 0000000000018074D21A0000 1 0 0 0
++nxdntrunk 0401000000038074D21A6400 1 1 450000000 12500
+ # nxdnenc <9600> <RX RAN> <TX RAN> <squelch> <block>: encoding
+ nxdnenc 1 0 1 0 0000000000
+ nxdnenc 1 0 1 1 0100000000
