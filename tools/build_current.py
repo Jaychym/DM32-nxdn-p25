@@ -83,6 +83,8 @@ PATCHES = (
 	'nxdn-csv-mode.patch',
 	# P25 TX (and YSF VW, same voice path): 4:1 soft limiter above a 3/4-scale knee instead of hard clipping
 	'p25-tx-limiter.patch',
+	# User guide: the ninth VFO digit for GHz RX, and the Tools > RX past bands gate that refuses it while Off
+	'vfo-ghz-entry-doc.patch',
 )
 
 

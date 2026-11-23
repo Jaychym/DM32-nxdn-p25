@@ -1,0 +1,19 @@
+diff --git a/docs/user/07-channels-zones-vfo.md b/docs/user/07-channels-zones-vfo.md
+index e75097a..83bbdb9 100644
+--- a/docs/user/07-channels-zones-vfo.md
++++ b/docs/user/07-channels-zones-vfo.md
+@@ -247,8 +247,12 @@ what you typed as you go.
+ - Type at least the three MHz digits, then press **OK** (or **#** where the radio has that key) to tune.
+ - **Back** deletes the last digit.
+ - A digit that can't lead to a frequency in the radio's bands is refused, and the radio shows the bands. The bands
+-  depend on the radio ([Radio reference](23-radios.md)).
+-- Up to eight digits (10 Hz). After 10 s without a key, the entry is dropped.
++  depend on the radio ([Radio reference](23-radios.md)). On a radio with extended receive, a digit past the rated
++  bands is refused while **Tools > RX past bands** is Off.
++- Up to eight digits (10 Hz) — nine on a radio with receive above 1 GHz, where a ninth digit switches the whole
++  entry to four MHz digits: **1 1 2 0 0 0 0 0 0** is 1120.00000 MHz (the first digits read as 112 MHz until the
++  ninth lands). Above 1 GHz needs **Tools > RX past bands** On and tunes receive only; a channel can't hold a GHz
++  frequency. After 10 s without a key, the entry is dropped.
+ 
+ <img src="../ux/screens/160x120i5/home_vfo_entry.png" width="200" alt="Typing a VFO frequency">
+ 
