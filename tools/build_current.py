@@ -73,6 +73,10 @@ PATCHES = (
 	# Codec 2 (LGPL-2.1, 3200 bit/s files only) and M17 stream voice as a per-channel mode; --no-m17 leaves it out
 	'codec2-vendor.patch',
 	'm17-mode.patch',
+	# M17 TX: integer Codec 2 3200 analysis; reference floating-point RX and the 15 ms guard stay in place
+	'm17-fixed-tx.patch',
+	# DM-32UV: experimental FM RX through 1120 MHz, nine-digit GHz VFO entry, always RX-only
+	'dm32-rx-1120.patch',
 )
 
 

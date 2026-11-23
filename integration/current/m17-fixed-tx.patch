@@ -1,0 +1,655 @@
+diff --git a/Makefile b/Makefile
+index e71edd2..7aa967e 100644
+--- a/Makefile
++++ b/Makefile
+@@ -318,8 +318,8 @@ OBJ := $(APP_OBJ) $(TP_OBJ)
+ ifeq ($(CONFIG_M17),y)
+ C2_OBJ := $(patsubst %.c,$(BUILD)/%.o,$(sort $(wildcard core/codec2/*.c)))
+ OBJ += $(C2_OBJ)
+-$(C2_OBJ): CFLAGS_3P += -Icore/codec2 -D__EMBEDDED__ -DNDEBUG -DCODEC2_MODE_EN_DEFAULT=0 -DCODEC2_MODE_3200_EN=1 \
+-	-Dmalloc=codec2_malloc -Dcalloc=codec2_calloc -Dfree=codec2_free
++$(C2_OBJ): CFLAGS_3P += -Icore/codec2 -D__EMBEDDED__ -DNDEBUG -DCODEC2_FIXED_3200=1 -DCODEC2_MODE_EN_DEFAULT=0 \
++	-DCODEC2_MODE_3200_EN=1 -Dmalloc=codec2_malloc -Dcalloc=codec2_calloc -Dfree=codec2_free
+ endif
+ 
+ # No built-in suffix rules (the .S -> .s rule deletes sources on case-insensitive file systems, gotchas 13.3)
+diff --git a/core/codec2/README.md b/core/codec2/README.md
+index 001134f..d427dd8 100644
+--- a/core/codec2/README.md
++++ b/core/codec2/README.md
+@@ -10,15 +10,24 @@ with `CONFIG_M17=y`, with the third-party flags (no warnings checked), and can b
+ |---|---|
+ | Upstream | https://github.com/drowe67/codec2 |
+ | Commit | 310777b1c6f1af0bc7c72f5b32f80f6fd9136962 (2026-03-17), version 1.2.0 |
+-| Files | copied unchanged from `src/`, line endings LF |
++| Files | copied from `src/`, line endings LF; `codec2.c` and `codec2_internal.h` also carry the fixed-TX integration below |
+ | `codebookd.c` | generated: `generate_codebook lsp_cbd src/codebook/dlsp1.txt ... dlsp10.txt` (the input paths in its comments shortened) |
+ | `version.h` | `cmake/version.h.in` with the version filled in; reached as `<codec2/version.h>` through `-Icore` |
+ 
+ Build flags (Makefile, tests/host/Makefile): `-DCODEC2_MODE_EN_DEFAULT=0 -DCODEC2_MODE_3200_EN=1` (only the 3200
+-mode), `-D__EMBEDDED__ -DNDEBUG`, and `-Dmalloc=codec2_malloc -Dcalloc=codec2_calloc -Dfree=codec2_free`, so every
+-allocation (codec2.c, nlp.c, kiss_fft.c) goes to the arena of core/m17/m17_voice.c. All of them happen in
+-`codec2_create`; at 512 points the FFTs need no temporary buffers. The other modes' code is referenced from
+-`codec2.c` and `quantise.c` but never called: the link needs `--gc-sections` with `-ffunction-sections` (the
+-firmware's flags; the host test builds this directory with them too).
++mode), `-DCODEC2_FIXED_3200=1`, `-D__EMBEDDED__ -DNDEBUG`, and
++`-Dmalloc=codec2_malloc -Dcalloc=codec2_calloc -Dfree=codec2_free`, so every allocation (codec2.c, nlp.c,
++kiss_fft.c) goes to the arena of core/m17/m17_voice.c. All of them happen in `codec2_create`; at 512 points the FFTs
++need no temporary buffers. The other modes' code is referenced from `codec2.c` and `quantise.c` but never called:
++the link needs `--gc-sections` with `-ffunction-sections` (the firmware's flags; the host test builds this directory
++with them too).
+ 
+-Not checked: real-time on a core without an FPU. Codec 2 is floating point; see docs/spec/m17.md.
++With `CODEC2_FIXED_3200`, `codec2_fixed_3200.c` replaces only the 3200-bit/s encoder. It uses integer LPC/LSP
++analysis, pitch, energy and LSPD quantization to emit the standard 64-bit Codec 2 3200 frame; the upstream floating-
++point decoder is unchanged, so M17 receive and bitstream interoperability keep the reference implementation. The
++encoder is not bit-exact with upstream: pitch and voicing decisions can differ. `m17VoiceTest` checks reference
++decode level, silence, a known 120 Hz pitch, and rejects floating-point or libm dependencies in the fixed encoder's
++object.
++
++Not checked on the CK803S: instruction count, execution time, audible microphone quality or on-air interoperability.
++Host verification does not prove the 15 ms radio budget. See docs/spec/m17.md.
+diff --git a/core/codec2/codec2.c b/core/codec2/codec2.c
+index b27626a..0a945b9 100644
+--- a/core/codec2/codec2.c
++++ b/core/codec2/codec2.c
+@@ -39,6 +39,9 @@
+ #include "bpfb.h"
+ #include "codec2_fft.h"
+ #include "codec2_internal.h"
++#ifdef CODEC2_FIXED_3200
++#include "codec2_fixed_3200.h"
++#endif
+ #include "debug_alloc.h"
+ #include "defines.h"
+ #include "dump.h"
+@@ -126,6 +129,9 @@ struct CODEC2 *codec2_create(int mode) {
+   if (c2 == NULL) return NULL;
+ 
+   c2->mode = mode;
++#ifdef CODEC2_FIXED_3200
++  codec2_fixed_3200_init(c2);
++#endif
+ 
+   /* store constants in a few places for convenience */
+ 
+@@ -431,6 +437,9 @@ void codec2_decode_ber(struct CODEC2 *c2, short speech[],
+ 
+ void codec2_encode_3200(struct CODEC2 *c2, unsigned char *bits,
+                         short speech[]) {
++#ifdef CODEC2_FIXED_3200
++  codec2_fixed_3200_encode(c2, bits, speech);
++#else
+   MODEL model;
+   float ak[LPC_ORD + 1];
+   float lsps[LPC_ORD];
+@@ -465,6 +474,7 @@ void codec2_encode_3200(struct CODEC2 *c2, unsigned char *bits,
+     pack(bits, &nbit, lspd_indexes[i], lspd_bits(i));
+   }
+   assert(nbit == (unsigned)codec2_bits_per_frame(c2));
++#endif
+ }
+ 
+ /*---------------------------------------------------------------------------*\
+diff --git a/core/codec2/codec2_fixed_3200.c b/core/codec2/codec2_fixed_3200.c
+new file mode 100644
+index 0000000..4482190
+--- /dev/null
++++ b/core/codec2/codec2_fixed_3200.c
+@@ -0,0 +1,411 @@
++// SPDX-License-Identifier: LGPL-2.1-only
++// Fixed-point Codec 2 3200 encoder for MCUs without an FPU.
++// Derived from the Codec 2 analysis, LPC/LSP conversion and scalar quantizers.
++// The bitstream is standard Codec 2 3200; the analysis is intentionally not bit-exact.
++#include "codec2_fixed_3200.h"
++
++#include <string.h>
++
++#include "quantise.h"
++
++#define Q 20
++#define ONE (1 << Q)
++#define N 320
++#define NW 279
++#define WSTART (N / 2 - NW / 2)
++#define LPC 10
++
++static const uint16_t hann_q15[279] = {
++  0, 4, 17, 38, 67, 105, 150, 205, 267, 338, 417, 504,
++  599, 702, 813, 933, 1060, 1195, 1337, 1488, 1646, 1811, 1984, 2164,
++  2352, 2547, 2748, 2957, 3173, 3395, 3624, 3860, 4102, 4350, 4604, 4864,
++  5131, 5403, 5680, 5963, 6252, 6545, 6844, 7147, 7455, 7768, 8085, 8407,
++  8732, 9062, 9395, 9731, 10071, 10415, 10761, 11110, 11462, 11817, 12173, 12532,
++  12893, 13256, 13620, 13986, 14353, 14721, 15089, 15459, 15829, 16199, 16569, 16939,
++  17309, 17679, 18047, 18415, 18782, 19148, 19512, 19875, 20236, 20595, 20951, 21306,
++  21658, 22007, 22353, 22697, 23037, 23373, 23706, 24036, 24361, 24683, 25000, 25313,
++  25621, 25924, 26223, 26516, 26805, 27088, 27365, 27637, 27904, 28164, 28418, 28666,
++  28908, 29144, 29373, 29595, 29811, 30020, 30221, 30416, 30604, 30784, 30957, 31122,
++  31280, 31431, 31573, 31708, 31835, 31955, 32066, 32169, 32264, 32351, 32430, 32501,
++  32563, 32618, 32663, 32701, 32730, 32751, 32764, 32768, 32764, 32751, 32730, 32701,
++  32663, 32618, 32563, 32501, 32430, 32351, 32264, 32169, 32066, 31955, 31835, 31708,
++  31573, 31431, 31280, 31122, 30957, 30784, 30604, 30416, 30221, 30020, 29811, 29595,
++  29373, 29144, 28908, 28666, 28418, 28164, 27904, 27637, 27365, 27088, 26805, 26516,
++  26223, 25924, 25621, 25313, 25000, 24683, 24361, 24036, 23706, 23373, 23037, 22697,
++  22353, 22007, 21658, 21306, 20951, 20595, 20236, 19875, 19512, 19148, 18782, 18415,
++  18047, 17679, 17309, 16939, 16569, 16199, 15829, 15459, 15089, 14721, 14353, 13986,
++  13620, 13256, 12893, 12532, 12173, 11817, 11462, 11110, 10761, 10415, 10071, 9731,
++  9395, 9062, 8732, 8407, 8085, 7768, 7455, 7147, 6844, 6545, 6252, 5963,
++  5680, 5403, 5131, 4864, 4604, 4350, 4102, 3860, 3624, 3395, 3173, 2957,
++  2748, 2547, 2352, 2164, 1984, 1811, 1646, 1488, 1337, 1195, 1060, 933,
++  813, 702, 599, 504, 417, 338, 267, 205, 150, 105, 67, 38,
++  17, 4, 0
++};
++
++static const uint16_t acos_hz[257] = {
++  0, 159, 225, 276, 319, 357, 391, 423, 453, 480, 507, 532,
++  556, 579, 601, 623, 643, 664, 683, 703, 721, 740, 758, 775,
++  792, 809, 826, 842, 858, 874, 890, 905, 920, 935, 950, 964,
++  979, 993, 1007, 1021, 1035, 1048, 1062, 1075, 1089, 1102, 1115, 1128,
++  1140, 1153, 1166, 1178, 1191, 1203, 1215, 1227, 1239, 1251, 1263, 1275,
++  1287, 1299, 1310, 1322, 1333, 1345, 1356, 1368, 1379, 1390, 1401, 1412,
++  1423, 1434, 1445, 1456, 1467, 1478, 1489, 1500, 1511, 1521, 1532, 1543,
++  1553, 1564, 1574, 1585, 1595, 1606, 1616, 1627, 1637, 1647, 1658, 1668,
++  1678, 1689, 1699, 1709, 1719, 1729, 1740, 1750, 1760, 1770, 1780, 1790,
++  1800, 1810, 1820, 1830, 1840, 1850, 1860, 1870, 1880, 1890, 1900, 1910,
++  1920, 1930, 1940, 1950, 1960, 1970, 1980, 1990, 2000, 2010, 2020, 2030,
++  2040, 2050, 2060, 2070, 2080, 2090, 2100, 2110, 2120, 2130, 2140, 2150,
++  2160, 2170, 2180, 2190, 2200, 2210, 2220, 2230, 2240, 2250, 2260, 2271,
++  2281, 2291, 2301, 2311, 2322, 2332, 2342, 2353, 2363, 2373, 2384, 2394,
++  2405, 2415, 2426, 2436, 2447, 2457, 2468, 2479, 2489, 2500, 2511, 2522,
++  2533, 2544, 2555, 2566, 2577, 2588, 2599, 2610, 2621, 2632, 2644, 2655,
++  2667, 2678, 2690, 2701, 2713, 2725, 2737, 2749, 2761, 2773, 2785, 2797,
++  2809, 2822, 2834, 2847, 2860, 2872, 2885, 2898, 2911, 2925, 2938, 2952,
++  2965, 2979, 2993, 3007, 3021, 3036, 3050, 3065, 3080, 3095, 3110, 3126,
++  3142, 3158, 3174, 3191, 3208, 3225, 3242, 3260, 3279, 3297, 3317, 3336,
++  3357, 3377, 3399, 3421, 3444, 3468, 3493, 3520, 3547, 3577, 3609, 3643,
++  3681, 3724, 3775, 3841, 4000
++};
++
++static const uint16_t log2_frac[256] = {
++  0, 369, 736, 1102, 1466, 1829, 2190, 2551, 2909, 3267, 3623, 3978,
++  4331, 4683, 5034, 5384, 5732, 6079, 6425, 6769, 7112, 7454, 7795, 8134,
++  8473, 8810, 9146, 9480, 9814, 10146, 10477, 10807, 11136, 11464, 11791, 12116,
++  12440, 12764, 13086, 13407, 13727, 14046, 14363, 14680, 14996, 15310, 15624, 15937,
++  16248, 16559, 16868, 17177, 17484, 17791, 18096, 18401, 18704, 19007, 19308, 19609,
++  19909, 20207, 20505, 20802, 21098, 21393, 21687, 21980, 22272, 22564, 22854, 23144,
++  23433, 23720, 24007, 24293, 24579, 24863, 25146, 25429, 25711, 25992, 26272, 26551,
++  26830, 27108, 27384, 27660, 27936, 28210, 28484, 28757, 29029, 29300, 29571, 29840,
++  30109, 30378, 30645, 30912, 31178, 31443, 31707, 31971, 32234, 32496, 32758, 33019,
++  33279, 33538, 33797, 34055, 34312, 34569, 34825, 35080, 35334, 35588, 35841, 36094,
++  36346, 36597, 36847, 37097, 37346, 37595, 37842, 38090, 38336, 38582, 38827, 39072,
++  39316, 39559, 39802, 40044, 40286, 40527, 40767, 41006, 41246, 41484, 41722, 41959,
++  42196, 42432, 42667, 42902, 43137, 43370, 43603, 43836, 44068, 44300, 44530, 44761,
++  44990, 45220, 45448, 45676, 45904, 46131, 46357, 46583, 46809, 47034, 47258, 47482,
++  47705, 47928, 48150, 48372, 48593, 48813, 49034, 49253, 49472, 49691, 49909, 50127,
++  50344, 50560, 50776, 50992, 51207, 51422, 51636, 51850, 52063, 52276, 52488, 52700,
++  52911, 53122, 53332, 53542, 53751, 53960, 54169, 54377, 54584, 54791, 54998, 55204,
++  55410, 55615, 55820, 56025, 56229, 56432, 56635, 56838, 57040, 57242, 57443, 57644,
++  57845, 58045, 58245, 58444, 58643, 58841, 59039, 59237, 59434, 59631, 59827, 60023,
++  60219, 60414, 60609, 60803, 60997, 61190, 61384, 61576, 61769, 61961, 62152, 62343,
++  62534, 62725, 62915, 63104, 63294, 63483, 63671, 63859, 64047, 64234, 64421, 64608,
++  64794, 64980, 65166, 65351
++};
++
++static const uint16_t fixed_lsp_cb[LPC][32] = {
++  {25, 50, 75, 100, 125, 150, 175, 200, 225, 250, 275, 300, 325, 350, 375, 400, 425, 450, 475, 500, 525, 550, 575, 600, 625, 650, 675, 700, 725, 750, 775, 800},
++  {25, 50, 75, 100, 125, 150, 175, 200, 225, 250, 275, 300, 325, 350, 375, 400, 425, 450, 475, 500, 525, 550, 575, 600, 625, 650, 675, 700, 725, 750, 775, 800},
++  {25, 50, 75, 100, 125, 150, 175, 200, 225, 250, 275, 300, 325, 350, 375, 400, 425, 450, 475, 500, 525, 550, 575, 600, 625, 650, 675, 700, 725, 750, 775, 800},
++  {25, 50, 75, 100, 125, 150, 175, 200, 250, 300, 350, 400, 450, 500, 550, 600, 650, 700, 750, 800, 850, 900, 950, 1000, 1050, 1100, 1150, 1200, 1250, 1300, 1350, 1400},
++  {25, 50, 75, 100, 125, 150, 175, 200, 250, 300, 350, 400, 450, 500, 550, 600, 650, 700, 750, 800, 850, 900, 950, 1000, 1050, 1100, 1150, 1200, 1250, 1300, 1350, 1400},
++  {25, 50, 75, 100, 125, 150, 175, 200, 250, 300, 350, 400, 450, 500, 550, 600, 650, 700, 750, 800, 850, 900, 950, 1000, 1050, 1100, 1150, 1200, 1250, 1300, 1350, 1400},
++  {25, 50, 75, 100, 125, 150, 175, 200, 225, 250, 275, 300, 325, 350, 375, 400, 425, 450, 475, 500, 525, 550, 575, 600, 625, 650, 675, 700, 725, 750, 775, 800},
++  {25, 50, 75, 100, 125, 150, 175, 200, 225, 250, 275, 300, 325, 350, 375, 400, 425, 450, 475, 500, 525, 550, 575, 600, 625, 650, 675, 700, 725, 750, 775, 800},
++  {25, 50, 75, 100, 125, 150, 175, 200, 225, 250, 275, 300, 325, 350, 375, 400, 425, 450, 475, 500, 525, 550, 575, 600, 625, 650, 675, 700, 725, 750, 775, 800},
++  {25, 50, 75, 100, 125, 150, 175, 200, 225, 250, 275, 300, 325, 350, 375, 400, 425, 450, 475, 500, 525, 550, 575, 600, 625, 650, 675, 700, 725, 750, 775, 800}
++};
++static const int32_t bw_q[LPC + 1] = { 1048576, 1042285, 1036031, 1029815, 1023636, 1017494, 1011389, 1005321, 999289, 993293, 987333 };
++static const uint64_t hann_power = 111937147848ull;
++
++
++static int32_t mul(int32_t a, int32_t b)
++{
++	return (int32_t)(((int64_t)a * b) >> Q);
++}
++
++static int32_t div_q(int32_t a, int32_t b)
++{
++	return b != 0 ? (int32_t)(((int64_t)a * ONE) / b) : 0;
++}
++
++// log2 of a nonzero integer, Q16. The top eight mantissa bits select the table entry.
++static int32_t log2_u64(uint64_t x)
++{
++	int msb = 0;
++	uint64_t t = x;
++
++	while (t >>= 1)
++		msb++;
++	uint8_t i = msb >= 8 ? (uint8_t)(x >> (msb - 8)) : (uint8_t)(x << (8 - msb));
++	return msb * 65536 + log2_frac[i];
++}
++
++// 10*log10(x), Q16, from a log2(x) in the same format.
++static int32_t db10(int32_t log2x)
++{
++	return (int32_t)(((int64_t)log2x * 197283 + 32768) >> 16);
++}
++
++static int energy_index(uint64_t raw, int32_t residual)
++{
++	if (raw == 0 || residual <= 0)
++		return 0;
++	// raw is sum((speech*hann_q15)^2)/2^30. hann_power is sum(hann_q15^2).
++	// E = raw * residual * 2 / hann_power; residual is Q20 and is included as an integer here.
++	int32_t loge = log2_u64(raw) + log2_u64((uint32_t)residual) - log2_u64(hann_power) + 65536;
++	int32_t db = db10(loge);
++	int32_t index = (int32_t)(((int64_t)(db + 10 * 65536) * 32 + 25 * 65536) / (50 * 65536));
++	return index < 0 ? 0 : index > 31 ? 31 : index;
++}
++
++static int pitch_index(int period)
++{
++	if (period < 20)
++		period = 20;
++	if (period > 160)
++		period = 160;
++	// Wo=2*pi/p, linearly quantized between 2*pi/160 and 2*pi/20.
++	int index = (128 * (160 - period) + (7 * period) / 2) / (7 * period);
++	return index < 0 ? 0 : index > 127 ? 127 : index;
++}
++
++// Normalized autocorrelation. Dynamic scaling preserves quiet speech and keeps 80 products in 32 bits.
++static int analyse_pitch(const int16_t *x, int *voiced, int previous)
++{
++	int16_t scores[141];
++	int32_t energy = 1;
++	int best = 20, best_score = 0;
++	int peak = 0, shift = 0;
++
++	for (int n = -160; n < 80; n++) {
++		int a = x[n] < 0 ? -x[n] : x[n];
++		if (a > peak) peak = a;
++	}
++	while ((peak >> shift) > 2047 && shift < 4) shift++;
++	for (int n = 0; n < 80; n++) {
++		int32_t v = x[n] >> shift;
++		energy += v * v;
++	}
++	for (int p = 20; p <= 160; p++) {
++		int32_t corr = 0, delayed = 0;
++		for (int n = 0; n < 80; n++) {
++			int32_t d = x[n - p] >> shift;
++			corr += (x[n] >> shift) * d;
++			delayed += d * d;
++		}
++		// 2*corr/(E+Edelayed) is bounded by one and does not favour level changes.
++		int score = corr > 0 ? (int)(((int64_t)corr * 65536) / (energy + delayed)) : 0;
++		scores[p - 20] = (int16_t)(score > 32767 ? 32767 : score);
++		if (score > best_score) {
++			best_score = score;
++			best = p;
++		}
++	}
++	// Reject octave jumps when a candidate near the previous voiced pitch is nearly as strong.
++	if (previous >= 20 && previous <= 160 &&
++	    best > previous + previous / 2) {
++		int lo = previous - previous / 4;
++		int hi = previous + previous / 4;
++		int near = previous;
++		if (lo < 20) lo = 20;
++		if (hi > 160) hi = 160;
++		for (int p = lo; p <= hi; p++)
++			if (scores[p - 20] > scores[near - 20]) near = p;
++		if (scores[near - 20] >= best_score - best_score / 4)
++			best = near;
++	}
++	// Prefer the shortest period near the selected peak, avoiding octave-down choices on vowels.
++	int selected_score = scores[best - 20];
++	int threshold = selected_score - (3 * selected_score) / 20;
++	int shortest = best / 2 - 2;
++	if (shortest < 20) shortest = 20;
++	for (int p = shortest; p < best; p++) {
++		if (scores[p - 20] >= threshold) {
++			best = p;
++			break;
++		}
++	}
++	*voiced = energy > (128 << (2 * shift)) && best_score >= 18022; // about -5.2 dB normalized correlation
++	return best;
++}
++
++static int32_t cheb(const int32_t *coef, int32_t x)
++{
++	int32_t t0 = ONE, t1 = x;
++	int32_t sum = coef[5] + mul(coef[4], x);
++	int32_t twox = 2 * x;
++
++	for (int i = 2; i <= 5; i++) {
++		int32_t t = mul(twox, t1) - t0;
++		sum += mul(coef[5 - i], t);
++		t0 = t1;
++		t1 = t;
++	}
++	return sum;
++}
++
++static int lpc_to_lsp_hz(const int32_t *a, int *hz)
++{
++	int32_t p[LPC + 1] = { ONE }, q[LPC + 1] = { ONE };
++	int roots = 0;
++
++	for (int i = 1; i <= 5; i++) {
++		p[i] = a[i] + a[LPC + 1 - i] - p[i - 1];
++		q[i] = a[i] - a[LPC + 1 - i] + q[i - 1];
++	}
++	for (int i = 0; i < 5; i++) {
++		p[i] *= 2;
++		q[i] *= 2;
++	}
++	int32_t xl = ONE;
++	const int32_t delta = ONE / 100;
++	for (int j = 0; j < LPC; j++) {
++		const int32_t *poly = (j & 1) ? q : p;
++		int32_t left = cheb(poly, xl);
++		int found = 0;
++		int32_t xm = 0;
++		while (xl >= -ONE) {
++			int32_t xr = xl - delta;
++			int32_t right = cheb(poly, xr);
++			if ((right <= 0 && left >= 0) || (right >= 0 && left <= 0)) {
++				for (int k = 0; k < 6; k++) {
++					xm = (xl + xr) / 2;
++					int32_t mid = cheb(poly, xm);
++					if ((mid <= 0 && left >= 0) || (mid >= 0 && left <= 0))
++						xr = xm;
++					else {
++						xl = xm;
++						left = mid;
++					}
++				}
++				xm = (xl + xr) / 2;
++				xl = xm;
++				found = 1;
++				roots++;
++				break;
++			}
++			xl = xr;
++			left = right;
++		}
++		if (!found)
++			break;
++		// acos(x), in Hz, through a 256-interval interpolating table.
++		uint32_t pos = (uint32_t)(((int64_t)(ONE - xm) * 256) >> 1);
++		unsigned i = pos >> Q;
++		if (i >= 256)
++			hz[j] = 4000;
++		else {
++			uint32_t f = pos & (ONE - 1);
++			hz[j] = (int)(acos_hz[i] + (((uint64_t)(acos_hz[i + 1] - acos_hz[i]) * f) >> Q));
++		}
++	}
++	return roots;
++}
++
++static void analyse_lpc(const int16_t *history, int *hz, uint64_t *raw_out, int32_t *residual_out)
++{
++	int16_t w[N], x[N];
++	uint64_t raw = 0;
++	int peak = 0;
++
++	memset(w, 0, sizeof w);
++	for (int i = 0; i < NW; i++) {
++		int32_t v = ((int32_t)history[WSTART + i] * hann_q15[i]) >> 15;
++		w[WSTART + i] = (int16_t)v;
++		raw += (uint32_t)(v * v);
++		int a = v < 0 ? -v : v;
++		if (a > peak)
++			peak = a;
++	}
++	*raw_out = raw;
++	if (raw == 0) {
++		for (int i = 0; i < LPC; i++)
++			hz[i] = i * 4000 / LPC;
++		*residual_out = 0;
++		return;
++	}
++	int shift = 0, p = peak;
++	while (p > 2048) { p >>= 1; shift--; }
++	while (p < 1024 && shift < 6) { p <<= 1; shift++; }
++	for (int i = 0; i < N; i++)
++		x[i] = shift >= 0 ? (int16_t)(w[i] << shift) : (int16_t)(w[i] >> -shift);
++
++	int32_t r[LPC + 1] = { 0 }, rn[LPC + 1];
++	for (int j = 0; j <= LPC; j++)
++		for (int i = WSTART; i < WSTART + NW - j; i++)
++			r[j] += (int32_t)x[i] * x[i + j];
++	if (r[0] <= 0) {
++		for (int i = 0; i < LPC; i++)
++			hz[i] = i * 4000 / LPC;
++		*residual_out = 0;
++		return;
++	}
++	for (int i = 0; i <= LPC; i++)
++		rn[i] = (int32_t)(((int64_t)r[i] * ONE) / r[0]);
++
++	int32_t a[LPC + 1] = { ONE }, prev[LPC + 1] = { 0 };
++	int32_t e = ONE;
++	for (int i = 1; i <= LPC; i++) {
++		int32_t sum = rn[i];
++		for (int j = 1; j < i; j++)
++			sum += mul(prev[j], rn[i - j]);
++		int32_t k = e > 0 ? -div_q(sum, e) : 0;
++		if (k > ONE || k < -ONE)
++			k = 0;
++		a[i] = k;
++		for (int j = 1; j < i; j++)
++			a[j] = prev[j] + mul(k, prev[i - j]);
++		e = mul(e, ONE - mul(k, k));
++		for (int j = 1; j <= i; j++)
++			prev[j] = a[j];
++	}
++	for (int i = 1; i <= LPC; i++)
++		a[i] = mul(a[i], bw_q[i]);
++	*residual_out = e;
++	if (lpc_to_lsp_hz(a, hz) != LPC)
++		for (int i = 0; i < LPC; i++)
++			hz[i] = i * 4000 / LPC;
++}
++
++void codec2_fixed_3200_init(struct CODEC2 *c2)
++{
++	for (int i = 0; i < N; i++)
++		c2->fixed_sn[i] = 1;
++	c2->fixed_pitch = 80;
++}
++
++void codec2_fixed_3200_encode(struct CODEC2 *c2, unsigned char *bits, short speech[])
++{
++	unsigned nbit = 0;
++	int voiced[2], period[2], hz[LPC];
++	uint64_t raw;
++	int32_t residual;
++
++	memmove(c2->fixed_sn, c2->fixed_sn + 160, 160 * sizeof(int16_t));
++	memcpy(c2->fixed_sn + 160, speech, 160 * sizeof(int16_t));
++	period[0] = analyse_pitch(c2->fixed_sn + 160, &voiced[0], c2->fixed_pitch);
++	if (voiced[0]) c2->fixed_pitch = (int16_t)period[0];
++	else period[0] = c2->fixed_pitch;
++	period[1] = analyse_pitch(c2->fixed_sn + 240, &voiced[1], c2->fixed_pitch);
++	if (voiced[1]) c2->fixed_pitch = (int16_t)period[1];
++	else period[1] = c2->fixed_pitch;
++	analyse_lpc(c2->fixed_sn, hz, &raw, &residual);
++
++	memset(bits, 0, 8);
++	pack(bits, &nbit, voiced[0], 1);
++	pack(bits, &nbit, voiced[1], 1);
++	pack(bits, &nbit, pitch_index(period[1]), 7);
++	pack(bits, &nbit, energy_index(raw, residual), 5);
++	int previous = 0;
++	for (int i = 0; i < LPC; i++) {
++		int target = i == 0 ? hz[i] : hz[i] - previous;
++		int lo = 0, hi = 31;
++		if (target <= (int)fixed_lsp_cb[i][0]) {
++			lo = 0;
++		} else if (target >= (int)fixed_lsp_cb[i][31]) {
++			lo = 31;
++		} else {
++			while (lo + 1 < hi) {
++				int mid = (lo + hi) / 2;
++				if ((int)fixed_lsp_cb[i][mid] <= target)
++					lo = mid;
++				else
++					hi = mid;
++			}
++			if (target - (int)fixed_lsp_cb[i][lo] > (int)fixed_lsp_cb[i][hi] - target)
++				lo = hi;
++		}
++		pack(bits, &nbit, lo, 5);
++		previous += fixed_lsp_cb[i][lo];
++	}
++}
+diff --git a/core/codec2/codec2_fixed_3200.h b/core/codec2/codec2_fixed_3200.h
+new file mode 100644
+index 0000000..c8022ac
+--- /dev/null
++++ b/core/codec2/codec2_fixed_3200.h
+@@ -0,0 +1,7 @@
++// SPDX-License-Identifier: LGPL-2.1-only
++#ifndef CODEC2_FIXED_3200_H
++#define CODEC2_FIXED_3200_H
++#include "codec2_internal.h"
++void codec2_fixed_3200_init(struct CODEC2 *c2);
++void codec2_fixed_3200_encode(struct CODEC2 *c2, unsigned char *bits, short speech[]);
++#endif
+diff --git a/core/codec2/codec2_internal.h b/core/codec2/codec2_internal.h
+index 32cd7eb..e9e0acd 100644
+--- a/core/codec2/codec2_internal.h
++++ b/core/codec2/codec2_internal.h
+@@ -29,6 +29,7 @@
+ #ifndef __CODEC2_INTERNAL__
+ #define __CODEC2_INTERNAL__
+ #include <stdbool.h>
++#include <stdint.h>
+ 
+ #include "codec2_fft.h"
+ #include "newamp1.h"
+@@ -49,6 +50,10 @@ struct CODEC2 {
+   float hpf_states[2];          /* high pass filter states                   */
+   void *nlp;                    /* pitch predictor states                    */
+   int gray;                     /* non-zero for gray encoding                */
++#ifdef CODEC2_FIXED_3200
++  int16_t fixed_sn[320];        /* 40 ms input history for the integer-only 3200 encoder */
++  int16_t fixed_pitch;          /* previous voiced pitch, in samples */
++#endif
+ 
+   codec2_fftr_cfg fftr_inv_cfg; /* inverse FFT config                        */
+   float *Sn_;                   /* [2*n_samp] synthesised output speech      */
+diff --git a/docs/spec/m17.md b/docs/spec/m17.md
+index d07cf18..86a95a7 100644
+--- a/docs/spec/m17.md
++++ b/docs/spec/m17.md
+@@ -110,17 +110,17 @@ frame; playback starts with four frames queued. With no encoder frame ready the
+ 
+ | Resource | Value |
+ |---|---|
+-| Memory | none of its own where the vocoder lends its code window (`hal_vocoder_t.lend_window`, `HAL_VOCODER_WINDOW`: the HR_C7000 platform, 83,456 B, idle while no DMR voice runs). While M17 runs the window holds the engine (about 1.8 KB), Codec 2's state and FFT tables (30,752 B on a 64-bit host, in a 31,744 B arena, `M17_VOICE_ARENA`) and the codec's stack. The vocoder's calls give silence meanwhile; leaving M17 copies its code back from the slot. Without a lending vocoder (the host tests) a static block holds the engine and the arena |
+-| Stack | Codec 2 runs on its own 24 KB (`M17_VOICE_STACK`) at the top of the window, through `hal_vocoder_t.call_on_stack` (`platform/hrc7000/call_on_stack.S`), not on the audio task's: 15,240 B used on a 64-bit host (m17VoiceTest runs it on such a stack). The audio task's stack and the FreeRTOS heap are unchanged |
+-| CPU | Codec 2 is floating point and the CK803S has no FPU: libgcc's generic soft-float (fp-bit) runs every operation, over 90 % of the work. Counted on the CK803S code (`-Os`, an instruction set simulator over its disassembly, output checked against the host's): 19.2 million instructions to encode a 20 ms block, 20.1 million to decode one, 22.9 million to make the codec. At 168 MHz and one instruction a cycle at best that is 114 ms and 120 ms for 20 ms of voice: 6 to 9 times too slow, before any flash or cache wait. Host x86-64 with an FPU: about 180 us and 14 us |
+-| Too slow | Each encode and decode is timed on the provider's microsecond clock. One over 15 ms (`M17_VOICE_BUDGET_US`) switches the codec off until a restart (`m17VoiceSlow`): no more codec calls, so the audio task, which runs above the radio and UI tasks, no longer keeps them out (before this check a slow codec held it busy without end: the radio froze on PTT). A transmission is cut and unkeyed, PTT refused (`TXDENY_CPU`, "CPU too slow for voice", with "M17 enc X dec Y ms"), received calls stay silent; the call's fields still show. The home screen's chips line shows the times in place of the CAN, the TX screen after the CAN |
++| Memory | none of its own where the vocoder lends its code window (`hal_vocoder_t.lend_window`, `HAL_VOCODER_WINDOW`: the HR_C7000 platform, 83,456 B, idle while no DMR voice runs). While M17 runs the window holds the engine (about 1.8 KB), Codec 2's state and FFT tables (31,392 B on a 64-bit host, in a 31,744 B arena, `M17_VOICE_ARENA`) and the codec's stack. The vocoder's calls give silence meanwhile; leaving M17 copies its code back from the slot. Without a lending vocoder (the host tests) a static block holds the engine and the arena |
++| Stack | Codec 2 runs on its own 24 KB (`M17_VOICE_STACK`) at the top of the window, through `hal_vocoder_t.call_on_stack` (`platform/hrc7000/call_on_stack.S`), not on the audio task's: 17,832 B used on a 64-bit host (m17VoiceTest runs it on such a stack). The audio task's stack and the FreeRTOS heap are unchanged |
++| CPU | `CODEC2_FIXED_3200` replaces the floating-point 3200 encoder with an integer TX analysis path (Q20 LPC/LSP, integer pitch, energy and LSPD quantization). It emits standard 64-bit Codec 2 3200 frames and has no floating-point/libm dependency in its host object; it is not bit-exact with upstream, especially in pitch and voicing. The reference floating-point decoder remains for RX and interoperability. The original encoder/decoder cost counted on CK803S code was 19.2/20.1 million instructions per 20 ms (114/120 ms at 168 MHz even at one instruction per cycle), and codec creation was 22.9 million; those counts do not measure the new fixed TX path. Host `m17VoiceTest` measured at most 12 us inside fixed encode and 34 us inside reference decode on the test machine; these are not CK803S timings |
++| Too slow | Each encode and decode is timed on the provider's microsecond clock. One over 15 ms (`M17_VOICE_BUDGET_US`) switches the codec off until a restart (`m17VoiceSlow`): no more codec calls, so the audio task, which runs above the radio and UI tasks, no longer keeps them out (before this check a slow codec held it busy without end: the radio froze on PTT). A transmission is cut and unkeyed, PTT refused (`TXDENY_CPU`, "CPU too slow for voice", with "M17 enc X dec Y ms"), received calls stay silent; the call's fields still show. The home screen's chips line shows the times in place of the CAN, the TX screen after the CAN. The fixed TX path does not disable or relax this protection |
+ 
+ ## 7. Tests
+ 
+ | Test | Covers |
+ |---|---|
+ | `tests/host/m17Test.c` | the specification's CRC vectors and address example; LSF and stream frames through the FEC with symbol errors, hard and soft; LICH late entry; EoT; noise; two engines on made-up providers (a call, late entry, CAN squelch, digital monitor, a slow encoder, an abort); a call through the soft modem at RRC 0.5 and 0.2 with noise |
+-| `tests/host/m17VoiceTest.c` | Codec 2 in its arena; synthetic voice encoded to stream frames and decoded at about the same level; the silence frames |
++| `tests/host/m17VoiceTest.c` | Codec 2 in its arena and alternate stack; synthetic voice encoded to stream frames and decoded at about the same level; 120 Hz pitch/voicing fields; silence; no floating-point/libm dependency in the fixed TX object; the unchanged slow-codec cutoff |
+ | `tests/host/radioCoreTest.c` (`radioCoreTestM17`) | a stored M17 channel through the radio core: PTT heard by a far engine with the channel's fields, the far radio heard, another CAN silent |
+ | `site/tests/modes.test.mjs` | the editor's kind 7 module |
+ 
+@@ -129,6 +129,9 @@ frame; playback starts with four frames queued. With no encoder frame ready the
+ - On air: interoperability with any other M17 equipment (radios, MMDVM hotspots, M17 modems). Only this firmware's
+   own frames have been decoded, by this firmware's own decoder, on the host.
+ - The transmit pulse (RRC 0.2 instead of 0.5, section 2) at another M17 receiver.
+-- Codec 2 cannot run in real time on this core (section 6): voice needs a fixed-point codec or a core with an FPU.
+-  The times on the radio's screen are the measurement to confirm the estimate.
+-- Codec 2 voice quality on the radio's microphone and speaker paths (the microphone level into the encoder).
++- CK803S execution time of the fixed TX encoder and its 15 ms budget. Only host tests have run; the radio's screen
++  remains the measurement to confirm or reject real-time TX. The reference floating-point RX decoder is not shown to
++  run in real time on the CK803S.
++- Codec 2 voice quality on the radio's microphone and speaker paths (the microphone level into the encoder), and an
++  audible comparison with the reference encoder. Real speech samples have been checked on the host, but the integer
++  encoder is not bit-exact and no formal listening test has been done.
+diff --git a/tests/host/Makefile b/tests/host/Makefile
+index 3e2e0c0..9bbb5be 100644
+--- a/tests/host/Makefile
++++ b/tests/host/Makefile
+@@ -146,13 +146,16 @@ ysfEngineTest: ysfEngineTest.c $(CORE)/ysf/ysf_engine.c $(YSF) $(wildcard $(CORE
+ # since its other modes' code is referenced but not built; core/codec2/README.md)
+ M17     := $(CORE)/m17/m17_frame.c $(CORE)/m17/m17_engine.c
+ CODEC2  := $(wildcard $(CORE)/codec2/*.c)
+-C2FLAGS := -O2 -w -ffunction-sections -fdata-sections -D__EMBEDDED__ -DNDEBUG -DCODEC2_MODE_EN_DEFAULT=0 \
++C2FLAGS := -O2 -w $(SANFLAGS) -ffunction-sections -fdata-sections -D__EMBEDDED__ -DNDEBUG -DCODEC2_FIXED_3200=1 -DCODEC2_MODE_EN_DEFAULT=0 \
+            -DCODEC2_MODE_3200_EN=1 -Dmalloc=codec2_malloc -Dcalloc=codec2_calloc -Dfree=codec2_free
+ TESTS   += m17Test m17VoiceTest
+ m17Test: m17Test.c $(M17) $(wildcard $(CORE)/m17/*.h) $(CORE)/air/air_session.c $(CORE)/air/air_framer.c $(CORE)/air/air_softmodem.c $(FEC)
+ 	$(CC) $(CFLAGS) -I$(ROOT)/hal -Wshadow -DCONFIG_AIR=1 -DCONFIG_M17=1 -o $@ m17Test.c $(M17) $(CORE)/air/air_session.c $(CORE)/air/air_framer.c $(CORE)/air/air_softmodem.c $(FEC) -lm
+ m17VoiceTest: m17VoiceTest.c $(CORE)/m17/m17_voice.c $(wildcard $(CORE)/m17/*.h) $(CODEC2)
+ 	mkdir -p out/codec2 && cd out/codec2 && $(CC) -I$(abspath $(CORE)) -I$(abspath $(CORE))/codec2 $(C2FLAGS) -c $(abspath $(CODEC2))
++	@if nm -u out/codec2/codec2_fixed_3200.o | awk '{print $$NF}' | grep -E '^(acosf?|cosf?|sinf?|expf?|floorf?|log10f?|logf?|powf?|sqrtf?|__.*(sf|df).*)$$'; then \
++		echo 'fixed 3200 TX acquired a floating-point dependency' >&2; exit 1; \
++	fi
+ 	$(CC) $(CFLAGS) -I$(ROOT)/hal -Wshadow -DCONFIG_AIR=1 -DCONFIG_M17=1 -o $@ m17VoiceTest.c $(CORE)/m17/m17_voice.c out/codec2/*.o -Wl,--gc-sections -lm
+ 
+ # The MBE synthesis core and the full-rate voice decoder on it (core/mbe), against golden vectors
+diff --git a/tests/host/m17VoiceTest.c b/tests/host/m17VoiceTest.c
+index 0b27aa9..3f25835 100644
+--- a/tests/host/m17VoiceTest.c
++++ b/tests/host/m17VoiceTest.c
+@@ -38,6 +38,19 @@ static double rms(const int16_t *p, int n)
+ 	return sqrt(s / n);
+ }
+ 
++// Read a Gray-coded field from the standard 3200 bit/s frame.
++static unsigned c2_field(const uint8_t *bits, unsigned start, unsigned width)
++{
++	unsigned gray = 0, value;
++
++	for (unsigned i = 0; i < width; i++)
++		gray = (gray << 1) | ((bits[(start + i) / 8] >> (7 - (start + i) % 8)) & 1);
++	value = gray;
++	while (gray >>= 1)
++		value ^= gray;
++	return value;
++}
++
+ // The window's stack, as the HR_C7000's call_on_stack gives it: the codec runs on a stack of M17_VOICE_STACK bytes
+ // (a ucontext here), painted so the test sees how deep it went
+ #include <ucontext.h>
+@@ -116,6 +129,22 @@ int main(void)
+ 	m17VoiceGetStats(&st);
+ 	CHECK(nf == 60 && st.tx_encoded == 120 && st.tx_frames == 60);
+ 
++	// The fixed TX path still emits standard Codec 2: the 120 Hz test voice must not collapse to noise or an octave error.
++	unsigned voiced = 0, pitched = 0;
++	for (unsigned f = 0; f < nf; f++) {
++		for (unsigned half = 0; half < 2; half++) {
++			const uint8_t *bits = frames[f] + half * M17_C2_BYTES;
++
++			if ((bits[0] & 0xC0) != 0xC0)
++				continue;
++			voiced++;
++			unsigned pitch = c2_field(bits, 2, 7);
++			pitched += pitch >= 20 && pitch <= 32;
++		}
++	}
++	printf("m17 voice: %u voiced frames, %u at the expected 120 Hz pitch\n", voiced, pitched);
++	CHECK(voiced >= 100 && pitched >= 90);
++
+ 	// RX: the frames back through the hooks as the engine delivers them, one stream frame per two blocks
+ 	m17_call_t call = { .have_lsf = true };
+ 	h->rx_start(&call, NULL);
