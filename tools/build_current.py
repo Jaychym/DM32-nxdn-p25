@@ -79,6 +79,8 @@ PATCHES = (
 	'dm32-rx-1120.patch',
 	# DM-32UV: optional extended RX in Tools, off until the owner enables it and persistent across restarts
 	'dm32-rx-tools.patch',
+	# CPS CSV: keep conventional NXDN channels as NXDN (rate, RAN and squelch), not FM
+	'nxdn-csv-mode.patch',
 )
 
 

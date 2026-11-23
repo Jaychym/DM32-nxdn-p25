@@ -1,0 +1,186 @@
+--- a/site/static/js/codeplug/csv.js
++++ b/site/static/js/codeplug/csv.js
+@@ -9,6 +9,7 @@
+ import { parseFreq, parseTone, mhz } from "./fields.js";
+ import { LIMITS, POWER_NAMES, CALL_TYPES, SQUELCH_OPEN, validDtmf } from "./records.js";
+ import { newChannel, newContact, remove, assignNumbers } from "./model.js";
++import { setKind } from "./channelmodes.js";
+ 
+ // --- RFC 4180 ---
+ 
+@@ -167,6 +168,55 @@
+ const MODES = { fm: "FM", dmr: "DMR" };
+ const TYPES = Object.fromEntries(CALL_TYPES.map((k) => [k, k[0].toUpperCase() + k.slice(1)]));
+ 
++// A channel mode in CSV: FM and DMR are plain records; conventional NXDN is the channel-mode layer's kind 4.
++// "NXDN" alone means the 9600 bit/s mode, as the editor's new NXDN channel does.
++const NXDN_KIND = 4;
++const asChannelMode = (s) => {
++	const v = s.trim().toLowerCase().replace(/[_-]/g, " ").replace(/\s+/g, " ");
++	if (!v) return { kind: 0, mode: "fm" };
++	for (const [mode, text] of Object.entries(MODES)) if (text.toLowerCase() === v) return { kind: 0, mode };
++	if (["nxdn", "nxdn96", "nxdn 96", "nxdn9600", "nxdn 9600"].includes(v)) return { kind: NXDN_KIND, rate9600: true };
++	if (["nxdn48", "nxdn 48", "nxdn4800", "nxdn 4800"].includes(v)) return { kind: NXDN_KIND, rate9600: false };
++	throw new Bad("bad_value", { value: s.trim(), allowed: "FM, DMR, NXDN 4800, NXDN 9600" });
++};
++const channelModeText = (r) => r.kind === NXDN_KIND ? (r.params?.rate9600 === false ? "NXDN 4800" : "NXDN 9600") : MODES[r.mode];
++const setChannelMode = (r, s, m) => {
++	const v = asChannelMode(s);
++	if (v.kind) {
++		setKind(m, r, v.kind);
++		r.params = { ...r.params, rate9600: v.rate9600 };
++	} else setKind(m, r, 0, v.mode);
++};
++const rxOnlyText = (r) => yesNo(r.kind === NXDN_KIND ? !r.tagTx : r.rxOnly);
++const setRxOnly = (r, s) => {
++	const v = asBool(s);
++	if (r.kind === NXDN_KIND) r.tagTx = !v;
++	else r.rxOnly = v;
++};
++const asRan = (s) => {
++	const v = s.trim();
++	if (!v) return null;
++	const n = Number(v);
++	if (!Number.isInteger(n) || n < 0 || n > 63) throw new Bad("range", { min: 0, max: 63 });
++	return n;
++};
++const nxdnField = (key, put, get) => ({
++	get: (r) => (r.kind === NXDN_KIND && r.params ? get(r.params) : ""),
++	set: (r, s) => {
++		const v = put(s);
++		if (v === null) return;
++		if (r.kind !== NXDN_KIND || !r.params) throw new Bad("bad_value", { value: s.trim(), allowed: "an NXDN channel" });
++		r.params = { ...r.params, [key]: v };
++	},
++});
++const asNxdnSquelch = (s) => {
++	const v = s.trim().toLowerCase();
++	if (!v) return null;
++	if (v === "ran") return 0;
++	if (v === "selective") return 1;
++	throw new Bad("bad_value", { value: s.trim(), allowed: "RAN, Selective" });
++};
++
+ // --- References by name ---
+ 
+ // A record's name in a file: its name, or "#n" when the name can't stand for it (another record has it, or it holds
+@@ -313,7 +363,7 @@
+ 		columns: [
+ 			NUMBER(LIMITS.channels),
+ 			c("Name", "name", asName(LIMITS.name), undefined, ["Channel Name", "Channel"]),
+-			c("Mode", "mode", asWord(MODES, "fm"), (r) => MODES[r.mode], ["Channel Mode", "Channel Type", "Type"]),
++			{ header: "Mode", aliases: ["Channel Mode", "Channel Type", "Type"], key: "mode", get: channelModeText, set: setChannelMode },
+ 			c("RX Frequency (MHz)", "rxHz", asFreq(), (r) => mhz(r.rxHz), ["RX Frequency", "RX Freq", "Receive Frequency", "RX"]),
+ 			c("TX Frequency (MHz)", "txHz", asFreq(), (r) => mhz(r.txHz), ["TX Frequency", "TX Freq", "Transmit Frequency", "TX"]),
+ 			c("Power", "power", asWord(POWER, 0, 0, 10), (r) => powerText(r.power), ["TX Power"]),
+@@ -333,7 +383,13 @@
+ 			ref("RX Group List", "rxList", "rxLists", ["Group List", "RX List"]),
+ 			ref("APRS", "aprs", "aprs", ["APRS Configuration"]),
+ 			c("DMR ID", "dmrId", asId, (r) => r.dmrId || "", ["Channel DMR ID"]),
+-			c("RX Only", "rxOnly", asBool, (r) => yesNo(r.rxOnly)),
++			{ header: "NXDN Squelch", aliases: ["NXDN SQ"], key: "nxdnSquelch",
++				...nxdnField("squelch", asNxdnSquelch, (p) => (p.squelch === 1 ? "Selective" : "RAN")) },
++			{ header: "RX RAN", aliases: ["NXDN RX RAN", "RAN"], key: "nxdnRxRan",
++				...nxdnField("rxRan", asRan, (p) => String(p.rxRan ?? 0)) },
++			{ header: "TX RAN", aliases: ["NXDN TX RAN"], key: "nxdnTxRan",
++				...nxdnField("txRan", asRan, (p) => String(p.txRan ?? 1)) },
++			{ header: "RX Only", aliases: [], key: "rxOnly", get: rxOnlyText, set: setRxOnly },
+ 			c("All Skip", "allSkip", asBool, (r) => yesNo(r.allSkip), ["Scan Skip"]),
+ 			c("Zone Skip", "zoneSkip", asBool, (r) => yesNo(r.zoneSkip)),
+ 			c("VOX", "vox", asBool, (r) => yesNo(r.vox)),
+--- a/site/tests/csv.test.mjs
++++ b/site/tests/csv.test.mjs
+@@ -11,6 +11,7 @@
+ import { CodeplugImage, CODEPLUG_SPAN } from "../static/js/codeplug/image.js";
+ import { decode, encode, empty, newChannel, newContact } from "../static/js/codeplug/model.js";
+ import { parse, stringify, detect, exportTable, importTable, exportAll, importAll, ORDER } from "../static/js/codeplug/csv.js";
++import { setKind } from "../static/js/codeplug/channelmodes.js";
+ 
+ const DIR = process.env.RFOUNDRY_SITE_FIXTURES || "build/site-tests";
+ const sim = () => decode(CodeplugImage.from(new Uint8Array(readFileSync(join(DIR, "codeplug_sim.bin"))).slice(0, CODEPLUG_SPAN)));
+@@ -74,6 +75,61 @@
+ 	assert.equal(row[parse(exportTable(m, "channels"))[0].indexOf("Squelch")], "22");
+ });
+ 
++test("CSV carries a conventional NXDN channel instead of dropping it to FM", () => {
++	const m = empty();
++	const text = [
++		"Name,Mode,RX Frequency (MHz),TX Frequency (MHz),NXDN Squelch,RX RAN,TX RAN,RX Only",
++		"NXDN,NXDN 4800,446.08625,446.08625,Selective,9,5,No",
++	].join("\n");
++	const r = importTable(m, text, "channels");
++	assert.deepEqual(r.problems, []);
++	const c = m.channels[0];
++	assert.equal(c.kind, 4);
++	assert.equal(c.mode, "dmr", "the record under the NXDN tag is the safe stand-in");
++	assert.equal(c.rxOnly, true);
++	assert.equal(c.tagTx, true);
++	assert.deepEqual(c.params, { rate9600: false, squelch: 1, rxRan: 9, txRan: 5, aes: false, keyId: 0 });
++
++	// The encoded tag comes back as NXDN, and export keeps its rate, RANs, squelch and transmit permission.
++	const back = decode(encode(m));
++	const b = back.channels[0];
++	assert.equal(b.kind, 4);
++	assert.equal(b.tagTx, true);
++	assert.deepEqual(b.params, { rate9600: false, squelch: 1, rxRan: 9, txRan: 5, aes: false, keyId: 0 });
++	const rows = parse(exportTable(back, "channels"));
++	const col = (name) => rows[0].indexOf(name);
++	assert.equal(rows[1][col("Mode")], "NXDN 4800");
++	assert.equal(rows[1][col("NXDN Squelch")], "Selective");
++	assert.equal(rows[1][col("RX RAN")], "9");
++	assert.equal(rows[1][col("TX RAN")], "5");
++	assert.equal(rows[1][col("RX Only")], "No");
++
++	// NXDN alone and the common rate names are accepted too; neither becomes an FM channel with a warning.
++	for (const word of ["NXDN", "NXDN96", "NXDN 9600", "NXDN48", "NXDN 4800"]) {
++		const n = empty();
++		const rr = importTable(n, `Name,Mode,RX Frequency (MHz),TX Frequency (MHz)\nNXDN,${word},446.08625,446.08625\n`, "channels");
++		assert.deepEqual(rr.problems, [], word);
++		assert.equal(n.channels[0].kind, 4, word);
++		assert.equal(n.channels[0].params.rate9600, !word.includes("48") && !word.includes("4800"), word);
++	}
++});
++
++test("CSV export and import keep an existing NXDN channel's mode fields", () => {
++	const m = empty();
++	const c = newChannel({ number: 11, name: "NXDN", rxHz: 446086250, txHz: 446086250, rxOnly: false });
++	m.channels.push(c);
++	setKind(m, c, 4);
++	c.params = { ...c.params, rate9600: true, squelch: 0, rxRan: 22, txRan: 22 };
++	const text = exportTable(m, "channels");
++	const n = empty();
++	const r = importTable(n, text, "channels");
++	assert.deepEqual(r.problems, []);
++	assert.equal(n.channels[0].kind, 4);
++	assert.equal(n.channels[0].params.rate9600, true);
++	assert.deepEqual([n.channels[0].params.squelch, n.channels[0].params.rxRan, n.channels[0].params.txRan], [0, 22, 22]);
++	assert.equal(n.channels[0].tagTx, true);
++});
++
+ test("rows match records by number, then name; a renamed contact keeps its channels", () => {
+ 	const m = empty();
+ 	const tg = newContact({ number: 1, name: "TG 91", id: 91 });
+--- a/docs/user/04-programming.md
++++ b/docs/user/04-programming.md
+@@ -121,8 +121,9 @@
+ 
+ When the codeplug holds keys, **Save** as a codeplug file asks whether to include them;
+ they are left out unless you tick **Include the keys in this file**. Anyone with a file that holds them can read them.
+-CSV and qdmr files hold neither systems nor channel modes: a channel of another mode goes into them as a receive-only
+-DMR channel, and comes back from one as that. Keep a codeplug file for them.
++qdmr files hold neither systems nor channel modes: a channel of another mode goes into one as a receive-only DMR
++channel, and comes back from one as that. CSV carries a conventional NXDN channel's mode, rate, squelch and RANs, but
++not its AES setting, systems or the other channel modes. Keep a codeplug file for them.
+ 
+ ### P25 and NXDN
+ 
+@@ -148,6 +149,9 @@
+ | RX RAN | Radio access number heard, 0-63. 0 receives every RAN |
+ | TX RAN | RAN sent. Blank: the RX RAN (1 when the RX RAN is 0) |
+ 
++In CSV, use **Mode** `NXDN 4800` or `NXDN 9600` (`NXDN` alone means 9600 bit/s). The optional **NXDN Squelch**,
++**RX RAN** and **TX RAN** columns carry those settings; a blank one keeps the channel's value.
++
+ **YSF channel:** the editor does not offer YSF yet, so a YSF channel comes from the radio (the VFO) or a zone shared by another radio. Its settings on the radio:
+ 
+ | Field | Meaning |
