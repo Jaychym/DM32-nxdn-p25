@@ -7,7 +7,9 @@
 Unete a mi grupo de telegram <https://t.me/+fGNVb8mR-eliYmMx>
 
 Firmware abierto para el **Baofeng DM-32UV** con **DMR, P25, NXDN48, NXDN96, M17, YSF y D-STAR**.
-También incluye FM, AM de recepción y FM comercial. Desde el 17 de noviembre de 2026 se compila sobre
+También incluye FM y AM de recepción. La compilación incluye **66–88 MHz en FM estrecha de 12.5 kHz, solo
+recepción**, en lugar del sintonizador de FM comercial. Se puede sintonizar desde el VFO o guardar en una memoria.
+La sensibilidad en esta banda requiere pruebas en el DM-32UV. Desde el 17 de noviembre de 2026 se compila sobre
 [RadioFoundry](https://github.com/RadioFoundry/RadioFoundry) actual (commit `e89121e9`), que ya trae P25 y NXDN, más
 los cambios de esta rama en [`integration/current/base.patch`](integration/current/base.patch). Deriva de
 [Open25-DM32](https://github.com/tylerwatt12/Open25-DM32) (tylerwatt12). La mantiene **lyra XE1POC**.

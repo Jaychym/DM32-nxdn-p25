@@ -144,6 +144,7 @@ PATCHES = (
 	'issue81-gps-session.patch',
 	'issue79-ysf-caller.patch',
 	'issue80-display-cps.patch',
+	'low-band-nfm.patch',
 )
 
 
