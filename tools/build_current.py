@@ -178,6 +178,7 @@ def prepare(tree, dstar=False):
 	if dstar:
 		run('git', 'apply', '--binary', PATCH_DIR / 'dstar-mode.patch', cwd=tree)
 		run('git', 'apply', '--binary', PATCH_DIR / 'dstar-channels.patch', cwd=tree)
+		run('git', 'apply', '--binary', PATCH_DIR / 'dstar-hotspot-routing.patch', cwd=tree)
 		shutil.copytree(ROOT / 'src/dstar', tree / 'core/dstar')
 	run('git', 'submodule', 'update', '--init', '--depth=1', 'third_party/FreeRTOS-Kernel', cwd=tree)
 
@@ -189,7 +190,7 @@ def main():
 	ap.add_argument('--cross', default=os.environ.get('CROSS', str(ROOT / 'toolchain/bin/csky-elf-')))
 	ap.add_argument('--jobs', type=int, default=min(os.cpu_count() or 2, 8))
 	ap.add_argument('--dstar', action=argparse.BooleanOptionalAction, default=True,
-	                help='build experimental D-STAR DV for the VFO and stored channels (simplex, RF unverified)')
+	                help='build experimental D-STAR DV for the VFO and stored channels (RF unverified)')
 	ap.add_argument('--no-m17', action='store_true', help='build with CONFIG_M17=n (M17 voice; Codec 2 real time on the MCU unverified)')
 	ap.add_argument('--no-mdc1200', action='store_true', help='build with CONFIG_MDC1200=n (MDC-1200 ID on FM channels)')
 	args = ap.parse_args()

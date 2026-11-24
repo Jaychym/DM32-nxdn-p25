@@ -1,0 +1,280 @@
+diff --git a/core/radio/radio_sm.c b/core/radio/radio_sm.c
+--- a/core/radio/radio_sm.c
++++ b/core/radio/radio_sm.c
+@@ -6632,7 +6632,7 @@
+ 	sm->view.dmr.hear_all = hear_all;
+ #if CONFIG_DSTAR
+ 	if (sm->view.ch.mode == RADIO_MODE_DSTAR) {
+-		radio_dstar_begin();
++		radio_dstar_begin(&sm->view.ch, air_number(sm));
+ 		radio_dstar_poll(&sm->view.dstar);
+ 		return;
+ 	}
+diff --git a/docs/spec/channel-modes.md b/docs/spec/channel-modes.md
+--- a/docs/spec/channel-modes.md
++++ b/docs/spec/channel-modes.md
+@@ -155,7 +155,7 @@
+ | 6 | YSF conventional | YSF | `CONFIG_YSF` and a board whose air interface carries YSF (`radio_ysf_fits`) | [ysf-codeplug.md](ysf-codeplug.md) |
+ | 7 | M17 stream mode voice | M17 | `CONFIG_M17` and a board whose air interface carries M17 (`radio_m17_fits`) | [m17.md](m17.md) 5 |
+ | 8 | NXDN conventional voice scrambler | NXDN-S | `CONFIG_NXDN_SCRAMBLER` and a board whose air interface carries NXDN | [nxdn-codeplug.md](nxdn-codeplug.md) |
+-| 9 | D-STAR DV simplex | D-STAR | `CONFIG_DSTAR` and a board whose air interface and audio support DV | No parameter block. The radio name is the source and routing is direct. |
++| 9 | D-STAR DV | D-STAR | `CONFIG_DSTAR` and a board whose air interface and audio support DV | Optional 24-byte block with URCALL, RPT1 and RPT2, eight space-padded ASCII bytes each. The radio name is the source. An empty block gives CQCQCQ and direct routing. Blank repeater fields select direct routing. |
+ 
+ | System type | Name | Short | Built when | Spec |
+ |---|---|---|---|---|
+diff --git a/site/i18n/en.json b/site/i18n/en.json
+--- a/site/i18n/en.json
++++ b/site/i18n/en.json
+@@ -2318,5 +2318,11 @@
+  "editor.nxdn.plan_base": "Channel plan base (no DFA)",
+  "editor.nxdn.plan_help": "For sites that send channel numbers: frequency = base + number x spacing. Leave 0 for sites with direct frequency assignment (DFA).",
+  "editor.nxdn.plan_spacing": "Channel plan spacing (Hz, multiple of 125)",
+- "editor.problem.nxdn_plan_spacing": "A channel plan needs a spacing: without it, channel numbers are not followed."
++ "editor.problem.nxdn_plan_spacing": "A channel plan needs a spacing: without it, channel numbers are not followed.",
++ "editor.dstar.ur_help": "Blank sends CQCQCQ. Enter E for hotspot echo.",
++ "editor.dstar.rpt1_help": "Hotspot callsign and module, for example N0CALL B. Leave both repeater fields blank for direct operation.",
++ "editor.dstar.rpt2_help": "Hotspot gateway callsign, for example N0CALL G.",
++ "editor.problem.dstar_ur_chars": "Use up to eight characters from A–Z, 0–9, slash and space.",
++ "editor.problem.dstar_route_pair": "Fill in both RPT1 and RPT2, or leave both blank.",
++ "editor.problem.dstar_rpt_format": "Enter a callsign followed by its module letter, for example N0CALL B."
+ }
+diff --git a/site/i18n/es.json b/site/i18n/es.json
+--- a/site/i18n/es.json
++++ b/site/i18n/es.json
+@@ -2318,5 +2318,11 @@
+  "editor.nxdn.plan_base": "Base del plan de canales (sin DFA)",
+  "editor.nxdn.plan_help": "Para sitios que envían números de canal: frecuencia = base + número x separación. Déjalo en 0 si el sitio usa asignación directa de frecuencia (DFA).",
+  "editor.nxdn.plan_spacing": "Separación del plan de canales (Hz, múltiplo de 125)",
+- "editor.problem.nxdn_plan_spacing": "Un plan de canales necesita separación: sin ella no se siguen los números de canal."
++ "editor.problem.nxdn_plan_spacing": "Un plan de canales necesita separación: sin ella no se siguen los números de canal.",
++ "editor.dstar.ur_help": "Vacío envía CQCQCQ. Escribe E para probar el eco del hotspot.",
++ "editor.dstar.rpt1_help": "Indicativo y módulo del hotspot, por ejemplo N0CALL B. Para modo directo, deja vacíos ambos campos de repetidora.",
++ "editor.dstar.rpt2_help": "Indicativo de la puerta de enlace del hotspot, por ejemplo N0CALL G.",
++ "editor.problem.dstar_ur_chars": "Usa hasta ocho caracteres entre A–Z, 0–9, barra y espacio.",
++ "editor.problem.dstar_route_pair": "Completa RPT1 y RPT2 o deja ambos vacíos.",
++ "editor.problem.dstar_rpt_format": "Escribe el indicativo seguido de la letra del módulo, por ejemplo N0CALL B."
+ }
+diff --git a/site/i18n/it.json b/site/i18n/it.json
+--- a/site/i18n/it.json
++++ b/site/i18n/it.json
+@@ -2311,5 +2311,11 @@
+  "editor.nxdn.plan_base": "Channel plan base (no DFA)",
+  "editor.nxdn.plan_help": "For sites that send channel numbers: frequency = base + number x spacing. Leave 0 for sites with direct frequency assignment (DFA).",
+  "editor.nxdn.plan_spacing": "Channel plan spacing (Hz, multiple of 125)",
+- "editor.problem.nxdn_plan_spacing": "A channel plan needs a spacing: without it, channel numbers are not followed."
++ "editor.problem.nxdn_plan_spacing": "A channel plan needs a spacing: without it, channel numbers are not followed.",
++ "editor.dstar.ur_help": "Lascia vuoto per inviare CQCQCQ. Inserisci E per l’eco dell’hotspot.",
++ "editor.dstar.rpt1_help": "Nominativo e modulo dell’hotspot, per esempio N0CALL B. Lascia vuoti entrambi i campi del ripetitore per il collegamento diretto.",
++ "editor.dstar.rpt2_help": "Nominativo del gateway dell’hotspot, per esempio N0CALL G.",
++ "editor.problem.dstar_ur_chars": "Usa fino a otto caratteri tra A–Z, 0–9, barra e spazio.",
++ "editor.problem.dstar_route_pair": "Compila RPT1 e RPT2 o lasciali entrambi vuoti.",
++ "editor.problem.dstar_rpt_format": "Inserisci il nominativo seguito dalla lettera del modulo, per esempio N0CALL B."
+ }
+diff --git a/site/i18n/zh.json b/site/i18n/zh.json
+--- a/site/i18n/zh.json
++++ b/site/i18n/zh.json
+@@ -2311,5 +2311,11 @@
+  "editor.nxdn.plan_base": "Channel plan base (no DFA)",
+  "editor.nxdn.plan_help": "For sites that send channel numbers: frequency = base + number x spacing. Leave 0 for sites with direct frequency assignment (DFA).",
+  "editor.nxdn.plan_spacing": "Channel plan spacing (Hz, multiple of 125)",
+- "editor.problem.nxdn_plan_spacing": "A channel plan needs a spacing: without it, channel numbers are not followed."
++ "editor.problem.nxdn_plan_spacing": "A channel plan needs a spacing: without it, channel numbers are not followed.",
++ "editor.dstar.ur_help": "留空发送 CQCQCQ。输入 E 测试热点回声。",
++ "editor.dstar.rpt1_help": "热点呼号和模块，例如 N0CALL B。直通通信时将两个中继字段留空。",
++ "editor.dstar.rpt2_help": "热点网关呼号，例如 N0CALL G。",
++ "editor.problem.dstar_ur_chars": "最多使用八个字符，仅限 A–Z、0–9、斜杠和空格。",
++ "editor.problem.dstar_route_pair": "请同时填写 RPT1 和 RPT2，或将两者都留空。",
++ "editor.problem.dstar_rpt_format": "请输入呼号和模块字母，例如 N0CALL B。"
+ }
+diff --git a/site/static/js/codeplug/mode_dstar.js b/site/static/js/codeplug/mode_dstar.js
+--- a/site/static/js/codeplug/mode_dstar.js
++++ b/site/static/js/codeplug/mode_dstar.js
+@@ -2,7 +2,21 @@
+ // Copyright (c) 2026 lyra XE1POC
+ import { grow } from "./modebytes.js";
+ 
+-// D-STAR simplex uses the radio name and fixed DIRECT routing.
++const CALL_LEN = 8;
++const KEYS = ["ur", "rpt1", "rpt2"];
++
++function readCall(b, i) {
++	const from = i * CALL_LEN;
++	if (!b || b.length < from + CALL_LEN) return "";
++	return String.fromCharCode(...b.subarray(from, from + CALL_LEN)).trimEnd();
++}
++
++function routeCall(key, raw) {
++	const call = (raw ?? "").trim().toUpperCase();
++	if (key === "ur") return /^[EIU]$/.test(call) ? call.padStart(CALL_LEN) : call;
++	return call.replace(/^([A-Z0-9]{1,6}) +([A-Z])$/, (_, base, module) => base.padEnd(7) + module);
++}
++
+ export const dstarKind = {
+ 	id: 9,
+ 	feature: "DSTAR",
+@@ -12,9 +26,29 @@
+ 	defaultTx: true,
+ 	recordFields: [],
+ 	flags: {},
+-	newParams: () => ({}),
+-	decode: () => ({}),
+-	encode: (params, prev = null) => grow(prev, 0),
+-	fields: () => [],
+-	validate() {},
++	newParams: () => ({ ur: "", rpt1: "", rpt2: "" }),
++	decode: (b) => Object.fromEntries(KEYS.map((key, i) => [key, readCall(b, i)])),
++	encode(params, prev = null) {
++		const calls = KEYS.map((key) => routeCall(key, params[key]));
++		if (!prev?.length && !calls.some(Boolean)) return grow(prev, 0);
++		const v = grow(prev, KEYS.length * CALL_LEN);
++		calls.forEach((call, i) => {
++			for (let j = 0; j < CALL_LEN; j++) v[i * CALL_LEN + j] = call.charCodeAt(j) || 0x20;
++		});
++		return v;
++	},
++	fields: () => [
++		{ key: "ur", label: "URCALL", type: "text", help: "editor.dstar.ur_help" },
++		{ key: "rpt1", label: "RPT1", type: "text", help: "editor.dstar.rpt1_help" },
++		{ key: "rpt2", label: "RPT2", type: "text", help: "editor.dstar.rpt2_help" },
++	],
++	validate(c, p, problem) {
++		if (!/^[A-Za-z0-9/ ]{0,8}$/.test(p.ur ?? "")) problem.err("ur", "dstar_ur_chars");
++		const rpt1 = routeCall("rpt1", p.rpt1), rpt2 = routeCall("rpt2", p.rpt2);
++		if (Boolean(rpt1) !== Boolean(rpt2)) problem.err(rpt1 ? "rpt2" : "rpt1", "dstar_route_pair");
++		for (const [key, value] of [["rpt1", rpt1], ["rpt2", rpt2]]) {
++			if (value && (value.length !== CALL_LEN || !/^[A-Z0-9]+ *[A-Z]$/.test(value)))
++				problem.err(key, "dstar_rpt_format");
++		}
++	},
+ };
+diff --git a/site/tests/modes.test.mjs b/site/tests/modes.test.mjs
+--- a/site/tests/modes.test.mjs
++++ b/site/tests/modes.test.mjs
+@@ -38,6 +38,23 @@
+ 	assert.equal(saved.tagTx, true);
+ 	saved.tagTx = false;
+ 	assert.equal(round(first).channels.find((c) => c.name === "DV simplex").tagTx, false);
++});
++
++test("D-STAR: hotspot routes use fixed call fields and echo in the last column", () => {
++	const m = empty();
++	const ch = newChannel({ name: "DV node", rxHz: 433450000, txHz: 433450000 });
++	m.channels.push(ch);
++	setKind(m, ch, 9);
++	ch.params = { ur: "e", rpt1: "n0abc b", rpt2: "n0abc g" };
++	const first = round(m);
++	const saved = first.channels.find((c) => c.name === "DV node");
++	assert.deepEqual(saved.params, { ur: "       E", rpt1: "N0ABC  B", rpt2: "N0ABC  G" });
++	assert.ok(!validate(first).some((p) => p.code === "dstar_route_pair" || p.code === "dstar_rpt_format"));
++	saved.params.rpt2 = "";
++	assert.ok(validate(first).some((p) => p.code === "dstar_route_pair"));
++	saved.params.rpt1 = "";
++	saved.params.ur = "";
++	assert.deepEqual(round(first).channels.find((c) => c.name === "DV node").params, { ur: "", rpt1: "", rpt2: "" });
+ });
+ 
+ test("vectors: name check", () => {
+diff --git a/tests/host/radioCoreTest.c b/tests/host/radioCoreTest.c
+--- a/tests/host/radioCoreTest.c
++++ b/tests/host/radioCoreTest.c
+@@ -12022,11 +12022,40 @@
+ #endif
+ 
+ #if CONFIG_DSTAR
++#include "dstar/dv_engine.h"
+ #include "hostlink/build_info.h"
+ 
++static struct {
++	dstar_header_t header;
++	unsigned headers, voice, ends;
++} dstar_far;
++
++static void dstar_far_start(const dstar_header_t *header, void *ctx)
++{
++	(void)ctx;
++	if (header) {
++		dstar_far.header = *header;
++		dstar_far.headers++;
++	}
++}
++
++static void dstar_far_voice(const uint8_t *voice, void *ctx)
++{
++	(void)voice;
++	(void)ctx;
++	dstar_far.voice++;
++}
++
++static void dstar_far_end(void *ctx) { (void)ctx; dstar_far.ends++; }
++
+ static void test_dstar_memory(void)
+ {
++	static const dstar_engine_hooks_t hooks = { .rx = { dstar_far_start, dstar_far_voice, dstar_far_end } };
++	static dstar_engine_t far;
++	const codeplug_tag_t tag = { .kind = CODEPLUG_KIND_DSTAR, .system = CODEPLUG_SYSTEM_NONE, .flags = CODEPLUG_TAG_TX };
++	static const uint8_t route[] = "CQCQCQ  N0CALL BN0CALL G";
+ 	setup_codeplug();
++	cp_radio_name = "xe1abc";
+ 	add(3, "DV simplex", 446100000, RADIO_MODE_DMR, false, 2);
+ 	chans[3].kind = CODEPLUG_KIND_DSTAR;
+ 	start();
+@@ -12035,9 +12064,59 @@
+ 	run(100);
+ 	CHECK(sm.view.channel_number == 3 && sm.view.ch.mode == RADIO_MODE_DSTAR &&
+ 	      radio_dstar_running() && !sim.started);
++	CHECK(dstar_engine_open(&far, &fake_air1, &hooks, NULL));
++	sm.set.talk_permit = false;
++	aud.feed = true;
++
++	// A legacy channel has no routing parameters and calls direct.
++	req(RREQ_PTT, 1);
++	run(600);
++	req(RREQ_PTT, 0);
++	run(500);
++	CHECK(dstar_far.headers == 1 && dstar_far.ends == 1 && dstar_far.voice > 0 && !hw.keyed);
++	CHECK(dstar_far.header.flags[0] == 0 && !memcmp(dstar_far.header.rpt1, "DIRECT  ", 8) &&
++	      !memcmp(dstar_far.header.rpt2, "DIRECT  ", 8) && !memcmp(dstar_far.header.ur, "CQCQCQ  ", 8));
++
++	// Same RX and TX frequencies, with the repeater flag and node gateway from the tag.
++	CHECK(codeplug_tag_write(3, chans[3].name, &tag, route, sizeof route - 1u));
++	req(RREQ_ZONE_POS, 0);
++	req(RREQ_ZONE_POS, 2);
++	run(100);
++	req(RREQ_PTT, 1);
++	run(600);
++	CHECK(hw.keyed && hw.rx_hz == chans[3].rx_hz && hw.tx_hz == chans[3].tx_hz);
++	req(RREQ_PTT, 0);
++	run(500);
++	CHECK(dstar_far.headers == 2 && dstar_far.ends == 2 && !hw.keyed);
++	CHECK(dstar_far.header.flags[0] == DSTAR_FLAG_REPEATER && !memcmp(dstar_far.header.my, "XE1ABC  ", 8) &&
++	      !memcmp(dstar_far.header.ur, route, 8) && !memcmp(dstar_far.header.rpt1, route + 8, 8) &&
++	      !memcmp(dstar_far.header.rpt2, route + 16, 8));
++
++	// The external station transmits a DV reply and the handheld plays it.
++	dstar_header_t reply = dstar_far.header;
++	memcpy(reply.my, "N0CALL  ", 8);
++	CHECK(dstar_engine_prime(&far, &reply) && air_session_tx_go(&far.session));
++	run(600);
++	CHECK(sm.view.dstar.rx && sm.view.dstar.played && !strcmp(sm.view.dstar.source, "N0CALL"));
++	dstar_engine_stop(&far);
++	run(500);
++	CHECK(!sm.view.dstar.rx);
++	dstar_engine_close(&far);
++
++	// A partial routing block refuses PTT before the board keys.
++	CHECK(codeplug_tag_write(3, chans[3].name, &tag, route, 16));
++	req(RREQ_ZONE_POS, 0);
++	req(RREQ_ZONE_POS, 2);
++	run(100);
++	req(RREQ_PTT, 1);
++	CHECK(!hw.keyed && sm.view.tx_deny == TXDENY_REFUSED);
++	req(RREQ_PTT, 0);
+ 	req(RREQ_ZONE_POS, 0);
+ 	run(100);
+ 	CHECK(!radio_dstar_running());
++	cp_radio_name = "";
++	aud.feed = false;
++	kv_t3_clear();
+ }
+ #endif
+ 

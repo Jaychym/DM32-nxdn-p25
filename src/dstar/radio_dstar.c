@@ -8,6 +8,7 @@
 #include "radio/radio.h"
 #include "radio/digital_rx_trim.h"
 #include "radio_dstar.h"
+#include "dstar_codeplug.h"
 #include "ambe_wire.h"
 #include "dv_engine.h"
 
@@ -35,6 +36,7 @@ typedef struct {
 	bool streaming, sending;
 	uint8_t source[8];
 	dstar_header_t header;
+	bool route_ok;
 } dstar_radio_t;
 
 static const hal_audio_t *audio;
@@ -211,7 +213,7 @@ bool radio_dstar_running(void)
 	return radio != NULL;
 }
 
-void radio_dstar_begin(void)
+void radio_dstar_begin(const channel_t *channel, uint16_t number)
 {
 	static const dstar_engine_hooks_t hooks = { .rx = { start, voice, end }, .tx_voice = tx_voice };
 	radio_dstar_end();
@@ -233,6 +235,7 @@ void radio_dstar_begin(void)
 	radio = &own;
 #endif
 	memset(radio, 0, sizeof(*radio));
+	radio->route_ok = dstar_channel_route(number, channel, &radio->header);
 	if (!dstar_engine_open(&radio->engine, board.air, &hooks, radio))
 		radio_dstar_end();
 }
@@ -289,15 +292,11 @@ static bool tx_prepare(void)
 {
 	dstar_radio_t *r = radio;
 	char name[CODEPLUG_NAME_LEN + 1];
-	if (!r)
+	if (!r || !r->route_ok)
 		return false;
 	codeplug_radio_name(name);
 	if (!callsign(r->header.my, name))
 		return false;
-	memcpy(r->header.rpt2, "DIRECT  ", 8);
-	memcpy(r->header.rpt1, "DIRECT  ", 8);
-	memcpy(r->header.ur, "CQCQCQ  ", 8);
-	memset(r->header.suffix, ' ', 4);
 	pause(r);
 	STORE(r->rx.tail, LOAD(r->rx.head));
 	STORE(r->tx_gen, (uint8_t)(LOAD(r->tx_gen) + 1u));

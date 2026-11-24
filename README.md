@@ -114,8 +114,9 @@ En el VFO se puede elegir en **Menú rápido → Modo**. En el [CPS web](https:/
 abre un canal, elige **D-STAR** en **Modo** y escribe el codeplug. Para NXDN, la opción **Velocidad** del editor permite
 elegir 4800 o 9600 bit/s.
 
-Para D-STAR simplex, configura el indicativo en **Ajustes → Mi radio → Nombre de radio**.
-El firmware usa destino `CQCQCQ` y enrutamiento `DIRECT`. Consulta las [pruebas y el alcance](docs/dstar-experimental.md).
+Configura tu indicativo en **Ajustes → Mi radio → Nombre de radio**. Para un hotspot externo,
+configura `RPT1` y `RPT2` en el canal D-STAR del CPS. Si es simplex, pon la misma frecuencia en RX y TX.
+Consulta [cómo configurar D-STAR y probar el eco](docs/dstar-experimental.md#external-hotspot).
 
 ## Compilar
 
