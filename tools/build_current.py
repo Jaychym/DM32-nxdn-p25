@@ -133,6 +133,7 @@ PATCHES = (
 	'issue53-zh-glyphs.patch',
 	'issue76-dual-preserve-decoded-voice.patch',
 	'issue29-p25-rx-wrap.patch',
+	'remaining-user-features.patch',
 )
 
 
