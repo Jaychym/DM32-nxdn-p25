@@ -6,7 +6,7 @@
 #include <string.h>
 
 // Parameter block: URCALL, RPT1 and RPT2, each eight ASCII characters. An empty block is the original simplex format.
-enum { CALL_LEN = 8, ROUTE_LEN = 3 * CALL_LEN };
+enum { CALL_LEN = DSTAR_CALL_CHARS, ROUTE_LEN = DSTAR_ROUTE_BYTES };
 
 static bool call_chars(const uint8_t *call, bool ur)
 {
@@ -21,6 +21,64 @@ static bool call_chars(const uint8_t *call, bool ur)
 static bool repeater_call(const uint8_t *call)
 {
 	return call[0] != ' ' && call[7] >= 'A' && call[7] <= 'Z' && call_chars(call, false);
+}
+
+void dstar_channel_read(uint16_t number, const channel_t *channel, dstar_route_t *route)
+{
+	uint8_t b[CODEPLUG_TAG_HEAD_MAX + ROUTE_LEN];
+	int len = codeplug_tag_params(number, channel, b, ROUTE_LEN);
+	memset(route, 0, sizeof *route);
+	for (unsigned i = 0; i < DSTAR_ROUTE_FIELDS && len >= CALL_LEN; i++, len -= CALL_LEN) {
+		const uint8_t *call = b + i * CALL_LEN;
+		unsigned end = CALL_LEN;
+		while (end && call[end - 1] == ' ')
+			end--;
+		memcpy(route->call[i], call, end);
+	}
+}
+
+bool dstar_route_pack(const dstar_route_t *route, uint8_t packed[ROUTE_LEN])
+{
+	bool has_repeater[2] = { false, false };
+	memset(packed, ' ', ROUTE_LEN);
+	for (unsigned i = 0; i < DSTAR_ROUTE_FIELDS; i++) {
+		const char *s = route->call[i];
+		uint8_t *out = packed + i * CALL_LEN;
+		while (*s == ' ')
+			s++;
+		size_t n = strlen(s);
+		while (n && s[n - 1] == ' ')
+			n--;
+		if (!n)
+			continue;
+		if (n > CALL_LEN)
+			return false;
+		for (size_t j = 0; j < n; j++)
+			out[j] = s[j] >= 'a' && s[j] <= 'z' ? (uint8_t)(s[j] - 'a' + 'A') : (uint8_t)s[j];
+		if (!call_chars(out, i == DSTAR_UR))
+			return false;
+		if (i == DSTAR_UR) {
+			if (n == 1 && (out[0] == 'E' || out[0] == 'I' || out[0] == 'U')) {
+				out[CALL_LEN - 1] = out[0];
+				out[0] = ' ';
+			}
+			continue;
+		}
+		// A short form such as "N0ABC B" puts its module in the final column.
+		if (n < 3 || (n < CALL_LEN && out[n - 2] != ' '))
+			return false;
+		for (size_t j = 1; j < n - 1; j++) {
+			if (out[j - 1] == ' ' && out[j] != ' ')
+				return false;
+		}
+		uint8_t module = out[n - 1];
+		out[n - 1] = ' ';
+		out[CALL_LEN - 1] = module;
+		if (!repeater_call(out))
+			return false;
+		has_repeater[i - DSTAR_RPT1] = true;
+	}
+	return has_repeater[0] == has_repeater[1];
 }
 
 bool dstar_channel_route(uint16_t number, const channel_t *channel, dstar_header_t *header)
@@ -44,8 +102,12 @@ bool dstar_channel_route(uint16_t number, const channel_t *channel, dstar_header
 	return true;
 }
 
-bool dstar_channel_save(uint16_t number, uint16_t from, const channel_t *channel)
+bool dstar_channel_save(uint16_t number, uint16_t from, const channel_t *channel, const dstar_route_t *route)
 {
+	uint8_t packed[ROUTE_LEN];
+	if (route && !dstar_route_pack(route, packed))
+		return false;
+	uint16_t len = route ? sizeof packed : 0;
 	channel_t stored = *channel;
 	stored.mode = RADIO_MODE_DMR;
 	stored.kind = CODEPLUG_KIND_DSTAR;
@@ -59,9 +121,8 @@ bool dstar_channel_save(uint16_t number, uint16_t from, const channel_t *channel
 	// The generic writer puts down a receive-only DMR base before writing or following the tag.
 	if (!codeplug_set_channel(number, &stored))
 		return false;
-	if (channel->kind == CODEPLUG_KIND_DSTAR && from != 0 && from != number &&
-	    codeplug_tag_copy(from, number, &stored))
+	if (channel->kind == CODEPLUG_KIND_DSTAR && from != 0 && from != number && codeplug_tag_copy(from, number, &stored) && !route)
 		return true;
-	return codeplug_tag_rewrite(number, stored.name, &tag, NULL, 0) ||
-	       codeplug_tag_write(number, stored.name, &tag, NULL, 0);
+	return codeplug_tag_rewrite(number, stored.name, &tag, packed, len) ||
+	       codeplug_tag_write(number, stored.name, &tag, packed, len);
 }

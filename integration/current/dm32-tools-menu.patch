@@ -1,0 +1,62 @@
+diff --git a/core/ui/ui_menus.c b/core/ui/ui_menus.c
+--- a/core/ui/ui_menus.c
++++ b/core/ui/ui_menus.c
+@@ -7030,8 +7030,7 @@
+ // ======================= Tools =======================
+ 
+ // Every tool keeps its number on every radio and build, so a key path (OK 6 7: Diagnostics; tests/hil/test_ui.py and the
+-// user guide) is the same everywhere. The one a radio may not have (Battery) is last, so no radio has a gap; a build
+-// without diagnostics skips 7
++// user guide) is the same everywhere. Numbers 3, 4 and 5 are reserved in this firmware.
+ enum { T_SCAN, T_POSITION, T_HOTSPOT, T_USB_NET, T_SFR, T_ROAM, T_DIAG, T_APRS, T_BATTERY, T_ZONE_OFFER,
+        T_ZONE_SCAN, T_RX_EXT, T_VFO_SCAN_LOW, T_VFO_SCAN_HIGH, T_TONE_SCAN, T_COUNT };
+ 
+@@ -7044,6 +7043,8 @@
+ // input instead, is left out where the radio measures neither)
+ static bool tool_shown(uint16_t i)
+ {
++	if (i == T_HOTSPOT || i == T_USB_NET || i == T_SFR)
++		return false;
+ 	if (i == T_TONE_SCAN)
+ 		return CONFIG_TONE_SCAN && board.radio != NULL && board.radio->rx_tone_test != NULL;
+ #if CONFIG_ZONE_SHARE
+diff --git a/tests/host/uiFlowTest.c b/tests/host/uiFlowTest.c
+--- a/tests/host/uiFlowTest.c
++++ b/tests/host/uiFlowTest.c
+@@ -204,7 +204,11 @@
+ 	{ "1 USB network: the PC brings the link up, the arrows appear", "usbnet:on", "usbnet:up", "markafter=IP", 0, false },
+ 	{ "1 USB network: the link goes down, the arrows go", "usbnet:up", "usbnet:on", "shows=IP nomarkafter=IP", 0, false },
+ 	{ "1 USB network: SCAN wins the strip's word", "usbnet:on", "ok 6 1", "scanning=1 shows=SCAN hides=IP", 3, false },
+-	{ "1 USB network from Tools: IP", "", "ok 6 4 ok", "usbnet=1 shows=IP", 4, false },
++	{ "Tools omits Hotspot, USB network and Single-freq repeater", "", "ok 6",
++	  "screen=tools hides=Hotspot hides=USB_network hides=Single-freq_repeater", 2, false },
++	{ "Tools shortcut 3 is reserved", "ok 6", "3", "screen=tools toast=No_item", 1, false },
++	{ "Tools shortcut 4 is reserved", "ok 6", "4", "screen=tools toast=No_item usbnet=0", 1, false },
++	{ "Tools shortcut 5 is reserved", "ok 6", "5", "screen=tools toast=No_item", 1, false },
+ 	{ "2 zone 2 positions away", "", "ok 4 down down ok", "zone=2 screen=home", 5, false },
+ 	{ "3 one-shot TG, 2nd in picker", "", "tt down ptt", "txid=91 txpriv=0", 3, false },
+ 	{ "3 one-shot typed TG 3100", "", "3 1 0 0 ptt", "txid=3100 txpriv=0", 5, false },
+@@ -719,14 +723,6 @@
+ 	{ "13 lock", "", "long:quick", "locked=1", 1, false },
+ 	{ "13 unlock", "long:quick", "long:quick", "locked=0", 1, false },
+ 	{ "14 GPS details", "", "ok 6 2", "screen=gps", 3, false },
+-	{ "15 hotspot page", "", "ok 6 3", "screen=info", 4, false },
+-#if CONFIG_SFR && CONFIG_VFO_DMR
+-	// Tools > Single-freq repeater in the VFO sets its role (docs/spec/sfr.md 4): SELECT steps Role and Inbound slot
+-	{ "15 VFO SFR page", "ok 4 up ok", "ok 6 5", "screen=info focus=Role shows=Off", 3, false },
+-	{ "15 VFO SFR role: User, then TS2", "ok 4 up ok ok 6 5", "ok down ok", "screen=info shows=User shows=TS2", 3,
+-	  false },
+-	{ "15 VFO SFR slot needs a role", "ok 4 up ok ok 6 5", "down ok", "toast=Pick_a_role_first", 2, false },
+-#endif
+ 	{ "15 stop hotspot", "hotspot:on", "ok", "hotspot=0", 2, false },
+ 	// Tile 4 on a channel copies it to the VFO (docs/spec/dmr-voice.md 2.2); the VFO's own tile 4 stays Mode
+ 	// The VFO's TX freq tile (5 on FM, 6 on DMR, where a channel has Monitor / Privacy): Up / Down walk the band's
+@@ -943,8 +939,6 @@
+ 	  false },
+ 	{ "S scan in the VFO: the band", "ok 4 up ok", "ok 6 1", "toast=Scanning_the_band scanning=1", 3, false },
+ 	{ "S scan on a channel: the zone", "", "ok 6 1", "toast=Scanning_this_zone scanning=1", 3, false },
+-	{ "S USB network on", "", "ok 6 4 ok", "usbnet=1 toast=USB_is_a_network screen=home", 4, false },
+-	{ "S USB network off", "ok 6 4 ok", "ok 6 4 ok", "usbnet=0 toast=USB_is_a_serial", 4, false },
+ 	{ "S message failed text", "", "", "screen=home", 0, false },
+ 	// APRS (docs/spec/aprs.md 10): Tools 9, one row each
+ 	{ "A APRS page", "", "ok 6 8", "screen=aprs", 3, false },

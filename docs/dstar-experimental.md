@@ -17,11 +17,13 @@ blank, the radio sends `CQCQCQ`.
 
 ## External hotspot
 
-Create a D-STAR memory in the web CPS with the hotspot's RF frequencies. For
-simplex hotspots, give the memory the same RX and TX frequency. Copy `RPT1` and
+Open Channels → Edit channel on the radio and select D-STAR in Mode. Edit
+URCALL, RPT1 and RPT2 with OK, then hold OK to save the memory. The web CPS
+can edit the same fields. For simplex hotspots, give the memory the same RX
+and TX frequency. Copy `RPT1` and
 `RPT2` from the D-Star section of the [WPSD dashboard](https://manual.wpsd.radio/modes/dstar/).
 For example, use `N0CALL B` for `RPT1` when the node uses module B and `N0CALL G`
-for `RPT2`. The CPS pads the callsigns so the module is in the eighth column.
+for `RPT2`. The editor pads the callsigns so the module is in the eighth column.
 Use `CQCQCQ` for voice or enter `E` in URCALL for the node's echo command.
 The radio sends the repeater flag even on a zero-offset memory.
 

@@ -147,6 +147,7 @@ PATCHES = (
 	'low-band-nfm.patch',
 	'air-fm-capture-handoff.patch',
 	'hrc7000-air-copy-recovery.patch',
+	'dm32-tools-menu.patch',
 )
 
 
@@ -179,6 +180,7 @@ def prepare(tree, dstar=False):
 		run('git', 'apply', '--binary', PATCH_DIR / 'dstar-mode.patch', cwd=tree)
 		run('git', 'apply', '--binary', PATCH_DIR / 'dstar-channels.patch', cwd=tree)
 		run('git', 'apply', '--binary', PATCH_DIR / 'dstar-hotspot-routing.patch', cwd=tree)
+		run('git', 'apply', '--binary', PATCH_DIR / 'dstar-channel-editor.patch', cwd=tree)
 		shutil.copytree(ROOT / 'src/dstar', tree / 'core/dstar')
 	run('git', 'submodule', 'update', '--init', '--depth=1', 'third_party/FreeRTOS-Kernel', cwd=tree)
 
