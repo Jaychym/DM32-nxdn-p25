@@ -65,13 +65,14 @@ jobs:
       - name: Build firmware
         run: python3 tools/build_current.py --jobs 4
 
-      - name: Check AES voice, DMR, P25, NXDN, YSF and M17
+      - name: Check digital voice and the MMDVM modem interface
         run: |
           set -eu
           T=build/current/tests/host
           tests="radioFeaturesTest radioCoreTestNxdn radioListenBandsTest aprsRadioTest rda5807mTest voiceCipherTest dmrAesTest dmrPrivacyTest dmrCallTest dmrCallTestAes hrc7000DmrTest hrc7000AirTest p25Test p25EngineTest p25EngineTestAes p25VoiceTest
             nxdnTest nxdnEngineTest nxdnEngineTestAes aesTest ysfTest ysfEngineTest radioCoreTestYsf
-            radioCoreTestP25Nxdn radioCoreTestAirInterop fd6818Test m17Test m17VoiceTest radioCoreTestM17 codeplugEditTest codeplugTagTest settingsTest uiFlowTest uiFlowTestReplay"
+            radioCoreTestP25Nxdn radioCoreTestAirInterop fd6818Test m17Test m17VoiceTest radioCoreTestM17 radioCoreTestDstar
+            mmdvmTest codeplugEditTest codeplugTagTest settingsTest uiFlowTest uiFlowTestReplay"
           make -C "$T" -j4 $tests
           for t in $tests; do
             (cd "$T" && ./"$t")
