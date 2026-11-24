@@ -1,0 +1,79 @@
+diff --git a/core/ui/ui_aprs.c b/core/ui/ui_aprs.c
+index 0619975..530b802 100644
+--- a/core/ui/ui_aprs.c
++++ b/core/ui/ui_aprs.c
+@@ -264,7 +264,7 @@ static void aprs_select(uint16_t i, bool hold)
+ 		}
+ 		c.region = (uint8_t)((c.region + 1u) % APRS_REGION_COUNT);
+ 		if (c.region == APRS_REGION_CUSTOM && c.freq_hz == 0) {
+-			c.region = 0;	// no custom frequency set (qdmr / debug link): skip it
++			c.region = (uint8_t)((c.region + 1u) % APRS_REGION_COUNT);	// skip unset Custom
+ 		}
+ 		break;
+ 	case AP_POWER:
+diff --git a/tests/host/aprsRadioTest.c b/tests/host/aprsRadioTest.c
+index 686b51e..8c3a25b 100644
+--- a/tests/host/aprsRadioTest.c
++++ b/tests/host/aprsRadioTest.c
+@@ -523,6 +523,22 @@ static void test_beacon_on_air(void)
+ 	CHECK(wait_start(2, 8000));
+ }
+ 
++static void test_brazil_beacon(void)
++{
++	reset();
++	aprs_set_test_call("Q1TST");
++	configure(0, false);
++	aprs_cfg_t c;
++	aprs_get_cfg(&c);
++	c.region = APRS_REGION_BR;
++	c.freq_hz = 145825000u;  // the saved custom frequency must not override the preset
++	aprs_set_cfg(&c, now);
++	CHECK(aprs_send_now());
++	CHECK(wait_start(1, 8000) && hw.tx_hz == 145570000u);
++	wait_idle();
++	CHECK(!hw.keyed && hw.rx_hz == CH_HZ);
++}
++
+ // The test TX limit refuses a beacon whose frequency isn't on its list at key-up (APRS_RF_NO_KEY): nothing keyed, the
+ // radio back on the channel. With the APRS frequency on it, the beacon goes
+ static void test_tx_limit(void)
+@@ -2216,6 +2232,7 @@ int main(void)
+ #endif
+ 	test_defaults();
+ 	test_beacon_on_air();
++	test_brazil_beacon();
+ 	test_tx_limit();
+ 	test_min_interval();
+ 	test_busy_channel();
+diff --git a/tests/host/uiFlowTest.c b/tests/host/uiFlowTest.c
+index 11cf97d..92cd7b3 100644
+--- a/tests/host/uiFlowTest.c
++++ b/tests/host/uiFlowTest.c
+@@ -917,8 +917,12 @@ static const flow_t flows[] = {
+ 	{ "A beacons on", "", "ok 6 8 2", "aprs_auto=1 toast=Beacons_on", 4, false },
+ 	{ "A beacons off again", "ok 6 8 2", "2", "aprs_auto=0 toast=Beacons_off", 1, false },
+ 	{ "A next region", "", "ok 6 8 3", "aprs_region=1", 4, false },
+-	{ "A regions skip an unset custom", "ok 6 8 3 3 3 3 3", "3", "aprs_region=0", 1, false },
++	{ "A Brazil with an unset custom frequency", "ok 6 8 3 3 3 3 3", "3",
++	  "aprs_region=7 shows=Brazil shows=145.57", 1, false },
++	{ "A regions wrap after Brazil", "ok 6 8 3 3 3 3 3 3", "3", "aprs_region=0 shows=144.39", 1, false },
+ 	{ "A regions with a custom frequency", "aprs:custom ok 6 8 3 3 3 3 3", "3", "aprs_region=6", 1, false },
++	{ "A Brazil after a configured custom frequency", "aprs:custom ok 6 8 3 3 3 3 3 3", "3",
++	  "aprs_region=7 shows=Brazil shows=145.57", 1, false },
+ 	{ "A power as the channel", "ok 6 8", "down down down", "shows=As_channel aprs_power=0", 3, false },
+ 	{ "A power of its own", "", "ok 6 8 4", "aprs_power=1", 4, false },
+ 	{ "A path shows the default", "ok 6 8", "down down down down", "shows=WIDE1-1,WIDE2-1 aprs_path=2", 4, false },
+diff --git a/tools/rfoundry_debug.py b/tools/rfoundry_debug.py
+index 0d29e3b..eed895a 100644
+--- a/tools/rfoundry_debug.py
++++ b/tools/rfoundry_debug.py
+@@ -2929,7 +2929,7 @@ def main(argv=None):
+     p = sub.add_parser("aprs", help="APRS: send now, status, message, test call, settings, NMEA (docs/spec/aprs.md)")
+     p.add_argument("op", choices=["send", "status", "msg", "call", "set", "nmea"])
+     p.add_argument("args", nargs="*", help="status: TEXT; msg: CALL TEXT; call: [CALLSIGN]; set: FIELD VALUE "
+-                   f"(fields {', '.join(APRS_FIELDS)}; region na|eu|au|nz|jp|cn|custom, pos_src auto|gps|host|fixed, "
++                   f"(fields {', '.join(APRS_FIELDS)}; region {'|'.join(APRS_REGIONS)}, pos_src auto|gps|host|fixed, "
+                    "via rf|dmr|both, lat / lon in degrees, freq_hz in Hz or MHz with a point); nmea: SENTENCE")
+     p = sub.add_parser("snmp", help="the SNMP agent: status, settings, communities, test notification "
+                        "(docs/spec/snmp.md)")

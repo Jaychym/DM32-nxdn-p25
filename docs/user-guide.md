@@ -15,12 +15,25 @@ before you install it:
 | FM | `FM` | Analog, as the stock radio |
 | DMR | `DMR` | Tier II, both timeslots, as RadioFoundry |
 | P25 | `P25` | P25 Phase 1 conventional: one frequency (or a repeater pair), a NAC, a talkgroup |
-| NXDN | `NXDN` | NXDN48 conventional (6.25 kHz): a RAN and a group |
+| NXDN | `NXDN` | NXDN48 or NXDN96 conventional and Type-C voice trunking |
 | P25 trunk | `P25T` | One P25 Phase 1 trunked system. The channel's frequency is the system's control channel; the radio moves to the voice channels by itself |
 
-The radio transmits on 136-174 and 400-480 MHz. It also receives, never transmits, on 65-108 MHz (broadcast FM),
-108-136 MHz (air band, AM) and 174-260, 350-400 and 480-520 MHz, with less sensitivity outside the front-end filters.
-800 MHz trunked systems are out of its range.
+The radio's rated bands are 136–174 and 400–480 MHz. **Tools > RX past bands** lets the firmware attempt
+receive-only tuning above those bands. At 800 MHz, the synthesizer lock and useful sensitivity of the RF front end
+have not been confirmed. Tune the actual output frequency and compare with an independent receiver before
+diagnosing a trunking or channel-plan problem.
+
+### NXDN Type-C reception
+
+Set the channel's RX frequency to the site's outbound control frequency, choose its NXDN48 or NXDN96 rate, and
+enable Trunk and All groups. Start with RAN Any and RX only. With a numbered channel plan, set the correct plan base
+and spacing in the Codeplug Editor and save a memory channel. The NXDN VFO only follows direct frequency
+assignments. A conventional signal uses the voice frequency with Trunk off.
+
+USB debug view `nxdn_trunk` shows valid and failed control frames, the decoded site and grant frequency. A grant
+for which the tuner rejects the frequency leaves the receiver on control. To read the counters, run
+`python3 tools/rfoundry_debug.py view --section nxdn_trunk` from the composed RadioFoundry tree. The firmware
+handles voice. Data, status and short-message transactions use other NXDN services.
 
 ## Aviation AM receive
 

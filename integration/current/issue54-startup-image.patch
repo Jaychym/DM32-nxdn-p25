@@ -1,0 +1,487 @@
+diff --git a/boards/dm32/board.mk b/boards/dm32/board.mk
+index 995f8c8..2af0827 100644
+--- a/boards/dm32/board.mk
++++ b/boards/dm32/board.mk
+@@ -13,3 +13,5 @@ BOARD_DIRS := boards/dm32 drivers/rf/rfbus drivers/rf/fd6818 drivers/rf/subaudio
+ # The 240x320 panel at full resolution in 16 colors (display_dm32.c): the frame buffer is 37.5 KB (2.5 KB under the
+ # 40 KB default) and has 320 rows
+ MCU_DEFS   += -DGFX_INDEXED=1 -DGFX_FB_BYTES=38400u -DGFX_MAX_ROWS=320u
++
++CONFIG_SPLASH_IMAGE ?= y
+diff --git a/config/features.mk b/config/features.mk
+index 20d883f..95ff060 100644
+--- a/config/features.mk
++++ b/config/features.mk
+@@ -243,6 +243,8 @@ CONFIG_AM_RX ?= $(CONFIG_FM)
+ # broadcast FM receive: FM channels and the VFO in the broadcast receiver's range play on that second receiver
+ # chip, receive only (board.bcast, CAP_BCAST_FM; docs/spec/airband-and-broadcast.md). Off where there is none
+ CONFIG_BCAST_FM ?= y
++# Optional image in the codeplug for the normal startup screen.
++CONFIG_SPLASH_IMAGE ?= n
+ # receive past the band table: a range in board.bands (rx_ext_count) that receives only while Settings > Advanced says
+ # so, off by default, never transmit (docs/spec/radio-features.md). Off where the chip documents give no range
+ CONFIG_RX_EXT ?= y
+@@ -347,7 +349,7 @@ CONFIG_GPS_UTM ?= $(CONFIG_GPS_SKY)
+ 
+ FEATURES := USB_SERIAL_REQUEST FM SUBTONE DMR DMR_PRIVACY DMR_TALKER_ALIAS DMR_GPS DMR_SMS DMR_TMS DMR_ARS DMR_LRRP DMR_SIGNALING DMR_EMERGENCY DMR_ROAMING DMR_TRUNK DMR_TRUNK_TX DMR_TRUNK_SUPL DMR_TRUNK_GW VOICE_CAPTURE DMR_IP_GATEWAY ZONE_SHARE DMR_UDP_COMPRESS NET_TCP NET_KISS NET_HTTP NET_HTTP_GZIP NET_WEBCTL NET_RIGCTL NET_APRSIS NET_USRP MDNS TFTP TFTP_IDDB IDDB_COMPACT DMR_CONTROL_STATION SNMP SFR SFR_DUALPATH_RX SFR_CWID TASK_STACKS \
+ 	USB HOSTLINK USB_NETWORK NET_PPP HOTSPOT HOTSPOT_SPLIT DEBUGLINK CPS_OPENFW CPS_FAST VFO VFO_FM VFO_DMR DIAG BACKLIGHT_TEST FONT_XL FONT_AA FONT_BIG LANG_ES LANG_IT LANG_FR LANG_ZH LANG_DEFAULT_ES LANG_DEFAULT_IT LANG_DEFAULT_FR LANG_DEFAULT_ZH UI_COLOR UI_SETTINGS SCAN DUAL_WATCH BEEP FM_TX_TONES DTMF \
+-	RX_EXT RX_EXT_ON AIR_AES VOX REF_TRIM BATTERY_SAVE VIBRATE GPS AUDIO_PROBE STUB_ENTRY NAND_STORAGE CRASH_LOG CRASH_SCREEN CRASH_REPORT WATCHDOG FAULT_TRACE AM_RX BCAST_FM APRS APRS_AFSK APRS_DMR APRS_RX APRS_IGATE GPS_SKY GPS_UTM KEY_ASSIGN CHANNEL_LIST CHANNEL_EDIT ZONE_EDIT CONTACT_EDIT VOLUME_BAR P25 P25_TRUNK NXDN YSF M17 AIR_RAW UI_KAWAII MDC1200
++	RX_EXT RX_EXT_ON AIR_AES VOX REF_TRIM BATTERY_SAVE VIBRATE GPS AUDIO_PROBE STUB_ENTRY NAND_STORAGE CRASH_LOG CRASH_SCREEN CRASH_REPORT WATCHDOG FAULT_TRACE AM_RX BCAST_FM SPLASH_IMAGE APRS APRS_AFSK APRS_DMR APRS_RX APRS_IGATE GPS_SKY GPS_UTM KEY_ASSIGN CHANNEL_LIST CHANNEL_EDIT ZONE_EDIT CONTACT_EDIT VOLUME_BAR P25 P25_TRUNK NXDN YSF M17 AIR_RAW UI_KAWAII MDC1200
+ 
+ # The panel's width in pixels: the display class the board's board.toml names (hardware.gallery = "160x128", the width
+ # first). Empty when it names none, which counts as a narrow panel
+diff --git a/core/ui/ui.c b/core/ui/ui.c
+index efd94bc..ed97e1f 100644
+--- a/core/ui/ui.c
++++ b/core/ui/ui.c
+@@ -123,7 +123,7 @@ static void ui_task(void *arg)
+ 		ui_svc_boot_text(line1, line2);
+ 		// the release name when this is one (v26.11), else the commit
+ 		gfx_frame_begin();
+-		ui_draw_splash(board.name, RFOUNDRY_RELEASE[0] != '\0' ? RFOUNDRY_RELEASE : RFOUNDRY_GIT, line1, line2);
++		ui_draw_user_splash(board.name, RFOUNDRY_RELEASE[0] != '\0' ? RFOUNDRY_RELEASE : RFOUNDRY_GIT, line1, line2);
+ 		gfx_flush();
+ 	}
+ 	ui_app_init();
+diff --git a/core/ui/ui_menus.c b/core/ui/ui_menus.c
+index e8d700f..b605213 100644
+--- a/core/ui/ui_menus.c
++++ b/core/ui/ui_menus.c
+@@ -5474,7 +5474,7 @@ static void splash_preview_draw(void)
+ 	}
+ 	char line1[CODEPLUG_NAME_LEN + 1], line2[CODEPLUG_NAME_LEN + 1];
+ 	ui_svc_boot_text(line1, line2);
+-	ui_draw_splash(board.name, RFOUNDRY_RELEASE[0] != '\0' ? RFOUNDRY_RELEASE : RFOUNDRY_GIT, line1, line2);
++	ui_draw_user_splash(board.name, RFOUNDRY_RELEASE[0] != '\0' ? RFOUNDRY_RELEASE : RFOUNDRY_GIT, line1, line2);
+ }
+ 
+ static const ui_scr_def_t splash_preview_screen = {
+diff --git a/core/ui/ui_screens.c b/core/ui/ui_screens.c
+index 2a3fe4a..65c2af8 100644
+--- a/core/ui/ui_screens.c
++++ b/core/ui/ui_screens.c
+@@ -12,6 +12,9 @@
+ #include "cjk_font.h"	// CJK_FONT_H: the line height a CJK language needs (CONFIG_LANG_ZH)
+ #include "config.h"
+ #include "codeplug/codeplug_modes.h"	// channel kinds: the mode word
++#if CONFIG_SPLASH_IMAGE
++#include "codeplug/codeplug_kv.h"
++#endif
+ #if CONFIG_P25 || CONFIG_NXDN
+ #include "air/air_session.h"
+ #endif
+@@ -1033,6 +1036,56 @@ static int draw_wordmark(const font_t *f, int y)
+ 	return f->h;
+ }
+ 
++#if CONFIG_SPLASH_IMAGE
++#define SPLASH_EDGE 64u
++#define SPLASH_RECORD 0x2000u
++
++// This buffer is used only by the UI task (normal startup and preview).
++static uint8_t splash_pixels[SPLASH_EDGE * SPLASH_EDGE / 4u];
++
++static color_t shade(unsigned level)
++{
++	unsigned bg = ui_col.bg, fg = ui_col.fg;
++	unsigned r = ((bg >> 11) * (3 - level) + (fg >> 11) * level + 1) / 3;
++	unsigned g = (((bg >> 5) & 63) * (3 - level) + ((fg >> 5) & 63) * level + 1) / 3;
++	unsigned b = ((bg & 31) * (3 - level) + (fg & 31) * level + 1) / 3;
++	return (color_t)((r << 11) | (g << 5) | b);
++}
++
++static bool draw_user_image(void)
++{
++	if (codeplug_kv_get(SPLASH_RECORD, splash_pixels, sizeof(splash_pixels)) != (int)sizeof(splash_pixels))
++		return false;
++	int w = gfx_width(), h = gfx_height();
++	int edge = w < h ? w : h;
++	int left = (w - edge) / 2, top = (h - edge) / 2;
++	color_t pal[4];
++	for (unsigned i = 0; i < 4; i++)
++		pal[i] = gfx_bpp() == 1 ? (i >= 2 ? ui_col.fg : ui_col.bg) : shade(i);
++	gfx_clear(ui_col.bg);
++	for (int y = 0; y < edge; y++) {
++		unsigned row = (unsigned)y * SPLASH_EDGE / (unsigned)edge;
++		for (int x = 0; x < edge; x++) {
++			unsigned col = (unsigned)x * SPLASH_EDGE / (unsigned)edge;
++			uint8_t packed = splash_pixels[(row * SPLASH_EDGE + col) / 4u];
++			unsigned value = (packed >> (6u - 2u * (col % 4u))) & 3u;
++			if (value != 0)
++				gfx_pixel(left + x, top + y, pal[value]);
++		}
++	}
++	return true;
++}
++#endif
++
++void ui_draw_user_splash(const char *board_name, const char *version, const char *line1, const char *line2)
++{
++#if CONFIG_SPLASH_IMAGE
++	if (draw_user_image())
++		return;
++#endif
++	ui_draw_splash(board_name, version, line1, line2);
++}
++
+ void ui_draw_splash(const char *board_name, const char *version, const char *line1, const char *line2)
+ {
+ #if CONFIG_UI_KAWAII
+diff --git a/core/ui/ui_screens.h b/core/ui/ui_screens.h
+index e5370b6..63f9563 100644
+--- a/core/ui/ui_screens.h
++++ b/core/ui/ui_screens.h
+@@ -266,6 +266,7 @@ bool ui_list_body_fits(const ui_state_t *s, const ui_list_t *l);
+ 
+ // The boot screen: the mark, the name, the owner's two boot text lines (empty: left out), board and version
+ void ui_draw_splash(const char *board_name, const char *version, const char *line1, const char *line2);
++void ui_draw_user_splash(const char *board_name, const char *version, const char *line1, const char *line2);
+ void ui_draw_home(const radio_view_t *v, const ui_state_t *s);
+ #if CONFIG_DUAL_WATCH
+ // Home while dual watch runs: both channels, each with its frequency, which one PTT uses (PTT) and which one a call is
+diff --git a/docs/spec/codeplug-settings.md b/docs/spec/codeplug-settings.md
+index 82f036d..79473ae 100644
+--- a/docs/spec/codeplug-settings.md
++++ b/docs/spec/codeplug-settings.md
+@@ -335,3 +335,14 @@ conversion copies the entries as they are. There is one key space for both forma
+ - Per-channel settings: a key whose value starts with a channel number, or a table key. Not needed yet.
+ - No key is a record yet. The firmware's set from the front (`CODEPLUG_KV_HEAD`) is built and tested; the Codeplug
+   Editor's comes with the first record key.
++
++### Startup image asset
++
++Key `0x2000` contains an optional 64 × 64 four-shade image for
++`CONFIG_SPLASH_IMAGE`. It is 1,024 bytes, in row order, with four pixels
++per byte, most significant pair first. Pixel values 0 through 3 range from
++the current theme background to its foreground. The reader uses the normal
++startup screen when the record is absent or a different length. This asset
++also appears in the startup screen preview. Diagnostics and firmware update
++screens retain their own banners. The editor stores or removes it with the
++rest of the settings area, preserving unrelated entries.
+diff --git a/docs/user/02-installing.md b/docs/user/02-installing.md
+index ee9930e..c9af3b5 100644
+--- a/docs/user/02-installing.md
++++ b/docs/user/02-installing.md
+@@ -409,3 +409,11 @@ from the backup. When it finishes, it says how many parts it wrote and how many
+ still holds as the backup has it is one of those: the installer says that the codec space was not written.
+ 
+ Your radio's section in the [Radio reference](23-radios.md) says which way applies.
++
++### Custom startup image
++
++On a build with startup image support, open the **Radio** tab in the Codeplug
++Editor, select a PNG, JPEG, or WebP in **Startup image**, and write the codeplug.
++The radio shows the image in four shades using the current theme. **Settings
++→ My radio → Preview splash** shows what will appear at startup. Restore the
++built-in screen in the same editor field.
+diff --git a/site/i18n/en.json b/site/i18n/en.json
+index b4baecd..0c96e67 100644
+--- a/site/i18n/en.json
++++ b/site/i18n/en.json
+@@ -1871,6 +1871,10 @@
+  "editor.general.radio_name_help": "Usually your callsign. Sent as talker alias.",
+  "editor.general.boot1": "Boot Text Line 1",
+  "editor.general.boot2": "Boot Text Line 2",
++ "editor.general.boot_image": "Startup image",
++ "editor.general.boot_image_reset": "Restore built-in startup screen",
++ "editor.general.boot_image_help": "PNG, JPEG or WebP. Shown in four shades on firmware with custom startup images.",
++ "editor.general.boot_image_error": "Could not open this image.",
+  "editor.general.group_hang": "Group Call Hang Time",
+  "editor.general.private_hang": "Private Call Hang Time",
+  "editor.general.hang_help": "The reply window after a call, in steps of 0.5 s.",
+diff --git a/site/i18n/es.json b/site/i18n/es.json
+index 012fe36..9815766 100644
+--- a/site/i18n/es.json
++++ b/site/i18n/es.json
+@@ -1871,6 +1871,10 @@
+  "editor.general.radio_name_help": "Normalmente tu indicativo. Se envía como alias de hablante.",
+  "editor.general.boot1": "Texto de arranque, línea 1",
+  "editor.general.boot2": "Texto de arranque, línea 2",
++ "editor.general.boot_image": "Imagen de inicio",
++ "editor.general.boot_image_reset": "Restaurar imagen original",
++ "editor.general.boot_image_help": "PNG, JPEG o WebP. Se muestra en cuatro tonos en firmware compatible.",
++ "editor.general.boot_image_error": "No se pudo abrir esta imagen.",
+  "editor.general.group_hang": "Tiempo de espera de llamada de grupo",
+  "editor.general.private_hang": "Tiempo de espera de llamada privada",
+  "editor.general.hang_help": "El margen para responder tras una llamada, en pasos de 0,5 s.",
+diff --git a/site/i18n/it.json b/site/i18n/it.json
+index 2e2213f..561a3c5 100644
+--- a/site/i18n/it.json
++++ b/site/i18n/it.json
+@@ -1871,6 +1871,10 @@
+  "editor.general.radio_name_help": "Di solito il tuo nominativo. Inviato come alias parlante.",
+  "editor.general.boot1": "Testo di avvio riga 1",
+  "editor.general.boot2": "Testo di avvio riga 2",
++ "editor.general.boot_image": "Immagine di avvio",
++ "editor.general.boot_image_reset": "Ripristina immagine originale",
++ "editor.general.boot_image_help": "PNG, JPEG o WebP. Visualizzata in quattro tonalità sul firmware compatibile.",
++ "editor.general.boot_image_error": "Impossibile aprire questa immagine.",
+  "editor.general.group_hang": "Tempo di coda chiamata di gruppo",
+  "editor.general.private_hang": "Tempo di coda chiamata privata",
+  "editor.general.hang_help": "La finestra di risposta dopo una chiamata, a passi di 0.5 s.",
+diff --git a/site/i18n/zh.json b/site/i18n/zh.json
+index 89c34c9..fe52809 100644
+--- a/site/i18n/zh.json
++++ b/site/i18n/zh.json
+@@ -1871,6 +1871,10 @@
+  "editor.general.radio_name_help": "通常是您的呼号。作为主叫别名发送。",
+  "editor.general.boot1": "启动文字第一行",
+  "editor.general.boot2": "启动文字第二行",
++ "editor.general.boot_image": "开机图像",
++ "editor.general.boot_image_reset": "还原默认开机图像",
++ "editor.general.boot_image_help": "支持 PNG、JPEG 或 WebP。兼容固件使用四个色阶显示。",
++ "editor.general.boot_image_error": "无法打开此图像。",
+  "editor.general.group_hang": "组呼挂起时间",
+  "editor.general.private_hang": "个呼挂起时间",
+  "editor.general.hang_help": "通话后的回复窗口，以 0.5 秒为步进。",
+diff --git a/site/static/js/codeplug/bootimage.js b/site/static/js/codeplug/bootimage.js
+new file mode 100644
+index 0000000..3de8066
+--- /dev/null
++++ b/site/static/js/codeplug/bootimage.js
+@@ -0,0 +1,31 @@
++// SPDX-License-Identifier: MIT
++// Copyright (c) 2026 lyra XE1POC
++// RadioFoundry startup image asset in the codeplug settings area.
++export const BOOT_IMAGE_KEY = 0x2000;
++export const BOOT_IMAGE_EDGE = 64;
++export const BOOT_IMAGE_BYTES = BOOT_IMAGE_EDGE ** 2 / 4;
++
++export function bootImageValid(image) {
++	return image instanceof Uint8Array && image.length === BOOT_IMAGE_BYTES;
++}
++
++export function packBootImage(rgba) {
++	if (rgba.length !== BOOT_IMAGE_EDGE ** 2 * 4) throw new RangeError("Invalid image dimensions");
++	const image = new Uint8Array(BOOT_IMAGE_BYTES);
++	const luma = (i) => (0.2126 * rgba[i] + 0.7152 * rgba[i + 1] + 0.0722 * rgba[i + 2]) / 255;
++	let coverage = 0, brightness = 0, transparent = false;
++	for (let i = 0; i < rgba.length; i += 4) {
++		const alpha = rgba[i + 3];
++		transparent ||= alpha < 255;
++		coverage += alpha;
++		brightness += luma(i) * alpha;
++	}
++	// A dark logo on a transparent background should use the theme foreground.
++	const invert = transparent && brightness < coverage / 2;
++	for (let i = 0; i < rgba.length; i += 4) {
++		const shade = (invert ? 1 - luma(i) : luma(i)) * rgba[i + 3] / 255;
++		const pixel = i / 4;
++		image[pixel >> 2] |= Math.round(shade * 3) << (6 - 2 * (pixel & 3));
++	}
++	return image;
++}
+diff --git a/site/static/js/codeplug/channelmodes.js b/site/static/js/codeplug/channelmodes.js
+index 2ed099b..63e3093 100644
+--- a/site/static/js/codeplug/channelmodes.js
++++ b/site/static/js/codeplug/channelmodes.js
+@@ -16,7 +16,8 @@
+ // fields, raw}], secret (the module's fields, {raw} for a type without, null for none), flagsRaw, raw}.
+ // m.modeSettings: {kind id: the module's fields}.
+ 
+-import { decodeArea, getValue, setValue, deleteValue, dedupe, putArea, KV_ADDR, KV_SIZE, KV_HDR, KEYS } from "./kv.js";
++import { decodeArea, getValue, setValue, deleteValue, dedupe, putArea, KV_ADDR, KV_SIZE, KV_HDR, KEYS, getKey, keyValid, keyValue } from "./kv.js";
++import { BOOT_IMAGE_KEY, bootImageValid } from "./bootimage.js";
+ import { getName, putName } from "./fields.js";
+ import { redactDmrBasicKeys, aniByte } from "./records.js";
+ import { KINDS, kindRow, typeRow, radioRuns } from "./modes.js";
+@@ -378,6 +379,18 @@ export function modeEntries(m, entries, baseNames = () => new Map()) {
+ 		if (v) set(key, v);
+ 		else del(key);
+ 	}
++	// Serialize the mode records, general settings, and image as one area. An edit can free space in one to use it in another.
++	if (m.general) {
++		for (const row of KEYS) {
++			const value = m.general[row.name] ?? null;
++			if (getKey(out, row) === value) continue;
++			if (value === null) del(row.key);
++			else if (keyValid(row, value)) set(row.key, keyValue(row, value));
++		}
++		const image = m.general.bootImage;
++		if (bootImageValid(image)) set(BOOT_IMAGE_KEY, image);
++		else if (image === null && bootImageValid(getValue(out, BOOT_IMAGE_KEY))) del(BOOT_IMAGE_KEY);
++	}
+ 	return out;
+ }
+ 
+@@ -396,8 +409,7 @@ export function encodeModes(m, b, baseNames) {
+ export function modeAreaUse(m, b, baseNames) {
+ 	const area = decodeArea(b);
+ 	const entries = area.state === "valid" ? dedupe(area.entries) : [];
+-	let out = modeEntries(m, entries, baseNames);
+-	for (const row of KEYS) if (m.general?.[row.name] != null && !getValue(out, row.key)) out = [...out, { key: row.key, value: new Uint8Array(row.size) }];
++	const out = modeEntries(m, entries, baseNames);
+ 	const hdr = area.state === "valid" ? b[KV_ADDR + 5] : KV_HDR;
+ 	return { used: out.reduce((n, e) => n + 4 + e.value.length, 0), max: KV_SIZE - hdr };
+ }
+@@ -487,9 +499,10 @@ export function validateModes(m, err, warn, { features = null, baseNames } = {})
+ 	const any = systems.length || m.channels.some((c) => c.kind);
+ 	if (state === "newer") {
+ 		if (any) warn(S, null, null, "mode_area_newer");
++		if (m.general?.bootImage) err("general", null, "bootImage", "mode_area_newer");
+ 		return;
+ 	}
+-	if (!any) return;
++	if (!any && !m.general?.bootImage) return;
+ 	const { used, max } = modeAreaUse(m, m.base.bytes, baseNames);
+ 	if (used > max) err(S, null, null, "settings_area_full", { used, max });
+ }
+diff --git a/site/static/js/codeplug/records.js b/site/static/js/codeplug/records.js
+index b0dba0a..031d0fc 100644
+--- a/site/static/js/codeplug/records.js
++++ b/site/static/js/codeplug/records.js
+@@ -9,7 +9,8 @@ import { EE, FL } from "./image.js";
+ import {
+ 	getFreq, putFreq, getBcdId, putBcdId, getTone, putTone, getName, putName, getCoord, coordBytes, u16, put16,
+ } from "./fields.js";
+-import { decodeArea, getKey, putKeys, keyValid, KEYS } from "./kv.js";
++import { decodeArea, getKey, getValue, KEYS } from "./kv.js";
++import { BOOT_IMAGE_KEY, bootImageValid } from "./bootimage.js";
+ 
+ export const LIMITS = {
+ 	channels: 1024, zones: 68, zoneChannels: 80, contacts: 1024, rxLists: 76, rxListContacts: 32,
+@@ -367,6 +368,7 @@ export function encodeAprs(a, r) {
+ export function decodeGeneral(b) {
+ 	const g = b.subarray(GENERAL, GENERAL + GENERAL_SIZE);
+ 	const kv = decodeArea(b).entries;
++	const bootImage = getValue(kv, BOOT_IMAGE_KEY);
+ 	return {
+ 		radioName: getName(g, 0, 8),
+ 		dmrId: getBcdId(g, 8),
+@@ -374,6 +376,7 @@ export function decodeGeneral(b) {
+ 		privateHang: g[0x19] === 0xFF ? 0 : g[0x19],
+ 		bootLine1: getName(b, BOOT_TEXT, 16),
+ 		bootLine2: getName(b, BOOT_TEXT + 16, 16),
++		...(bootImageValid(bootImage) ? { bootImage } : {}),
+ 		...Object.fromEntries(KEYS.map((row) => [row.name, getKey(kv, row)])),
+ 	};
+ }
+@@ -390,12 +393,4 @@ export function encodeGeneral(s, b) {
+ 	if (was.privateHang !== s.privateHang) g[0x19] = s.privateHang & 0xFF;
+ 	if (was.bootLine1 !== s.bootLine1) putName(b, BOOT_TEXT, 16, s.bootLine1);
+ 	if (was.bootLine2 !== s.bootLine2) putName(b, BOOT_TEXT + 16, 16, s.bootLine2);
+-	// the settings area only when one of its keys changed; an area of a newer version is never written (model.js
+-	// validate() warns), nor is a value out of range (validate()'s error)
+-	const vals = {};
+-	for (const row of KEYS) {
+-		const v = s[row.name] ?? null;
+-		if (was[row.name] !== v && (v === null || keyValid(row, v))) vals[row.name] = v;
+-	}
+-	if (Object.keys(vals).length) putKeys(b, vals);
+ }
+diff --git a/site/static/js/editor/app.js b/site/static/js/editor/app.js
+index fcd9edf..81c2015 100644
+--- a/site/static/js/editor/app.js
++++ b/site/static/js/editor/app.js
+@@ -11,6 +11,7 @@ import { SerialStream, serialSupported, serialApi, RFOUNDRY_USB, browserErrorKey
+ import { CodeplugImage, IDDB_HEADER, EDITOR_REGIONS } from "../codeplug/image.js";
+ import { decode, encode, empty, remove, validate, newChannel, newContact, numberAll, assignNumbers } from "../codeplug/model.js";
+ import { LIMITS, decodeGeneral } from "../codeplug/records.js";
++import { BOOT_IMAGE_EDGE, packBootImage } from "../codeplug/bootimage.js";
+ import { CpsSerial, TransportError, estimate, keepIdentity, IDENTITY, iddbRanges } from "../codeplug/transport.js";
+ import { FastError } from "../codeplug/fastlink.js";
+ import { areaForWrite, KEYS } from "../codeplug/kv.js";
+@@ -380,6 +381,41 @@ function openRecord(tab, r) {
+ 
+ // --- Radio tab: the radio-wide settings ---
+ 
++function bootImageField(g) {
++	const current = S.model;
++	const err = h("span", { class: "small ed-err", "aria-live": "polite" });
++	const setImage = (bootImage) => change(t("editor.undo.edit"), () => {
++		S.model.general = { ...S.model.general, bootImage };
++	});
++	const input = h("input", { id: "g-boot-image", type: "file", accept: "image/png,image/jpeg,image/webp" });
++	input.addEventListener("change", async () => {
++		const file = input.files[0];
++		if (!file) return;
++		try {
++			const image = await createImageBitmap(file);
++			try {
++				const edge = BOOT_IMAGE_EDGE;
++				const canvas = h("canvas", { width: edge, height: edge });
++				const ctx = canvas.getContext("2d");
++				const scale = edge / Math.max(image.width, image.height);
++				const w = Math.max(1, Math.round(image.width * scale));
++				const hgt = Math.max(1, Math.round(image.height * scale));
++				ctx.drawImage(image, (edge - w) / 2, (edge - hgt) / 2, w, hgt);
++				if (S.model === current)
++					setImage(packBootImage(ctx.getImageData(0, 0, edge, edge).data));
++			} finally {
++				image.close();
++			}
++		} catch {
++			err.textContent = t("editor.general.boot_image_error");
++			input.value = "";
++		}
++	});
++	return h("div", { class: "form-row" }, h("label", { for: "g-boot-image" }, t("editor.general.boot_image")),
++		input, g.bootImage ? button(t("editor.general.boot_image_reset"), () => setImage(null), { quiet: true }) : null,
++		h("span", { class: "small muted" }, t("editor.general.boot_image_help")), err);
++}
++
+ function radioTab() {
+ 	const g = S.model.general;
+ 	const field = (key, label, max, help, parse) => {
+@@ -421,6 +457,7 @@ function radioTab() {
+ 			field("radioName", t("editor.general.radio_name"), LIMITS.radioName, t("editor.general.radio_name_help"), text(LIMITS.radioName)),
+ 			field("bootLine1", t("editor.general.boot1"), LIMITS.bootText, null, text(LIMITS.bootText)),
+ 			field("bootLine2", t("editor.general.boot2"), LIMITS.bootText, null, text(LIMITS.bootText)),
++			bootImageField(g),
+ 			field("groupHang", t("editor.general.group_hang"), 3, t("editor.general.hang_help"), num(0, 255)),
+ 			field("privateHang", t("editor.general.private_hang"), 3, t("editor.general.hang_help"), num(0, 255)),
+ 			field("arsServer", t("editor.general.ars_server"), 8, t("editor.general.ars_server_help"), areaKey("arsServer")),
+diff --git a/site/tests/bootimage.test.mjs b/site/tests/bootimage.test.mjs
+new file mode 100644
+index 0000000..d97ea60
+--- /dev/null
++++ b/site/tests/bootimage.test.mjs
+@@ -0,0 +1,48 @@
++// SPDX-License-Identifier: MIT
++// Copyright (c) 2026 lyra XE1POC
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { BOOT_IMAGE_EDGE, BOOT_IMAGE_KEY, packBootImage } from "../static/js/codeplug/bootimage.js";
++import { decode, empty, encode } from "../static/js/codeplug/model.js";
++import { decodeArea, getValue, putArea, setValue } from "../static/js/codeplug/kv.js";
++
++test("a startup image round-trips alongside other settings and can be removed", () => {
++	const pixels = new Uint8ClampedArray(BOOT_IMAGE_EDGE ** 2 * 4);
++	pixels.set([255, 255, 255, 255, 170, 170, 170, 255, 85, 85, 85, 255, 255, 255, 255, 0]);
++	const image = packBootImage(pixels);
++	assert.equal(image[0], 0xe4);
++	const model = empty();
++	model.general.bootImage = image;
++	model.general.batteryTone = true;
++	const saved = encode(model);
++	const loaded = decode(saved);
++	assert.deepEqual(loaded.general.bootImage, image);
++	assert.equal(loaded.general.batteryTone, true);
++	assert.deepEqual(encode(loaded).bytes, saved.bytes);
++	loaded.general.bootImage = null;
++	const reset = decode(encode(loaded));
++	assert.equal(reset.general.bootImage, undefined);
++	assert.equal(reset.general.batteryTone, true);
++});
++
++test("an unknown startup image record is preserved by unrelated edits", () => {
++	const original = encode(empty());
++	const area = decodeArea(original.bytes);
++	assert.ok(putArea(original.bytes, setValue(area.entries, BOOT_IMAGE_KEY, [1, 2, 3])));
++	const model = decode(original);
++	assert.equal(model.general.bootImage, undefined);
++	model.general.radioName = "XE1POC";
++	assert.deepEqual(getValue(decodeArea(encode(model).bytes).entries, BOOT_IMAGE_KEY), Uint8Array.of(1, 2, 3));
++});
++
++test("a transparent black logo is visible and can replace obsolete mode records", () => {
++	const pixels = new Uint8ClampedArray(BOOT_IMAGE_EDGE ** 2 * 4);
++	pixels.set([0, 0, 0, 255]);
++	const image = packBootImage(pixels);
++	assert.equal(image[0], 0xc0);
++	const saved = encode(empty());
++	assert.ok(putArea(saved.bytes, setValue(decodeArea(saved.bytes).entries, 0x0400, new Uint8Array(3500))));
++	const model = decode(saved);
++	model.general.bootImage = image;
++	assert.deepEqual(decode(encode(model)).general.bootImage, image);
++});

@@ -1,0 +1,837 @@
+diff --git a/config/features.mk b/config/features.mk
+index d700c5e..20d883f 100644
+--- a/config/features.mk
++++ b/config/features.mk
+@@ -341,11 +341,13 @@ CONFIG_P25_TRUNK ?= $(CONFIG_P25)
+ # the GPS status screen: satellites on a sky plot and signal bars, fix quality, grid locator (core/position/nmea_sky.c,
+ # core/ui/ui_gps.c, docs/spec/position.md 3). Needs GPS; off, Tools > Position is a page of text
+ CONFIG_GPS_SKY ?= $(CONFIG_GPS)
++# WGS 84 UTM coordinates on the GPS Status page.
++CONFIG_GPS_UTM ?= $(CONFIG_GPS_SKY)
+ 
+ 
+ FEATURES := USB_SERIAL_REQUEST FM SUBTONE DMR DMR_PRIVACY DMR_TALKER_ALIAS DMR_GPS DMR_SMS DMR_TMS DMR_ARS DMR_LRRP DMR_SIGNALING DMR_EMERGENCY DMR_ROAMING DMR_TRUNK DMR_TRUNK_TX DMR_TRUNK_SUPL DMR_TRUNK_GW VOICE_CAPTURE DMR_IP_GATEWAY ZONE_SHARE DMR_UDP_COMPRESS NET_TCP NET_KISS NET_HTTP NET_HTTP_GZIP NET_WEBCTL NET_RIGCTL NET_APRSIS NET_USRP MDNS TFTP TFTP_IDDB IDDB_COMPACT DMR_CONTROL_STATION SNMP SFR SFR_DUALPATH_RX SFR_CWID TASK_STACKS \
+ 	USB HOSTLINK USB_NETWORK NET_PPP HOTSPOT HOTSPOT_SPLIT DEBUGLINK CPS_OPENFW CPS_FAST VFO VFO_FM VFO_DMR DIAG BACKLIGHT_TEST FONT_XL FONT_AA FONT_BIG LANG_ES LANG_IT LANG_FR LANG_ZH LANG_DEFAULT_ES LANG_DEFAULT_IT LANG_DEFAULT_FR LANG_DEFAULT_ZH UI_COLOR UI_SETTINGS SCAN DUAL_WATCH BEEP FM_TX_TONES DTMF \
+-	RX_EXT RX_EXT_ON AIR_AES VOX REF_TRIM BATTERY_SAVE VIBRATE GPS AUDIO_PROBE STUB_ENTRY NAND_STORAGE CRASH_LOG CRASH_SCREEN CRASH_REPORT WATCHDOG FAULT_TRACE AM_RX BCAST_FM APRS APRS_AFSK APRS_DMR APRS_RX APRS_IGATE GPS_SKY KEY_ASSIGN CHANNEL_LIST CHANNEL_EDIT ZONE_EDIT CONTACT_EDIT VOLUME_BAR P25 P25_TRUNK NXDN YSF M17 AIR_RAW UI_KAWAII MDC1200
++	RX_EXT RX_EXT_ON AIR_AES VOX REF_TRIM BATTERY_SAVE VIBRATE GPS AUDIO_PROBE STUB_ENTRY NAND_STORAGE CRASH_LOG CRASH_SCREEN CRASH_REPORT WATCHDOG FAULT_TRACE AM_RX BCAST_FM APRS APRS_AFSK APRS_DMR APRS_RX APRS_IGATE GPS_SKY GPS_UTM KEY_ASSIGN CHANNEL_LIST CHANNEL_EDIT ZONE_EDIT CONTACT_EDIT VOLUME_BAR P25 P25_TRUNK NXDN YSF M17 AIR_RAW UI_KAWAII MDC1200
+ 
+ # The panel's width in pixels: the display class the board's board.toml names (hardware.gallery = "160x128", the width
+ # first). Empty when it names none, which counts as a narrow panel
+@@ -552,6 +554,11 @@ ifneq ($(call feature_on,GPS_SKY),)
+     $(error CONFIG_GPS_SKY=y needs CONFIG_GPS=y)
+   endif
+ endif
++ifneq ($(call feature_on,GPS_UTM),)
++  ifeq ($(call feature_on,GPS_SKY),)
++    $(error CONFIG_GPS_UTM=y needs CONFIG_GPS_SKY=y)
++  endif
++endif
+ ifeq ($(call feature_on,FM)$(call feature_on,DMR),)
+   $(error at least one of CONFIG_FM and CONFIG_DMR must be y)
+ endif
+diff --git a/core/config.h b/core/config.h
+index 0a2f86d..9bba63b 100644
+--- a/core/config.h
++++ b/core/config.h
+@@ -366,6 +366,9 @@
+ #ifndef CONFIG_GPS_SKY
+ #define CONFIG_GPS_SKY			CONFIG_GPS
+ #endif
++#ifndef CONFIG_GPS_UTM
++#define CONFIG_GPS_UTM			CONFIG_GPS_SKY
++#endif
+ #ifndef CONFIG_NET_KISS
+ #define CONFIG_NET_KISS			(CONFIG_NET_TCP && CONFIG_APRS_AFSK)
+ #endif
+@@ -546,6 +549,9 @@
+ #if CONFIG_GPS_SKY && !CONFIG_GPS
+ #error "CONFIG_GPS_SKY needs CONFIG_GPS"
+ #endif
++#if CONFIG_GPS_UTM && !CONFIG_GPS_SKY
++#error "CONFIG_GPS_UTM needs CONFIG_GPS_SKY"
++#endif
+ #if CONFIG_P25_TRUNK && !CONFIG_P25
+ #error "CONFIG_P25_TRUNK needs CONFIG_P25"
+ #endif
+diff --git a/core/ui/ui_gps.c b/core/ui/ui_gps.c
+index ad379c3..1bcbc9d 100644
+--- a/core/ui/ui_gps.c
++++ b/core/ui/ui_gps.c
+@@ -8,6 +8,9 @@
+ #include "config.h"
+ #if CONFIG_GPS_SKY
+ #include <string.h>
++#if CONFIG_GPS_UTM
++#include <math.h>
++#endif
+ #include "ui_nav.h"
+ #include "fmt.h"
+ #include "i18n.h"
+@@ -169,12 +172,112 @@ static bool row(int *y, const char *label, const char *value, color_t vc)
+ 	return true;
+ }
+ 
++#if CONFIG_GPS_UTM
++typedef struct {
++	uint8_t zone;
++	uint32_t east, north;
++} gps_utm_t;
++
++// WGS 84. Snyder, USGS PP 1395, equations (8-9), (8-10), (3-21).
++static bool project_utm(int32_t lat_e7, int32_t lon_e7, gps_utm_t *utm)
++{
++	if (lat_e7 < -800000000 || lat_e7 > 840000000 || lon_e7 < -1800000000 || lon_e7 > 1800000000)
++		return false;
++	unsigned zone = lon_e7 == 1800000000 ? 60u : (uint32_t)(lon_e7 + 1800000000LL) / 60000000u + 1u;
++	if (lat_e7 >= 560000000 && lat_e7 < 640000000 && lon_e7 >= 30000000 && lon_e7 < 120000000)
++		zone = 32;
++	if (lat_e7 >= 720000000 && lon_e7 >= 0 && lon_e7 < 420000000)
++		zone = lon_e7 < 90000000 ? 31 : lon_e7 < 210000000 ? 33 : lon_e7 < 330000000 ? 35 : 37;
++	const double rad = 0.017453292519943295;
++	const double a = 6378137.0, k = 0.9996;
++	const double e2 = 0.0066943799901413165, e4 = e2 * e2, e6 = e4 * e2;
++	const double ep2 = e2 / (1.0 - e2);
++	double phi = lat_e7 * (1e-7 * rad);
++	double dlambda = (lon_e7 * 1e-7 - ((int)zone * 6 - 183)) * rad;
++	double s = sin(phi), c = cos(phi), s2 = s * s, c2 = c * c;
++	double t = s2 / c2, ecc = ep2 * c2;
++	double v = a / sqrt(1.0 - e2 * s2);
++	double d = dlambda * c, d2 = d * d, d4 = d2 * d2;
++	// sin(2 phi), sin(4 phi), and sin(6 phi) from the same sine and cosine.
++	double s2p = 2.0 * s * c, s4p = 2.0 * s2p * (c2 - s2);
++	double s6p = s2p * (3.0 - 4.0 * s2p * s2p);
++	double m = a * ((1.0 - e2 / 4.0 - 3.0 * e4 / 64.0 - 5.0 * e6 / 256.0) * phi
++		 - (3.0 * e2 / 8.0 + 3.0 * e4 / 32.0 + 45.0 * e6 / 1024.0) * s2p
++		 + (15.0 * e4 / 256.0 + 45.0 * e6 / 1024.0) * s4p - (35.0 * e6 / 3072.0) * s6p);
++	double east = 500000.0 + k * v * d * (1.0 + (1.0 - t + ecc) * d2 / 6.0
++		 + (5.0 - 18.0 * t + t * t + 72.0 * ecc - 58.0 * ep2) * d4 / 120.0);
++	double north = k * (m + v * (s / c) * d2 * (0.5 + (5.0 - t + 9.0 * ecc + 4.0 * ecc * ecc) * d2 / 24.0
++		 + (61.0 - 58.0 * t + t * t + 600.0 * ecc - 330.0 * ep2) * d4 / 720.0));
++	if (lat_e7 < 0)
++		north += 10000000.0;
++	utm->zone = (uint8_t)zone;
++	utm->east = (uint32_t)(east + 0.5);
++	utm->north = (uint32_t)(north + 0.5);
++	return true;
++}
++
++static bool draw_utm(const ui_position_t *p, int *y)
++{
++	static int32_t lat, lon;
++	static bool valid, cached;
++	static gps_utm_t u;
++	if (!cached || lat != p->lat_e7 || lon != p->lon_e7) {
++		lat = p->lat_e7;
++		lon = p->lon_e7;
++		valid = project_utm(lat, lon, &u);
++		cached = true;
++	}
++	if (!valid)
++		return row(y, "UTM", "-", ui_col.dim);
++
++	char buf[24];
++	sbuf_t b;
++	sb_init(&b, buf, sizeof buf);
++	sb_u32(&b, u.zone, 1);
++	sb_chr(&b, lat < 0 ? 'S' : 'N');
++	sb_chr(&b, ' ');
++	sb_u32(&b, u.east, 1);
++	sb_chr(&b, 'E');
++	if (!row(y, "UTM", buf, ui_col.fg))
++		return false;
++	sb_init(&b, buf, sizeof buf);
++	sb_u32(&b, u.north, 1);
++	sb_chr(&b, 'N');
++	return row(y, "", buf, ui_col.fg);
++}
++#endif
++
++static bool draw_coordinates(const ui_position_t *p, int *y, int32_t format, bool grid_in_heading)
++{
++#if CONFIG_GPS_UTM
++	if (format == UI_POS_UTM)
++		return draw_utm(p, y);
++#endif
++	if (format == UI_POS_GRID) {
++		if (grid_in_heading)
++			return true;
++		char loc[7];
++		locator(loc, p->lat_e7, p->lon_e7);
++		return row(y, TR(WORD_GRID, "Grid"), loc, ui_col.fg);
++	}
++	void (*coord)(sbuf_t *, int32_t, char, char) = format == UI_POS_DMS ? sb_dms : sb_coord;
++	char buf[24];
++	sbuf_t b;
++	sb_init(&b, buf, sizeof buf);
++	coord(&b, p->lat_e7, 'N', 'S');
++	if (!row(y, TR(GPS_LABEL_LAT, "Lat"), buf, ui_col.fg))
++		return false;
++	sb_init(&b, buf, sizeof buf);
++	coord(&b, p->lon_e7, 'E', 'W');
++	return row(y, TR(GPS_LABEL_LON, "Lon"), buf, ui_col.fg);
++}
++
+ static void draw_status(const ui_position_t *p, int y)
+ {
+ 	char buf[32];
+ 	sbuf_t b;
+ 	const font_t *big = gfx_width() >= 200 ? ui_layout.large : ui_layout.medium;
+-	bool grid = page_count() == PG_GRID && p->fix;	// the Grid page's facts here too
++	bool grid = page_count() == PG_GRID && p->fix;	// tall panels have no separate Grid page
+ 	gfx_text(big, 0, y, fix_word(p), p->fix ? ui_col.rx : ui_col.warn);
+ 	if (grid) {
+ 		char loc[7];
+@@ -182,6 +285,20 @@ static void draw_status(const ui_position_t *p, int y)
+ 		gfx_text(big, gfx_width() - gfx_text_width(big, loc) - 2, y, loc, ui_col.fg);
+ 	}
+ 	y += big->h + 1;
++	// Keep the speed and coordinates above secondary data on displays with few rows.
++	if (p->fix && p->speed_kmh != 0xFFFFu) {
++		sb_init(&b, buf, sizeof buf);
++		sb_u32(&b, p->speed_kmh, 1);
++		sb_str(&b, " km/h");
++		if (p->course != 0xFFFFu) {
++			sb_chr(&b, ' ');
++			sb_compass(&b, p->course);
++		}
++		if (!row(&y, TR(LABEL_SPEED, "Speed"), buf, ui_col.fg))
++			return;
++	}
++	if (p->fix && !draw_coordinates(p, &y, ui_svc_setting_get(UI_SET_POS_FORMAT), grid))
++		return;
+ 	sb_init(&b, buf, sizeof buf);
+ 	sb_u32(&b, p->sats, 1);
+ 	sb_str(&b, TR(GPS_BODY_USED, " used, "));
+@@ -189,45 +306,12 @@ static void draw_status(const ui_position_t *p, int y)
+ 	sb_str(&b, TR(GPS_BODY_SEEN, " seen"));
+ 	if (!row(&y, TR(GPS_LABEL_SATS, "Sats"), buf, ui_col.fg))
+ 		return;
+-	if (p->fix) {
+-		sb_init(&b, buf, sizeof buf);
+-		sb_coord(&b, p->lat_e7, 'N', 'S');
+-		if (!row(&y, TR(GPS_LABEL_LAT, "Lat"), buf, ui_col.fg))
+-			return;
+-		if (grid) {
+-			sb_init(&b, buf, sizeof buf);
+-			sb_dms(&b, p->lat_e7, 'N', 'S');
+-			if (!row(&y, "   ", buf, ui_col.dim))
+-				return;
+-		}
++	if (p->fix && p->alt_ok) {
+ 		sb_init(&b, buf, sizeof buf);
+-		sb_coord(&b, p->lon_e7, 'E', 'W');
+-		if (!row(&y, TR(GPS_LABEL_LON, "Lon"), buf, ui_col.fg))
++		sb_i32(&b, p->alt_m);
++		sb_str(&b, " m");
++		if (!row(&y, TR(GPS_LABEL_ALT, "Alt"), buf, ui_col.fg))
+ 			return;
+-		if (grid) {
+-			sb_init(&b, buf, sizeof buf);
+-			sb_dms(&b, p->lon_e7, 'E', 'W');
+-			if (!row(&y, "   ", buf, ui_col.dim))
+-				return;
+-		}
+-		if (p->alt_ok) {
+-			sb_init(&b, buf, sizeof buf);
+-			sb_i32(&b, p->alt_m);
+-			sb_str(&b, " m");
+-			if (!row(&y, TR(GPS_LABEL_ALT, "Alt"), buf, ui_col.fg))
+-				return;
+-		}
+-		if (p->speed_kmh != 0xFFFFu) {
+-			sb_init(&b, buf, sizeof buf);
+-			sb_u32(&b, p->speed_kmh, 1);
+-			sb_str(&b, " km/h");
+-			if (p->course != 0xFFFFu) {
+-				sb_chr(&b, ' ');
+-				sb_compass(&b, p->course);
+-			}
+-			if (!row(&y, TR(LABEL_SPEED, "Speed"), buf, ui_col.fg))
+-				return;
+-		}
+ 	}
+ 	if (p->hdop10 != 0xFFFFu && p->fix) {
+ 		sb_init(&b, buf, sizeof buf);
+diff --git a/core/ui/ui_menus.c b/core/ui/ui_menus.c
+index 1715418..c0bb978 100644
+--- a/core/ui/ui_menus.c
++++ b/core/ui/ui_menus.c
+@@ -7084,9 +7084,17 @@ static const tr_id_t n_tot[] = { TRN(VALUE_OFF, "Off"), TRX(VALUE_30_S, "30 s"),
+ static const int16_t v_lock[] = { 0, 30, 60, 300 };
+ static const tr_id_t n_lock[] = { TRN(VALUE_OFF, "Off"), TRX(VALUE_30_S, "30 s"), TRN(VALUE_1_MIN, "1 min"),
+ 	TRN(VALUE_5_MIN, "5 min") };
+-static const int16_t v_posfmt[] = { 0, 1, 2 };
++static const int16_t v_posfmt[] = { UI_POS_DEGREES, UI_POS_DMS, UI_POS_GRID,
++#if CONFIG_GPS_UTM
++	UI_POS_UTM,
++#endif
++};
+ static const tr_id_t n_posfmt[] = { TRN(SET_VALUE_POSFMT_DEGREES, "Degrees"),
+-	TRN(SET_VALUE_POSFMT_DEG_MIN_SEC, "Deg min sec"), TRN(WORD_GRID, "Grid") };
++	TRN(SET_VALUE_POSFMT_DEG_MIN_SEC, "Deg min sec"), TRN(WORD_GRID, "Grid"),
++#if CONFIG_GPS_UTM
++	TRX(SET_VALUE_POSFMT_UTM, "UTM"),
++#endif
++};
+ static const int16_t v_possend[] = { 0, 60, 300, 900 };
+ #if CONFIG_POSITION
+ // position_pref_t: where our position comes from. A computer's NMEA only where something takes it in
+diff --git a/core/ui/ui_svc.h b/core/ui/ui_svc.h
+index 52a4b1a..873382a 100644
+--- a/core/ui/ui_svc.h
++++ b/core/ui/ui_svc.h
+@@ -29,6 +29,10 @@
+ #include "m17/m17_codeplug.h"
+ #endif
+ 
++// Position format values stored in settings_t.pos_format.
++enum { UI_POS_DEGREES, UI_POS_DMS, UI_POS_GRID, UI_POS_UTM };
++#define UI_POS_FORMAT_MAX (CONFIG_GPS_UTM ? UI_POS_UTM : UI_POS_GRID)
++
+ // The UI services' one radio view copy (the UI task's only; too big for its stack). A service fetches it with
+ // radio_get_view and reads it before returning: nothing may hold it across a call into another service
+ extern radio_view_t ui_svc_view;
+diff --git a/core/ui/ui_svc_storage.c b/core/ui/ui_svc_storage.c
+index cde94e6..7b2f95b 100644
+--- a/core/ui/ui_svc_storage.c
++++ b/core/ui/ui_svc_storage.c
+@@ -253,7 +253,7 @@ int32_t ui_svc_setting_get(uint8_t id)
+ 		return st.gps != 0;
+ 	case UI_SET_POS_FORMAT:
+ 		settings_read(&st);
+-		return st.pos_format <= 2 ? st.pos_format : 0;
++		return st.pos_format <= UI_POS_FORMAT_MAX ? st.pos_format : UI_POS_DEGREES;
+ 	case UI_SET_POS_SEND_S:
+ 		settings_read(&st);
+ 		return st.pos_send_s;
+@@ -554,7 +554,7 @@ bool ui_svc_setting_set(uint8_t id, int32_t value)
+ 		} else if (id == UI_SET_GPS) {
+ 			st->gps = value != 0;
+ 		} else if (id == UI_SET_POS_FORMAT) {
+-			st->pos_format = (uint8_t)clamp16(value, 0, 2);
++			st->pos_format = (uint8_t)clamp16(value, UI_POS_DEGREES, UI_POS_FORMAT_MAX);
+ 		} else {
+ 			st->pos_send_s = clamp16(value, 0, 0xFFFF);
+ 		}
+diff --git a/docs/build-config.md b/docs/build-config.md
+index 5949812..3a41c7a 100644
+--- a/docs/build-config.md
++++ b/docs/build-config.md
+@@ -102,6 +102,7 @@ below are for an STM32F4 radio.
+ | `CONFIG_APRS_DMR` | = APRS and DMR | APRS over DMR: positions as LRRP or UDT reports to a gateway ID. It builds the DMR data core. Off, APRS is FM only |
+ | `CONFIG_APRS_RX` | = APRS_AFSK (n where no receive audio is written) | APRS receive: the AFSK demodulator on the board's received audio, station list, messages to us with acks, the digipeater. Useful only where the board can sample received audio: its own AFSK receive path, or FM receive audio on the PCM stream (`docs/spec/aprs.md` 5.3). About 6 KB RAM more |
+ | `CONFIG_GPS_SKY` | = GPS | the GPS screen under Tools > Position: satellites on a sky plot and signal bars, fix quality, grid locator (`core/position/nmea_sky.c`, `core/ui/ui_gps.c`; `docs/spec/ui.md` 2.3). Off, that page is text |
++| `CONFIG_GPS_UTM` | = GPS_SKY | WGS 84 UTM projection on the GPS Status page, as a Position format choice |
+ | `CONFIG_MDC1200` | n | MDC-1200 PTT ID on FM channels (`core/mdc`, `docs/spec/radio-features.md` 3.8): a channel sends its ID when a transmission starts, ends or both, and can decode the IDs it receives. Needs APRS_AFSK: the burst goes out through the AFSK sender and borrows its idle transmit buffer, and the decoder borrows the idle APRS demodulator's memory (APRS_RX for decoding). Off unless built with `CONFIG_MDC1200=y` |
+ | `CONFIG_APRS_IGATE` | = APRS_RX and HOSTLINK (n where flash is short) | the iGate rules, RF to APRS-IS and messages back, with the host helper `tools/aprs_gate.py` holding the APRS-IS connection |
+ | `CONFIG_DMR` | y | DMR voice: modem driver, call stack, AMBE FEC, vocoder hosting, PCM audio |
+diff --git a/docs/spec/ui.md b/docs/spec/ui.md
+index fa16026..c69477a 100644
+--- a/docs/spec/ui.md
++++ b/docs/spec/ui.md
+@@ -314,11 +314,11 @@ they show the change within a fraction of a second.
+ 
+ With `CONFIG_GPS_SKY`, Tools > Position (`gps`, `ui_gps.c`) has four pages, three on a panel at least `UI_TALL_PX` tall
+ (Status takes in Grid there). Up and Down (the knob) turn them and wrap; the digits go to one. It opens on Status. Every draw reads `ui_svc_position` and the satellites one at a time
+-(`ui_svc_gps_sat`), so the screen keeps one byte, its page.
++(`ui_svc_gps_sat`), so the screen keeps only its page and the last UTM projection, where built.
+ 
+ | Page | Shows |
+ |---|---|
+-| Status | the fix in large type (3D Fix, 2D Fix, or Fix when no GSA gave the mode, in the RX color; Searching, No signal in the warning color), then as many rows as fit: satellites used and seen, latitude and longitude (6 decimals, `sb_coord`), altitude, speed with a compass point, HDOP with good / fair / poor, UTC (with a fix only: it is the fix's time). On a tall panel, with a fix, also the locator right of the fix and each coordinate in degrees, minutes, seconds under it, dim |
++| Status | fix type, speed in km/h with course when known, and the coordinates in the format selected under Settings > Location > Position format (decimal degrees, DMS, Maidenhead, or WGS 84 UTM). Additional rows show satellites, altitude, HDOP and UTC when they fit. Tall panels also show the locator beside the fix type. UTM shows the zone, hemisphere, easting and northing in meters for 80°S through 84°N |
+ | Sky | a polar plot, north up: the horizon and 45 degree rings, each satellite with a known position as a dot, filled when the fix uses it, hollow when not, gray when it has no signal. Labeled (G12, C23) where the plot is 80 px or wider: right of the dot, else left, and left out where it would touch another dot or label. A legend names each system heard with used / seen: full names where they fit, else GPS, GLO, GAL, BDS, QZS. Beside the plot, or under it in two columns on a tall panel |
+ | Signal | satellites in the fix of those seen, then one bar per satellite with a signal (SNR above 0), its height the SNR (50 dB-Hz full), filled when used. The satellite numbers under the bars: one row where two digits fit a bar, else two rows taking turns |
+ | Grid | the Maidenhead locator (6 characters) large, then the position in degrees, minutes, seconds and in decimal degrees (6 decimals). "No fix yet" without a fix. Not on a tall panel |
+diff --git a/docs/user/17-settings.md b/docs/user/17-settings.md
+index 891c20e..8a4980d 100644
+--- a/docs/user/17-settings.md
++++ b/docs/user/17-settings.md
+@@ -94,7 +94,7 @@ Some settings are on the menu before the feature behind them exists, or don't ap
+ | Setting | Values | Default | What it does | Status |
+ |---|---|---|---|---|
+ | GPS | On, Off | On | The GPS receiver, on radios that have one ([Radio reference](23-radios.md)). Off powers the module down and the radio has no fix (APRS and DMR use the computer's or the fixed position); the change takes effect at once. Without GPS the row is dimmed and says "No GPS on this radio" | Dimmed without GPS |
+-| Position format | Degrees, Deg min sec, Grid | Degrees | How positions are shown | Dimmed without GPS |
++| Position format | Degrees, Deg min sec, Grid, UTM | Degrees | Coordinate format on Tools > Position > Status. UTM shows WGS 84 zone, hemisphere, easting and northing in meters when included in the build | Dimmed without GPS |
+ | Send position | Off, 1 min, 5 min, 15 min | Off | Send your position at this interval | Dimmed without GPS |
+ | Answer GPS requests | On, Off | On | Answer LRRP location requests (Find also finds it as "position"). With no position the answer is "no fix" | Works |
+ | Position source | Auto, GPS, Computer, Fixed | Auto | Where your position comes from, for DMR calls, location requests and APRS. See Position below | Works |
+diff --git a/tests/host/Makefile b/tests/host/Makefile
+index e872c14..452ac1c 100644
+--- a/tests/host/Makefile
++++ b/tests/host/Makefile
+@@ -762,25 +762,25 @@ UIDEPS  := $(UIAPP) $(ABOUT_H) $(LANG_H) $(wildcard $(CORE)/ui/*.h $(CORE)/ui/fo
+ TESTS   += uiFlowTest uiFlowTestNoColor uiSim
+ 
+ uiFlowTest: uiFlowTest.c $(UIDEPS)
+-	$(CC) $(UIFLAGS) -DCONFIG_P25=1 -DCONFIG_P25_TRUNK=1 -DCONFIG_NXDN=1 -DCONFIG_YSF=1 -o $@ uiFlowTest.c $(UIAPP) -lz
++	$(CC) $(UIFLAGS) -DCONFIG_P25=1 -DCONFIG_P25_TRUNK=1 -DCONFIG_NXDN=1 -DCONFIG_YSF=1 -o $@ uiFlowTest.c $(UIAPP) -lz -lm
+ 
+ # ... and with the FM signaling ID rows (MDC-1200 PTT ID) in the channel editor
+ TESTS   += uiFlowTestMdc
+ uiFlowTestMdc: uiFlowTest.c $(UIDEPS)
+-	$(CC) $(UIFLAGS) -DCONFIG_P25=1 -DCONFIG_P25_TRUNK=1 -DCONFIG_NXDN=1 -DCONFIG_YSF=1 -DCONFIG_MDC1200=1 -o $@ uiFlowTest.c $(UIAPP) -lz
++	$(CC) $(UIFLAGS) -DCONFIG_P25=1 -DCONFIG_P25_TRUNK=1 -DCONFIG_NXDN=1 -DCONFIG_YSF=1 -DCONFIG_MDC1200=1 -o $@ uiFlowTest.c $(UIAPP) -lz -lm
+ 
+ # The same flows built as a radio with only a monochrome screen builds them (CONFIG_UI_COLOR=n): no color rows;
+ # without a translation (CONFIG_LANG_ES=n): the Language screen dims Spanish; and with the backlight tests
+ # (CONFIG_BACKLIGHT_TEST=y, off in uiFlowTest): their screen, and the Advanced rows below it one further down.
+ # uiFlowTest has P25 and NXDN (CONFIG_P25, CONFIG_NXDN) and this one not: their home screen flows run in the first
+ uiFlowTestNoColor: uiFlowTest.c $(UIDEPS)
+-	$(CC) $(UIFLAGS) -DCONFIG_UI_COLOR=0 -DCONFIG_LANG_ES=0 -DCONFIG_BACKLIGHT_TEST=1 -o $@ uiFlowTest.c $(UIAPP) -lz
++	$(CC) $(UIFLAGS) -DCONFIG_UI_COLOR=0 -DCONFIG_LANG_ES=0 -DCONFIG_BACKLIGHT_TEST=1 -o $@ uiFlowTest.c $(UIAPP) -lz -lm
+ 
+ # UI_LANG=<code> also builds that language in (CONFIG_LANG_<CODE>=1), so a gallery can render in a language that is
+ # off by default: make -B uiSim UI_LANG=fr (docs/dev/translating.md). The CJK face compiles to nothing without Chinese
+ UI_LANG_FLAG := $(if $(UI_LANG),-DCONFIG_LANG_$(shell echo '$(UI_LANG)' | tr a-z A-Z)=1)
+ uiSim: uiSim.c $(UIDEPS) $(CJK)
+-	$(CC) $(UIFLAGS) $(UI_LANG_FLAG) -o $@ uiSim.c $(UIAPP) $(CJK) -lz
++	$(CC) $(UIFLAGS) $(UI_LANG_FLAG) -o $@ uiSim.c $(UIAPP) $(CJK) -lz -lm
+ 
+ # The beep reel (tools/beep_reel.py). BEEP_DIR picks the beep.c and beep.h to build with, so CI can build the base
+ # commit's beeps for a before and after comparison. We copy that beep.h into out/beep/radio/ and put out/beep first on
+@@ -801,7 +801,7 @@ beepReel: beepReel.c beep_names.awk $(UIDEPS) $(BEEP_DIR)/beep.c $(BEEP_DIR)/bee
+ 	mkdir -p $(BEEPINC)/radio
+ 	cp $(BEEP_DIR)/beep.h $(BEEPINC)/radio/beep.h
+ 	awk -f beep_names.awk $(BEEP_DIR)/beep.h > $(BEEPINC)/beep_names.h
+-	$(CC) -I$(BEEPINC) $(UIFLAGS) -o $@ beepReel.c $(UIAPP) $(BEEP_DIR)/beep.c -lz
++	$(CC) -I$(BEEPINC) $(UIFLAGS) -o $@ beepReel.c $(UIAPP) $(BEEP_DIR)/beep.c -lz -lm
+ 
+ # The highlight colors the gallery shows its color pages in: the list in .github/workflows/ui-gallery.yml, so the
+ # committed gallery and a pull request's before / after pictures show the same colors
+diff --git a/tests/host/radioCoreTest.c b/tests/host/radioCoreTest.c
+index eb89c06..8561de9 100644
+--- a/tests/host/radioCoreTest.c
++++ b/tests/host/radioCoreTest.c
+@@ -4996,7 +4996,7 @@ static void test_ui_settings(void)
+ 	CHECK(ui_svc_setting_set(UI_SET_AUTO_LOCK_S, 99999) && ui_svc_setting_get(UI_SET_AUTO_LOCK_S) == 3600);
+ 	CHECK(ui_svc_setting_set(UI_SET_LONG_PRESS_MS, 10) && ui_svc_setting_get(UI_SET_LONG_PRESS_MS) == 200);
+ 	CHECK(ui_svc_setting_set(UI_SET_REPEAT_MS, 5000) && ui_svc_setting_get(UI_SET_REPEAT_MS) == 1000);
+-	CHECK(ui_svc_setting_set(UI_SET_POS_FORMAT, 9) && ui_svc_setting_get(UI_SET_POS_FORMAT) == 2);
++	CHECK(ui_svc_setting_set(UI_SET_POS_FORMAT, 9) && ui_svc_setting_get(UI_SET_POS_FORMAT) == UI_POS_FORMAT_MAX);
+ 	CHECK(ui_svc_setting_set(UI_SET_POS_SEND_S, -1) && ui_svc_setting_get(UI_SET_POS_SEND_S) == 0);
+ 	CHECK(ui_svc_setting_set(UI_SET_GPS, 0) && ui_svc_setting_get(UI_SET_GPS) == 0);
+ 	CHECK(ui_svc_setting_set(UI_SET_THEME, -3) && ui_svc_setting_get(UI_SET_THEME) == 0);
+diff --git a/tests/host/uiFlowTest.c b/tests/host/uiFlowTest.c
+index 25bb8c6..3029a9e 100644
+--- a/tests/host/uiFlowTest.c
++++ b/tests/host/uiFlowTest.c
+@@ -13,6 +13,7 @@
+ #include <string.h>
+ #include "sim/ui_sim.h"
+ #include "ui/ui_app.h"
++#include "ui/ui_svc.h"
+ #include "ui/ui_screens.h"
+ #include "ui/i18n.h"
+ #include "config.h"
+@@ -1816,6 +1817,33 @@ static void vfo_split_dmr_checks(void)
+ 	}
+ }
+ 
++#if CONFIG_GPS_SKY
++static void gps_format_checks(void)
++{
++	static const struct { uint8_t format; const char *expect; } cases[] = {
++		{ UI_POS_DEGREES, "expect:shows=42.360100_N" },
++		{ UI_POS_DMS, "expect:shows=42_21'36.3\"N expect:hides=42.360100_N" },
++		{ UI_POS_GRID, "expect:shows=FN42li expect:hides=42.360100_N" },
++#if CONFIG_GPS_UTM
++		// Boston (42.3601 N, 71.0589 W), independently projected with PROJ EPSG:32619.
++		{ UI_POS_UTM, "expect:shows=19N_330448E expect:shows=4691812N expect:hides=42.360100_N" },
++#endif
++	};
++	char err[300];
++	for (int g = 0; g < sim_geom_count; g++) {
++		for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
++			sim_reset(&sim_geoms[g], SIM_MAP_K);
++			ui_svc_setting_set(UI_SET_POS_FORMAT, cases[i].format);
++			if (!sim_run("ok 6 2 expect:screen=gps expect:shows=4_km/h", err, sizeof err) ||
++			    !sim_run(cases[i].expect, err, sizeof err)) {
++				printf("FAIL GPS format %u [%s]: %s\n", cases[i].format, sim_geoms[g].name, err);
++				fails++;
++			}
++		}
++	}
++}
++#endif
++
+ static void no_battery_checks(void)
+ {
+ 	static const struct { const char *name, *script, *expect; } cases[] = {
+@@ -2048,6 +2076,9 @@ int main(void)
+ 	station_checks();
+ 	vfo_split_dmr_checks();
+ 	no_battery_checks();
++#if CONFIG_GPS_SKY
++	gps_format_checks();
++#endif
+ #if CONFIG_VOLUME_BAR
+ 	volume_bar_checks();
+ #endif
+diff --git a/docs/ux/screens/240x320/gps_grid.png b/docs/ux/screens/240x320/gps_grid.png
+index 7288c59167f9d3fa2d3c902b825dc44a4a8e76d4..c581e8d8ae16608c5c83c32e3b9f66bd7f771062 100644
+GIT binary patch
+delta 3945
+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
+
+literal 4677
+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
+aGvLb;?KwXJvfTcTmgy~X!wSfwsQ&=dLISt|
+
+diff --git a/docs/ux/screens/240x320i10x5/gps_grid.png b/docs/ux/screens/240x320i10x5/gps_grid.png
+index 9ac0e1ac2a5c937f2889da84d65f34d9568fb417..a07219e3b9265b65e3b3e7409f68b5f0333c4b1d 100644
+GIT binary patch
+literal 4662
+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
+Wyn5_N%iVwTY<0=jtn8vk+<yTwj{qP5
+
+literal 5334
+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
+

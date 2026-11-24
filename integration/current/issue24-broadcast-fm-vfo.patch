@@ -1,0 +1,203 @@
+diff --git a/docs/user/07-channels-zones-vfo.md b/docs/user/07-channels-zones-vfo.md
+index 49b9f61..af40329 100644
+--- a/docs/user/07-channels-zones-vfo.md
++++ b/docs/user/07-channels-zones-vfo.md
+@@ -202,8 +202,9 @@ The VFO is an FM VFO or, on a radio with DMR, a DMR VFO. It keeps its mode like
+ the VFO (mode, color code, timeslot, talk target) is kept, also when you go to a channel and come back, and after a
+ restart.
+ 
+-1. **OK**, **4** (Zones). The VFO is the first row.
+-2. Press **OK**. Home shows the frequency large, and the radio says "VFO: type a frequency".
++1. **OK**, **4** (Zones). The list opens on the current zone.
++2. Move **Up** to the first row, **VFO**, and press **OK**. Home shows the frequency large, and the radio says
++   "VFO: type a frequency".
+ 
+ On a radio with a **VFO/MR** key, press it instead: it goes between the channel and the VFO. **Settings > Keys** can
+ give any side key the same job, "VFO/Channel", on a press or a hold.
+diff --git a/tests/host/sim/ui_sim.c b/tests/host/sim/ui_sim.c
+index 49a3f84..bcee7a8 100644
+--- a/tests/host/sim/ui_sim.c
++++ b/tests/host/sim/ui_sim.c
+@@ -81,6 +81,7 @@
+ #include "stubentry/stub_entry.h"
+ #include "ui/ui_svc_aprs.h"
+ #include "codeplug/codeplug_tag.h"
++#include "radio/radio_bcast.h"
+ #if CONFIG_P25
+ #include "p25/p25_codeplug.h"
+ #include "radio/radio_p25.h"
+@@ -444,6 +445,8 @@ static const hal_vocoder_t vocoder = { .options = v_options };
+ // A receiver that does AM (the "am" token): radio_am_channel() reads only that rx_am is there
+ static bool r_rx_am(uint32_t hz, radio_bw_t bw) { (void)hz; (void)bw; return true; }
+ static const hal_radio_t am_radio = { .rx_am = r_rx_am };
++// The broadcast receiver (the "bcast" token): the UI needs its frequency range and tuning grid
++static const hal_bcast_t fm_broadcast = { .lo_khz = 65000, .hi_khz = 108000, .grid_khz = 50 };
+ 
+ board_t board = {
+ 	.name = "Simulator", .bands = bands, .band_count = 3, .rx_ext_on = &rx_ext_on,
+@@ -1284,10 +1287,22 @@ const radio_view_t *sim_view(void) { return &view; }
+ void radio_get_view(radio_view_t *v) { *v = view; }
+ uint32_t radio_view_serial(void) { return serial; }
+ static int32_t sim_step;	// UI_SET_VFO_STEP: 0 auto (the width's), else 10 Hz units
++static uint8_t sim_bcast_step(void)
++{
++	return ui_svc_setting_get(UI_SET_BCAST_STEP) == 100 ? RADIO_BCAST_STEP_100 : RADIO_BCAST_STEP_200_ODD;
++}
+ static void changed(void)
+ {
++	view.bcast = radio_bcast_band(view.ch.rx_hz);
+ 	view.vfo_step_hz = sim_step == 833 ? 8333u : sim_step > 0 ? (uint32_t)sim_step * 10u :
+ 			   view.ch.bw == RADIO_BW_25K ? 25000u : 12500u;
++	if (view.bcast) {
++		view.ch.mode = RADIO_MODE_FM;
++		if (view.vfo)
++			vfo_mode = RADIO_MODE_FM;
++		view.dmr.active = false;
++		view.vfo_step_hz = radio_bcast_step_hz(sim_bcast_step());
++	}
+ 	view.vfo_step_auto = sim_step == 0;
+ 	serial++;
+ }
+@@ -1484,7 +1499,9 @@ static void sim_vfo_rx(uint32_t hz)
+ void radio_req_vfo_step(int8_t dir)
+ {
+ 	retune();
+-	sim_vfo_rx(view.ch.rx_hz + dir * view.vfo_step_hz);
++	uint32_t hz = view.bcast ? radio_bcast_step(view.ch.rx_hz, dir, sim_bcast_step()) :
++				   view.ch.rx_hz + dir * view.vfo_step_hz;
++	sim_vfo_rx(hz);
+ 	view.ch.rx_hz = vfo_rx_hz;
+ 	view.ch.tx_hz = vfo_tx_hz;
+ 	changed();
+@@ -1618,9 +1635,9 @@ static void ptt(bool down)
+ {
+ 	if (down) {
+ 		to_selected();	// the radio core transmits on the selected channel
+-		if (view.ch.rx_only) {
++		if (view.bcast || view.ch.rx_only) {
+ 			view.state = RS_TX_DENIED;
+-			view.tx_deny = TXDENY_RX_ONLY;
++			view.tx_deny = view.bcast ? TXDENY_BCAST : TXDENY_RX_ONLY;
+ 			changed();
+ 			return;
+ 		}
+@@ -1711,8 +1728,6 @@ static uint16_t n_inbox;
+ // The volume feature (a radio without a knob: the VOL key, Settings > Sound > Volume) only with the "softvol" token, so
+ // the other screens look as on the radios with a knob
+ static bool soft_volume;
+-// The broadcast receiver (Settings > Talk & listen > FM broadcast step) only with the "bcast" token, the same way
+-static bool bcast_rx;
+ // P25 on this radio (UI_FEAT_P25: the VFO's mode tile offers it) only with the "p25" token; NXDN with "nxdn"
+ static bool p25_radio;
+ static bool nxdn_radio;
+@@ -1737,7 +1752,7 @@ static bool knob_radio;
+ static bool vol_held;		// ui_svc_volume_hold: the radio ignores the volume knob
+ uint32_t ui_svc_features(void)
+ {
+-	return 0xFFFFFFFFu & ~(soft_volume ? 0 : UI_FEAT_VOLUME) & ~(bcast_rx ? 0 : UI_FEAT_BCAST) &
++	return 0xFFFFFFFFu & ~(soft_volume ? 0 : UI_FEAT_VOLUME) & ~(radio_bcast_capable() ? 0 : UI_FEAT_BCAST) &
+ 	       ~(ref_trim ? 0 : UI_FEAT_REF_TRIM) &
+ 	       ~(knob_radio ? 0 : UI_FEAT_VOLUME_KNOB) & ~(p25_radio ? 0 : UI_FEAT_P25) &
+ 	       ~(nxdn_radio ? 0 : UI_FEAT_NXDN);
+@@ -2174,7 +2189,10 @@ void ui_svc_apply(uint8_t id, int32_t value)
+ 	else if (id == UI_SET_VFO_STEP) {
+ 		sim_step = value;
+ 		changed();
+-	}
++	} else if (id == UI_SET_BCAST_STEP)
++		changed();
++	else if (id == UI_SET_RX_EXT)
++		rx_ext_on = value != 0;
+ }
+ bool ui_svc_scan_skip(void) { radio_req_channel_step(1); return true; }
+ // Dual watch as the radio core does it with a receiver per channel: the view stays on the selected channel (the
+@@ -2533,6 +2551,7 @@ void sim_reset(const sim_geom_t *g, sim_map_t map)
+ 	board.side_key_names = maps[map].names;
+ 	board.side_key_count = maps[map].side_n;
+ 	board.caps = maps[map].caps;
++	board.bcast = NULL;
+ 	board.bands = bands;
+ 	board.band_count = sizeof bands / sizeof bands[0];
+ 	board.rx_ext_count = 0;
+@@ -2592,7 +2611,6 @@ void sim_reset(const sim_geom_t *g, sim_map_t map)
+ 	soft_volume = false;
+ 	view.volume = -1;	// no level passed on yet (power-up)
+ 	view.volume_src = RVOL_KNOB;
+-	bcast_rx = false;
+ 	p25_radio = false;
+ 	nxdn_radio = false;
+ #if CONFIG_NXDN
+@@ -2647,6 +2665,7 @@ void sim_reset(const sim_geom_t *g, sim_map_t map)
+ 	ui_svc_setting_set(UI_SET_MIC_AGC, 0);
+ 	ui_svc_setting_set(UI_SET_UPDOWN_HOME, 0);
+ 	ui_svc_setting_set(UI_SET_VFO_STEP, 0);
++	ui_svc_setting_set(UI_SET_BCAST_STEP, 200);
+ 	sim_step = 0;
+ 	for (uint8_t k = UI_SET_KEY_FIRST; k <= UI_SET_KEY_LAST; k++)
+ 		ui_svc_setting_set(k, 0);	// the side keys as the board has them
+@@ -2861,7 +2880,10 @@ static bool check(const char *kv, char *err, size_t len)
+ 	}
+ 	else if (strcmp(key, "temporary") == 0) snprintf(got, sizeof got, "%u", view.temporary);
+ 	else if (strcmp(key, "writes") == 0) snprintf(got, sizeof got, "%u", (unsigned)sim_rec.codeplug_writes);
+-	else if (strcmp(key, "checks") == 0) snprintf(got, sizeof got, "%u", (unsigned)sim_rec.radio_checks);
++	else if (strcmp(key, "saved_rxonly_hz") == 0) {
++		const channel_t *saved = n_edits ? &sim_edits[n_edits - 1].ch : NULL;
++		snprintf(got, sizeof got, "%u", saved != NULL && saved->rx_only ? (unsigned)saved->rx_hz : 0);
++	} else if (strcmp(key, "checks") == 0) snprintf(got, sizeof got, "%u", (unsigned)sim_rec.radio_checks);
+ 	else if (strcmp(key, "sent") == 0) snprintf(got, sizeof got, "%u", (unsigned)sim_rec.messages_sent);
+ 	else if (strcmp(key, "text") == 0) snprintf(got, sizeof got, "%s", sim_rec.last_text);
+ 	else if (strcmp(key, "aprs_to") == 0) snprintf(got, sizeof got, "%s", sim_rec.last_aprs_to);
+@@ -3644,7 +3666,13 @@ static bool run_token(char *t, char *err, size_t len)
+ 		return true;
+ 	}
+ 	if (strcmp(t, "bcast") == 0) {		// this radio has a broadcast FM receiver
+-		bcast_rx = true;
++		board.caps |= CAP_BCAST_FM;
++		board.bcast = &fm_broadcast;
++		board.bands = extended_bands;
++		board.band_count = sizeof extended_bands / sizeof extended_bands[0];
++		board.rx_ext_count = 3;
++		ui_svc_setting_set(UI_SET_RX_EXT, 0);
++		rx_ext_on = false;
+ 		return true;
+ 	}
+ 	if (strcmp(t, "p25") == 0) {		// this radio runs P25
+diff --git a/tests/host/uiFlowTest.c b/tests/host/uiFlowTest.c
+index 11cf97d..eb85f79 100644
+--- a/tests/host/uiFlowTest.c
++++ b/tests/host/uiFlowTest.c
+@@ -56,6 +56,7 @@ typedef struct {
+ 	{ "7 PTT in Full message calls the sender", "msg:9991234," LONG_TEXT " wait:9000 ok 2 ok ok", "ptt", \
+ 	  "txid=9991234 txpriv=1", 1, false },
+ #define TALK_BACK	"ok 7 3 down down down down down down down down down ok long:back quick 7 ctx 3 5 ok "	// on, and A 3 / B 5
++#define BCAST_881	"bcast ok 4 up ok 0 8 8 1 ok"
+ 
+ static const flow_t flows[] = {
+ 	{ "menu entry keeps an available first row", "", "ok", "screen=hub focus=Contacts", 1, false },
+@@ -328,8 +329,26 @@ static const flow_t flows[] = {
+ 	{ "S language not in this build: dimmed", "", "ok 7 2 up ok down ok",
+ 	  "set78=0 toast=Not_in_this_build screen=language", 7, false },
+ #endif
++#if CONFIG_BCAST_FM
+ 	{ "S FM broadcast step on a radio with the receiver", "bcast", "ok 7 3 down down down down", "shows=FM_broadcast_step",
+ 	  7, false },
++	{ "Broadcast FM with RX past bands off", "bcast ok 6 up", "", "shows=RX_past_bands shows=Off", 0, false },
++	{ "Broadcast FM tunes with RX past bands off", "bcast ok 4 up ok", "0 8 8 1 ok",
++	  "screen=home freq=88100000 mode=fm shows=Broadcast_FM", 5, false },
++	{ "Broadcast FM needs a receiver", "ok 4 up ok", "0 8 8 1 ok", "freq=146520000 hides=Broadcast_FM", 5, false },
++	{ "Broadcast FM does not enable unrelated bands", "bcast ok 4 up ok", "2 2 2 ok", "freq=146520000", 4, false },
++	{ "Broadcast FM tunes with RX past bands on", "bcast ok 6 up ok long:back ok 4 up ok", "0 8 8 1 ok",
++	  "screen=home freq=88100000 mode=fm shows=Broadcast_FM", 5, false },
++	{ "Broadcast FM steps to the next station", BCAST_881, "up", "freq=88300000", 1, false },
++	{ "Broadcast FM can use a 100 kHz step", BCAST_881 " ok 7 3 down down down down ok long:back", "up",
++	  "freq=88200000", 1, false },
++	{ "Broadcast FM denies PTT", BCAST_881, "pttdown", "shows=Broadcast:_receive_only tx=0", 1, false },
++	{ "Broadcast FM scan uses the VFO", BCAST_881, "ok 6 1", "scanning=1", 3, false },
++#if CONFIG_CHANNEL_EDIT
++	{ "Broadcast FM saves a receive-only station", BCAST_881, "ok 5 ok long:ok",
++	  "writes=1 saved_rxonly_hz=88100000 toast=Saved_as_channel_41", 4, true },
++#endif
++#endif
+ 	{ "11 dual watch talk back on", "", "ok 7 3 down down down down down down down down down ok", "shows=Dual_watch_talk_back", 13,
+ 	  false },
+ 	{ "11 dual watch: anonymous DMR sync does not become a call", TALK_BACK, "tune:b rx:0,0,g rxend wait:300",

@@ -1,0 +1,13 @@
+diff --git a/core/ui/lang/es.po b/core/ui/lang/es.po
+index 8018466..892318d 100644
+--- a/core/ui/lang/es.po
++++ b/core/ui/lang/es.po
+@@ -3885,7 +3885,7 @@ msgstr "Estilo visual"
+ #: core/ui/ui_menus.c
+ msgctxt "SET_LABEL_LARGE_CHANNEL_NAME"
+ msgid "Large channel name"
+-msgstr "Nombre de canal grande"
++msgstr "Nombre de canal XL"
+ 
+ #: core/ui/ui_menus.c
+ msgctxt "SET_LABEL_STATUS_LEDS"

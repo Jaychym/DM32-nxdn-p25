@@ -1,0 +1,503 @@
+diff --git a/core/debuglink/debuglink.h b/core/debuglink/debuglink.h
+index b6cb504..9a594bc 100644
+--- a/core/debuglink/debuglink.h
++++ b/core/debuglink/debuglink.h
+@@ -59,6 +59,7 @@ enum {
+ 	DL_VIEW_P25_TRUNK,	// a trunked P25 channel's follower: system, channels, call followed, counters (the same file)
+ 	DL_VIEW_NXDN,		// NXDN on the channel: the call, settings, the provider's fit, engine counters (debuglink_view_nxdn.c)
+ 	DL_VIEW_YSF,		// YSF on the channel: the call, settings, the provider's fit, engine counters (debuglink_view_ysf.c)
++	DL_VIEW_NXDN_TRUNK,	// NXDN Type-C CAC and grant follower
+ 	DL_VIEW_COUNT
+ };
+ #define DL_VIEW_VERSION		5	// bumped when a key changes meaning or goes away (new keys don't bump it)
+@@ -90,6 +91,7 @@ void debuglink_view_p25_trunk(dl_text_t *t);
+ void debuglink_p25_reset(void);
+ // The nxdn section (debuglink_view_nxdn.c; "nxdn.built=0" without CONFIG_NXDN) and its counter reset
+ void debuglink_view_nxdn(const radio_view_t *v, dl_text_t *t);
++void debuglink_view_nxdn_trunk(const radio_view_t *v, dl_text_t *t);
+ void debuglink_nxdn_reset(void);
+ // The ysf section (debuglink_view_ysf.c; "ysf.built=0" without CONFIG_YSF) and its counter reset
+ void debuglink_view_ysf(const radio_view_t *v, dl_text_t *t);
+diff --git a/core/debuglink/debuglink_view.c b/core/debuglink/debuglink_view.c
+index 56253ab..b6649d8 100644
+--- a/core/debuglink/debuglink_view.c
++++ b/core/debuglink/debuglink_view.c
+@@ -587,7 +587,7 @@ static const char *const section_names[DL_VIEW_COUNT] = { "core", "channel", "dm
+ 						  "dmr_data_stats", "roam", "aprs", "aprs_set", "dmr_ip", "net", "snmp", "usrp",
+ 						  "sfr", "tasks", "crash", "watchdog", "reset", "air", "net_svc",
+ 						  "net_link", "cps", "board", "audio", "t3", "t3_svc", "t3_roam", "voice_cap", "t3_msg",
+-						  "t3_ra", "p25", "p25_trunk", "nxdn", "ysf" };
++						  "t3_ra", "p25", "p25_trunk", "nxdn", "ysf", "nxdn_trunk" };
+ 
+ const char *debuglink_view_name(uint8_t section)
+ {
+@@ -725,6 +725,9 @@ void debuglink_view_section(uint8_t section, const radio_view_t *v, dl_text_t *t
+ 	case DL_VIEW_NXDN:
+ 		debuglink_view_nxdn(v, t);
+ 		break;
++	case DL_VIEW_NXDN_TRUNK:
++		debuglink_view_nxdn_trunk(v, t);
++		break;
+ 	case DL_VIEW_YSF:
+ 		debuglink_view_ysf(v, t);
+ 		break;
+diff --git a/core/debuglink/debuglink_view_nxdn.c b/core/debuglink/debuglink_view_nxdn.c
+index d446ee9..f438c97 100644
+--- a/core/debuglink/debuglink_view_nxdn.c
++++ b/core/debuglink/debuglink_view_nxdn.c
+@@ -59,3 +59,30 @@ void debuglink_nxdn_reset(void)
+ 	radio_nxdn_reset_stats();
+ #endif
+ }
++
++void debuglink_view_nxdn_trunk(const radio_view_t *v, dl_text_t *t)
++{
++#if CONFIG_NXDN
++	radio_nxdn_trunk_diag_t trunk;
++	if (radio_nxdn_trunk_diag(&trunk)) {
++		const radio_nxdn_view_t *n = &v->nxdn;
++		dl_text(t, "nxdn.trunk.mode=%u\nnxdn.trunk.state=%u\nnxdn.trunk.tx_enabled=%u\n", n->trunk,
++			n->tstate, trunk.tx_enabled);
++		dl_text(t, "nxdn.trunk.cac_ok=%u\nnxdn.trunk.cac_fail=%u\nnxdn.trunk.cac_dropped=%u\n",
++			(unsigned)trunk.cac_ok, (unsigned)trunk.cac_fail, (unsigned)trunk.cac_dropped);
++		dl_text(t, "nxdn.trunk.control_hz=%u\nnxdn.trunk.listen_hz=%u\nnxdn.trunk.site_known=%u\n"
++			"nxdn.trunk.location=%06x\nnxdn.trunk.dfa=%u\nnxdn.trunk.base=%u\nnxdn.trunk.step=%u\n",
++			(unsigned)trunk.control_hz, (unsigned)trunk.listen_hz, trunk.site_known,
++			(unsigned)trunk.location, trunk.dfa, trunk.base, trunk.step);
++		dl_text(t, "nxdn.trunk.assigns=%u\nnxdn.trunk.follows=%u\nnxdn.trunk.refusals=%u\n"
++			"nxdn.trunk.reason=%u\nnxdn.trunk.assigned_chan=%u\nnxdn.trunk.assigned_hz=%u\n",
++			(unsigned)trunk.assigns, (unsigned)trunk.follows, (unsigned)trunk.refusals, trunk.reason,
++			trunk.assigned_chan, (unsigned)trunk.assigned_hz);
++	} else {
++		dl_text(t, "nxdn.trunk.mode=0\n");
++	}
++#else
++	(void)v;
++	dl_text(t, "nxdn.built=0\n");
++#endif
++}
+diff --git a/core/nxdn/nxdn_rx.c b/core/nxdn/nxdn_rx.c
+index ea0976d..3db3614 100644
+--- a/core/nxdn/nxdn_rx.c
++++ b/core/nxdn/nxdn_rx.c
+@@ -88,11 +88,12 @@ static void rx_frame(const air_frame_t *f, void *ctx)
+ 		rx->last_lich = -1;		// no superframe to coast through
+ 		if (nxdn_cac_get(f->hard, f->soft, &rx->work, cac) < 0) {
+ 			rx->cac_fail++;
+-		} else if (rx->ran != NXDN_RAN_ANY && NXDN_SR_RAN(cac[0]) != rx->ran) {
+-			rx->ran_rejects++;
+ 		} else {
+ 			rx->cac_ok++;
+-			rx->cac(&cac[1], rx->cac_ctx);
++			if (rx->ran != NXDN_RAN_ANY && NXDN_SR_RAN(cac[0]) != rx->ran)
++				rx->ran_rejects++;
++			else
++				rx->cac(&cac[1], rx->cac_ctx);
+ 		}
+ 		return;
+ 	}
+diff --git a/core/nxdn/nxdn_trunk.c b/core/nxdn/nxdn_trunk.c
+index 9f1ed51..61b4048 100644
+--- a/core/nxdn/nxdn_trunk.c
++++ b/core/nxdn/nxdn_trunk.c
+@@ -34,7 +34,10 @@ uint32_t nxdn_trunk_chan_hz(const nxdn_trunk_t *t, const uint8_t *msg)
+ 	if (dfa_on(t))
+ 		return dfa_hz(t, u16(msg, 8));
+ 	uint16_t ch = (uint16_t)((msg[7] & 3) << 8 | msg[8]);
+-	return t->cfg.base_hz != 0 ? t->cfg.base_hz + (uint32_t)ch * t->cfg.spacing_hz : 0;
++	if (t->cfg.base_hz == 0 || t->cfg.spacing_hz == 0)
++		return 0;
++	uint64_t hz = t->cfg.base_hz + (uint64_t)ch * t->cfg.spacing_hz;
++	return hz <= UINT32_MAX ? (uint32_t)hz : 0;
+ }
+ 
+ // Where we transmit on an assigned channel: DFA's inbound number, else the control channel's duplex offset
+@@ -43,21 +46,24 @@ static uint32_t talk_hz(const nxdn_trunk_t *t, const uint8_t *msg, uint32_t rx_h
+ 	if (dfa_on(t))
+ 		return dfa_hz(t, u16(msg, 10));
+ 	uint32_t cc_tx = t->cfg.cc_tx_hz ? t->cfg.cc_tx_hz : t->cfg.cc_hz;
+-	return rx_hz + (cc_tx - t->cfg.cc_hz);
++	int64_t hz = (int64_t)rx_hz + cc_tx - t->cfg.cc_hz;
++	return hz > 0 && hz <= UINT32_MAX ? (uint32_t)hz : 0;
+ }
+ 
+-static void enter(nxdn_trunk_t *t, uint8_t state, uint32_t hz, uint32_t now)
++static bool enter(nxdn_trunk_t *t, uint8_t state, uint32_t hz, uint32_t now)
+ {
++	bool tuned = !t->tune || t->tune(hz, t->ctx);
++	if (!tuned && state == NXDN_TRUNK_VOICE)
++		return false;
+ 	t->state = state;
+ 	t->t_state = now;
+ 	t->t_heard = now;	// the voice channel's grace for its first frame
+ 	if (state == NXDN_TRUNK_CONTROL)
+ 		t->t_cc = now;
+-	if (t->tune)
+-		t->tune(hz, t->ctx);
++	return tuned;
+ }
+ 
+-void nxdn_trunk_begin(nxdn_trunk_t *t, const nxdn_trunk_cfg_t *cfg, void (*tune)(uint32_t hz, void *ctx),
++void nxdn_trunk_begin(nxdn_trunk_t *t, const nxdn_trunk_cfg_t *cfg, bool (*tune)(uint32_t hz, void *ctx),
+ 		      bool (*send)(uint32_t hz, const uint8_t *msg, void *ctx), void *ctx, uint32_t now)
+ {
+ 	memset(t, 0, sizeof *t);
+@@ -196,15 +202,20 @@ static void assign(nxdn_trunk_t *t, const uint8_t *msg, uint32_t now)
+ 	uint32_t hz = nxdn_trunk_chan_hz(t, msg);
+ 
+ 	t->assigns++;
++	t->assigned_chan = chan;
++	t->assigned_hz = hz;
+ 	// Ours: the voice request granted
+ 	if ((t->req == NXDN_REQ_WAIT || t->req == NXDN_REQ_QUEUED) && src == t->cfg.unit_id && dst == t->cfg.talk_dst) {
+ 		uint32_t thz = hz != 0 ? talk_hz(t, msg, hz) : 0;
+ 
+ 		t->sent = false;
+-		if (hz == 0 || thz == 0) {
++		if (hz == 0 || thz == 0 || !enter(t, NXDN_TRUNK_VOICE, hz, now)) {
++			t->refused = hz == 0 || thz == 0 ? NXDN_TRUNK_REFUSE_NO_PLAN : NXDN_TRUNK_REFUSE_NO_RX;
++			t->refusals++;
+ 			t->req = NXDN_REQ_NO_CHAN;
+ 			return;
+ 		}
++		t->refused = NXDN_TRUNK_REFUSE_NONE;
+ 		t->req = NXDN_REQ_TALK;
+ 		t->req_ok++;
+ 		t->talk_hz = thz;
+@@ -213,7 +224,6 @@ static void assign(nxdn_trunk_t *t, const uint8_t *msg, uint32_t now)
+ 		t->src = src;
+ 		t->unit_call = call_type == NXDN_CALL_INDIVIDUAL;
+ 		t->voice_hz = hz;
+-		enter(t, NXDN_TRUNK_VOICE, hz, now);
+ 		return;
+ 	}
+ 	if (t->req != NXDN_REQ_IDLE || !wanted(t, call_type, dst))
+@@ -222,8 +232,8 @@ static void assign(nxdn_trunk_t *t, const uint8_t *msg, uint32_t now)
+ 		t->refused = NXDN_TRUNK_REFUSE_REJOIN;
+ 		return;
+ 	}
+-	if (hz == 0) {
+-		t->refused = NXDN_TRUNK_REFUSE_NO_PLAN;
++	if (hz == 0 || !enter(t, NXDN_TRUNK_VOICE, hz, now)) {
++		t->refused = hz == 0 ? NXDN_TRUNK_REFUSE_NO_PLAN : NXDN_TRUNK_REFUSE_NO_RX;
+ 		t->refusals++;
+ 		return;
+ 	}
+@@ -234,7 +244,6 @@ static void assign(nxdn_trunk_t *t, const uint8_t *msg, uint32_t now)
+ 	t->unit_call = call_type == NXDN_CALL_INDIVIDUAL;
+ 	t->voice_hz = hz;
+ 	t->follows++;
+-	enter(t, NXDN_TRUNK_VOICE, hz, now);
+ }
+ 
+ void nxdn_trunk_msg(nxdn_trunk_t *t, const uint8_t *msg, uint32_t now)
+diff --git a/core/nxdn/nxdn_trunk.h b/core/nxdn/nxdn_trunk.h
+index 7e094e5..fc9d5a1 100644
+--- a/core/nxdn/nxdn_trunk.h
++++ b/core/nxdn/nxdn_trunk.h
+@@ -36,7 +36,7 @@
+ 
+ enum { NXDN_TRUNK_OFF, NXDN_TRUNK_CONTROL, NXDN_TRUNK_VOICE };
+ // Why the last wanted assignment was not followed
+-enum { NXDN_TRUNK_REFUSE_NONE, NXDN_TRUNK_REFUSE_NO_PLAN, NXDN_TRUNK_REFUSE_REJOIN };
++enum { NXDN_TRUNK_REFUSE_NONE, NXDN_TRUNK_REFUSE_NO_PLAN, NXDN_TRUNK_REFUSE_REJOIN, NXDN_TRUNK_REFUSE_NO_RX };
+ // Registration (reg)
+ enum {
+ 	NXDN_REG_OFF,		// the transmit side is off
+@@ -75,7 +75,7 @@ typedef struct {
+ } nxdn_trunk_cfg_t;
+ 
+ typedef struct {
+-	void (*tune)(uint32_t hz, void *ctx);
++	bool (*tune)(uint32_t hz, void *ctx);	// false: the receiver refused the frequency
+ 	// One inbound burst on hz: msg is a long CAC message (NXDN_LCAC_MSG_BYTES). False: it can't go now (sent again
+ 	// at the next try)
+ 	bool (*send)(uint32_t hz, const uint8_t *msg, void *ctx);
+@@ -102,11 +102,13 @@ typedef struct {
+ 	uint32_t t_sent, t_req, backoff;
+ 	uint32_t talk_hz;	// our voice channel's transmit frequency
+ 	uint32_t msgs, assigns, follows, refusals, voice_lost, call_max;
++	uint32_t assigned_hz;	// last grant derived RF, 0 when there is no plan
++	uint16_t assigned_chan;	// channel number or outbound frequency number
+ 	uint32_t reg_tx, reg_ok, req_tx, req_ok, denials, timeouts, send_fail;
+ } nxdn_trunk_t;
+ 
+ // Tune to the control channel and listen there
+-void nxdn_trunk_begin(nxdn_trunk_t *t, const nxdn_trunk_cfg_t *cfg, void (*tune)(uint32_t hz, void *ctx),
++void nxdn_trunk_begin(nxdn_trunk_t *t, const nxdn_trunk_cfg_t *cfg, bool (*tune)(uint32_t hz, void *ctx),
+ 		      bool (*send)(uint32_t hz, const uint8_t *msg, void *ctx), void *ctx, uint32_t now);
+ void nxdn_trunk_end(nxdn_trunk_t *t);
+ // A CAC message (NXDN_CAC_MSG_BYTES) from the control channel
+diff --git a/core/radio/radio_nxdn.c b/core/radio/radio_nxdn.c
+index 6d2f354..0b58d73 100644
+--- a/core/radio/radio_nxdn.c
++++ b/core/radio/radio_nxdn.c
+@@ -167,6 +167,13 @@ static void params_channel(const channel_t *ch, uint16_t number, nxdn_engine_cfg
+ // talk group the one followed, every group with the block's flag or digital monitor. False: a conventional channel
+ static uint8_t trunk_mode;	// RADIO_NXDN_TRUNK_* of the channel running (before digital monitor)
+ 
++static bool trunk_tx_ok(const channel_t *ch, uint16_t unit, bool rate9600)
++{
++	return !ch->rx_only && ch->tx_hz != 0 && unit != 0 &&
++		board_in_band(ch->tx_hz, true) && !radio_listen_band(ch->tx_hz) &&
++		(radio_nxdn_fit(rate9600) & AIR_FIT_TX) != 0;
++}
++
+ // The VFO's: its RX frequency is the control channel, DFA only (no plan), the settings' group and unit ID
+ static bool trunk_cfg_vfo(const channel_t *ch, nxdn_trunk_cfg_t *t)
+ {
+@@ -182,7 +189,7 @@ static bool trunk_cfg_vfo(const channel_t *ch, nxdn_trunk_cfg_t *t)
+ 	t->group = set.unit_call ? 0 : set.tx_dst;
+ 	t->unit_id = unit;
+ 	t->all_groups = set.trunk == RADIO_NXDN_TRUNK_ALL || monitor;
+-	t->tx = !ch->rx_only && ch->tx_hz != 0 && unit != 0 && (radio_nxdn_fit(rate) & AIR_FIT_TX) != 0;
++	t->tx = trunk_tx_ok(ch, unit, rate);
+ 	t->talk_dst = set.tx_dst;
+ 	t->talk_unit = set.unit_call;
+ 	t->rate9600 = rate;
+@@ -208,7 +215,7 @@ static bool trunk_cfg(const channel_t *ch, uint16_t number, nxdn_trunk_cfg_t *t)
+ 	t->all_groups = cc.conv.trunk_all || monitor;
+ 	// The transmit side: the channel allows it (its tag), it has an inbound frequency and we have a unit ID
+ 	t->cc_tx_hz = ch->tx_hz;
+-	t->tx = !ch->rx_only && ch->tx_hz != 0 && cc.unit_id != 0 && (radio_nxdn_fit(cc.conv.rate9600) & AIR_FIT_TX) != 0;
++	t->tx = trunk_tx_ok(ch, cc.unit_id, cc.conv.rate9600);
+ 	t->talk_dst = cc.target;
+ 	t->talk_unit = cc.target_unit;
+ 	t->rate9600 = cc.conv.rate9600;
+@@ -386,18 +393,19 @@ static void cac_in(const uint8_t *msg, void *ctx)
+ 	cac_head = (uint8_t)(h + 1);
+ }
+ 
+-// The follower's tune hook (radio task): the receiver, then the engine told. A frequency the radio can't receive stays
+-// untuned: nothing is heard there and the follower comes back
+-static void trunk_tune(uint32_t hz, void *ctx)
++// Leave the engine on the control channel when a voice assignment cannot be tuned.
++static bool trunk_tune(uint32_t hz, void *ctx)
+ {
+ 	static const subtone_t no_tone = { TONE_NONE, 0 };
+ 
+ 	(void)ctx;
+-	if (hz != 0 && board_in_band(hz, false) && !radio_listen_band(hz))
+-		board.radio->rx(hz, RADIO_BW_12K5, &no_tone);
++	if (hz == 0 || !board_in_band(hz, false) || radio_listen_band(hz) ||
++	    !board.radio->rx(hz, RADIO_BW_12K5, &no_tone))
++		return false;
+ 	cac_tail = cac_head;	// what is queued is of the channel left
+ 	if (eng != NULL)
+ 		nxdn_engine_retuned(eng);
++	return true;
+ }
+ 
+ // The follower's send hook (radio task): radio_sm keys the burst at its next tick. One not sent yet is replaced
+@@ -451,6 +459,7 @@ bool radio_nxdn_begin(const channel_t *ch, uint16_t number)
+ 	nxdn_engine_hooks_t hooks = voice_hooks;
+ #endif
+ 	cac_head = cac_tail = 0;
++	cac_dropped = 0;
+ 	if (trunked)
+ 		hooks.rx_cac = cac_in;
+ #define VOICE_HOOKS	hooks
+@@ -771,6 +780,22 @@ const radio_air_ops_t radio_nxdn_air = {
+ 	nxdn_tx_clear, NULL,
+ };
+ 
++bool radio_nxdn_trunk_diag(radio_nxdn_trunk_diag_t *d)
++{
++	if (!radio_nxdn_trunked())
++		return false;
++	*d = (radio_nxdn_trunk_diag_t){
++		.cac_ok = eng->rx.rx.cac_ok, .cac_fail = eng->rx.rx.cac_fail, .cac_dropped = cac_dropped,
++		.control_hz = trunk.cfg.cc_hz,
++		.listen_hz = trunk.state == NXDN_TRUNK_VOICE ? trunk.voice_hz : trunk.cfg.cc_hz,
++		.location = trunk.location, .site_known = trunk.site_known, .dfa = trunk.dfa,
++		.base = trunk.base, .step = trunk.step, .assigns = trunk.assigns, .follows = trunk.follows,
++		.refusals = trunk.refusals, .reason = trunk.refused, .assigned_chan = trunk.assigned_chan,
++		.assigned_hz = trunk.assigned_hz, .tx_enabled = trunk.cfg.tx,
++	};
++	return true;
++}
++
+ void radio_nxdn_stats(radio_nxdn_stats_t *out)
+ {
+ 	*out = stats;
+diff --git a/core/radio/radio_nxdn.h b/core/radio/radio_nxdn.h
+index 9ba34c8..00f76e4 100644
+--- a/core/radio/radio_nxdn.h
++++ b/core/radio/radio_nxdn.h
+@@ -135,6 +135,16 @@ uint32_t radio_nxdn_trunk_burst_hz(void);
+ bool radio_nxdn_trunk_burst_start(void);
+ void radio_nxdn_trunk_burst_drop(void);
+ 
++// Debug link snapshot. Counters are for the current trunked session.
++typedef struct {
++	uint32_t cac_ok, cac_fail, cac_dropped, control_hz, listen_hz, location;
++	uint32_t assigns, follows, refusals, assigned_hz;
++	uint16_t assigned_chan;
++	uint8_t base, step, reason;
++	bool site_known, dfa, tx_enabled;
++} radio_nxdn_trunk_diag_t;
++bool radio_nxdn_trunk_diag(radio_nxdn_trunk_diag_t *out);
++
+ void radio_nxdn_stats(radio_nxdn_stats_t *out);
+ void radio_nxdn_reset_stats(void);
+ #endif
+diff --git a/docs/spec/debuglink.md b/docs/spec/debuglink.md
+index 264997e..f5999af 100644
+--- a/docs/spec/debuglink.md
++++ b/docs/spec/debuglink.md
+@@ -364,6 +364,7 @@ short. View 5: the `cps.*` and `cpsf.*` keys moved from `storage` to `cps` (27),
+ | 36 | `p25` | P25 conventional on the channel ([p25.md](p25.md) 7.4): `p25.built` (0 without `CONFIG_P25`, and nothing else) `p25.on` (the engine runs on this channel), the call heard now or last `p25.rx played enc unit late nac src dst` (`src` 0: not known yet; `dst` a talk group, or a unit when `unit` is 1) `p25.tx` (`air_tx_state_t`: 0 idle, then priming, on, ending, done), `p25.rx_work_us rx_span_us` (while the engine runs, from a provider that counts its receive load, as `air.rx_work_us` in 3.28: work / span is the share of the CPU since P25 started), the settings `p25.rx_nac tx_nac rx_tgid talkaround unit_call tx_dst unit_id` (as op 39), while the engine runs the parameters it runs on `p25.run.rx_nac tx_nac rx_tgid talkaround unit_call tx_dst unit_id` (a stored P25 channel's own, else the settings; talkaround 1 on, 2 off), counters `p25.begins begin_fails mem_lent rx_calls tx_calls tx_filler units voice voice_bad voice_bits lc_fail es_fail rx_chunks tx_underruns tx_syms`; the voice path `p25v.built in frames bad concealed calls underruns underrun_at overflows bit_errors queue_max peak tx_frames tx_encoded tx_dropped tx_silent tx_mic_peak` (`p25v.built=0` without). RESET_COUNTERS zeroes the counters |
+ | 37 | `p25_trunk` | the P25 trunking follower on a trunked channel ([p25-trunking.md](p25-trunking.md) 7): `p25t.built` (0 without `CONFIG_P25_TRUNK`, and nothing else) `p25t.on` (a trunked channel runs), the follower's view `p25t.state` (`P25_FOLLOW_*`: 0 off, 1 hunting, 2 on a control channel, 3 on a voice channel) `cc cc_hz voice_hz nac wacn sysid rfss site` (the control channel tried or held and the system heard; `wacn` 4294967295, `sysid` 65535, `rfss`/`site` 255 until heard), the call followed now or last `tg src dst unit_call enc`, `idens learned refused refused_tg fallback`, counters `blocks crc_fail mfr mbt mbt_op pdu_other grants follows enc_skip tdma no_iden wrong_sys hunts cc_lost voice_lost wrong_call` (from the channel's start), and the radio core's `retunes untuned skips` (RESET_COUNTERS zeroes these three). The transmit side ([p25-trunking.md](p25-trunking.md) 5): `p25t.tx` (1: on), `reg` (`P25_REG_*`: 0 off, 1 idle, 2 waiting, 3 affiliating, 4 registered and affiliated, 5 denied, 6 retrying, 7 no inbound frequency), `req` (`P25_REQ_*`: 0 idle, 1 waiting, 2 queued, 3 talking on the grant, 4 denied, 5 no answer, 6 unusable channel), `aff_tg` (the group affiliated), `talk_hz` (where it last transmitted on a grant), `deny_svc deny_reason` (the last deny's request opcode and reason), counters `reg_tx reg_ok aff_tx aff_ok req_tx req_grant denials queued timeouts send_fail inb_busy` (8 bits, from the channel's start) and the radio core's `bursts burst_refused` (inbound bursts keyed, and refused by the transmit checks) |
+ | 38 | `nxdn` | NXDN conventional on the channel ([nxdn.md](nxdn.md) 6): `nxdn.built` (0 without `CONFIG_NXDN`, and nothing else) `nxdn.on` (the engine runs on this channel), the call heard now or last `nxdn.rx played enc unit late ran src dst emergency` (`src` 0: not known yet; `dst` a group, or a unit when `unit` is 1), `nxdn.tx` (`air_tx_state_t`: 0 idle, then priming, on, ending, done), `nxdn.deny` (`tx_deny_t` of the last refusal), the provider's fit (`AIR_FIT_*`, 3.28) at the rate in use and at each rate `nxdn.fit fit4800 fit9600`, the settings `nxdn.rate rx_ran tx_ran rx_gid unit_id unit_call tx_dst tx_emergency` (as op 40), while the engine runs the parameters it runs on `nxdn.run.rate rx_ran tx_ran rx_gid unit_id unit_call tx_dst` (a stored NXDN channel's own, [nxdn-codeplug.md](nxdn-codeplug.md), else the settings), counters `nxdn.begins begin_fails rx_calls tx_calls tx_filler frames lich_fail sacch_fail facch_fail voice voice_held fec_bits ran_rejects rx_chunks tx_underruns tx_syms`. The voice path is the DMR side's (`ambe.*` in `dmr_stats`). RESET_COUNTERS zeroes the counters |
++| 40 | `nxdn_trunk` | NXDN Type-C control channel CRC, site, grants and receiver tuning ([nxdn-trunking.md](nxdn-trunking.md#6-diagnostics)). |
+ 
+ With `CONFIG_KEY_ASSIGN` and at least one assignable key, `link` also reports `key.first.bit` (the first
+ `board.side_keys` entry, for KEY kind 1) and `key.first.press` (its saved `keyfn_t`, [ui.md](ui.md#31-key-assignment)).
+diff --git a/docs/spec/nxdn-trunking.md b/docs/spec/nxdn-trunking.md
+index 437b087..891ac9b 100644
+--- a/docs/spec/nxdn-trunking.md
++++ b/docs/spec/nxdn-trunking.md
+@@ -56,7 +56,7 @@ assigned there fails).
+ | PTT | Refused until registered ("Release PTT, try again"). Registered: VCALL_REQ goes out (from a voice channel heard, back to control first); 3 tries 1 s apart. VCALL_RESP 0x10: wait for the assignment; 0x30-0x3F: queued, up to 10 s; others: refused |
+ | Grant | VCALL_ASSGN with our unit as source and our target as destination: the receiver goes to the voice channel and the radio transmits on its inbound frequency (section 2), RTCH, inbound, with the channel's RAN, unit and target, and AES when the channel has it |
+ | End | PTT released: the release frame, then back to the control channel. Released before the grant: the request is dropped |
+-| Transmit allowed | The channel (its tag) allows transmitting, has a TX frequency, a unit ID and the board transmits the rate; otherwise the channel listens only |
++| Transmit allowed | The channel (its tag) allows transmitting, its control TX frequency is in a board TX band, it has a unit ID and the board transmits the rate; otherwise the channel listens only |
+ 
+ ## 4. The codeplug and the radio
+ 
+@@ -87,3 +87,17 @@ ID is the channel's or the radio's (nxdn-codeplug.md 1).
+   short-message services. Late entry into our own granted channel only through the assignment.
+ - Channel-number sites need the linear plan; a site whose numbers are not linear needs a per-channel table (not
+   implemented). The VFO has no plan.
++
++## 6. Diagnostics
++
++Run `python3 tools/rfoundry_debug.py view --section nxdn_trunk` while the channel is on a Type-C site.
++The counters describe the current follower session. Compare two readings while the control channel is on air.
++
++| Key (prefix `nxdn.trunk.`) | Meaning |
++|---|---|
++| `cac_ok`, `cac_fail`, `cac_dropped` | Valid CRC, failed CRC or discarded before the follower received it. A valid CRC with a mismatched RAN also increments `nxdn.ran_rejects` in the `nxdn` view |
++| `control_hz`, `listen_hz` | Configured control channel and the frequency selected by the follower. These values do not indicate synthesizer lock or useful signal strength |
++| `site_known`, `location`, `dfa`, `base`, `step` | SITE_INFO received, its location ID and frequency assignment parameters |
++| `assigns`, `assigned_chan`, `assigned_hz` | Number of voice assignments and the channel number or OFN and frequency derived from the last one (0 Hz: no usable plan) |
++| `follows`, `refusals`, `reason` | Voice assignments accepted and rejected. Last refusal 0: none, 1: no plan, 2: recent call rejoin guard, 3: frequency refused by the receiver |
++| `tx_enabled` | 1 when the follower is configured to register and request voice. Other transmit gates still apply |
+diff --git a/tests/host/nxdnTrunkTest.c b/tests/host/nxdnTrunkTest.c
+index 125f75e..09361ba 100644
+--- a/tests/host/nxdnTrunkTest.c
++++ b/tests/host/nxdnTrunkTest.c
+@@ -13,7 +13,16 @@ static int failures, checks;
+ 
+ static uint32_t tuned[16];
+ static unsigned ntuned;
+-static void tune(uint32_t hz, void *ctx) { (void)ctx; if (ntuned < 16) tuned[ntuned] = hz; ntuned++; }
++static bool tune(uint32_t hz, void *ctx)
++{
++	const uint32_t *maximum = ctx;
++	if (maximum && hz > *maximum)
++		return false;
++	if (ntuned < 16)
++		tuned[ntuned] = hz;
++	ntuned++;
++	return true;
++}
+ 
+ // VCALL_ASSGN: call type, source, destination; chan10 or (DFA) the 16-bit outbound frequency number
+ static void assgn(uint8_t *m, uint8_t type, uint8_t call_type, uint16_t src, uint16_t dst, uint16_t chan, bool dfa)
+@@ -295,6 +304,23 @@ int main(void)
+ 	}
+ 	CHECK(t.state == NXDN_TRUNK_CONTROL && t.call_max == 1, "call max");
+ 
++	// A decoded assignment can land outside the tuning range, even with the control channel in range.
++	uint32_t maximum = 870000000u;
++	nxdn_trunk_cfg_t upper = { .cc_hz = 851000000u, .base_hz = 850000000u,
++				  .spacing_hz = 25000u, .all_groups = true };
++	ntuned = 0;
++	nxdn_trunk_begin(&t, &upper, tune, NULL, &maximum, now);
++	assgn(m, NXDN_MSG_VCALL_ASSGN, NXDN_CALL_GROUP, 5, 777, 801, false);
++	nxdn_trunk_msg(&t, m, now);
++	CHECK(ntuned == 1 && t.state == NXDN_TRUNK_CONTROL && t.refused == NXDN_TRUNK_REFUSE_NO_RX &&
++	      t.assigned_hz == 870025000u && t.assigned_chan == 801 && t.follows == 0, "refused 800 MHz assignment");
++	assgn(m, NXDN_MSG_VCALL_ASSGN, NXDN_CALL_GROUP, 5, 777, 800, false);
++	nxdn_trunk_msg(&t, m, now);
++	CHECK(ntuned == 2 && t.state == NXDN_TRUNK_VOICE && t.refused == NXDN_TRUNK_REFUSE_NONE &&
++	      t.voice_hz == 870000000u && t.follows == 1, "accept the next receivable assignment");
++	t.cfg.base_hz = UINT32_MAX;
++	CHECK(nxdn_trunk_chan_hz(&t, m) == 0, "overflow is not a valid voice frequency");
++
+ 	testTx();
+ 	printf("nxdnTrunkTest: %d checks, %d failed\n", checks, failures);
+ 	return failures ? 1 : 0;
+diff --git a/tests/host/radioCoreTest.c b/tests/host/radioCoreTest.c
+index 6b9f1ae..7d0f54b 100644
+--- a/tests/host/radioCoreTest.c
++++ b/tests/host/radioCoreTest.c
+@@ -9476,9 +9476,53 @@ static void test_nxdn_quick_stored(void)
+ 	memset(stored_nxdn, 0, sizeof(stored_nxdn));
+ }
+ 
++static void test_nxdn_trunk_rx_only(void)
++{
++	setup_codeplug_nxdn();
++	start();
++	board_rx_ext_set(true);
++	req(RREQ_VFO, 1);
++	req(RREQ_VFO_SET, 851000000);
++	req(RREQ_MODE, RADIO_MODE_NXDN);
++	radio_nxdn_settings_t set = nxdn_default_set;
++	set.trunk = RADIO_NXDN_TRUNK_ALL;
++	radio_req_nxdn_settings(&set);
++	CHECK(sm.view.ch.rx_hz == 851000000 && sm.view.ch.tx_hz == 851000000);
++	CHECK(radio_nxdn_trunked() && !radio_nxdn_trunk_tx());
++	CHECK(sm.view.nxdn.tstate == RADIO_NXDN_TS_CONTROL);
++	int before = hw.tx_calls;
++	req(RREQ_PTT, 1);
++	CHECK(sm.view.state == RS_TX_DENIED && sm.view.tx_deny == TXDENY_RX_ONLY);
++	req(RREQ_PTT, 0);
++	run(5000);
++	CHECK(hw.tx_calls == before);
++	uint8_t frame[NXDN_FRAME_BYTES] = {0};
++	uint8_t cac[NXDN_CAC_BYTES] = { 1, NXDN_MSG_SITE_INFO, 0x12, 0x34, 0x56 };
++	nxdn_frame_begin(frame, NXDN_LICH(NXDN_RF_RCCH, NXDN_USC_CAC, 0, NXDN_DIR_OUTBOUND));
++	nxdn_cac_put(frame, cac);
++	for (unsigned i = 0; i < 3; i++) {
++		air_deliver(&fair[0], frame, AIR_CHUNK);
++		fair[0].now_us += 30000;
++		air_deliver(&fair[0], frame + AIR_CHUNK / 4, NXDN_FRAME_SYMS - AIR_CHUNK);
++		fair[0].now_us += 10000;
++	}
++	run(RADIO_POLL_MS);
++	char buf[768];
++	dl_text_t t;
++	dl_text_init(&t, buf, sizeof buf);
++	debuglink_view_nxdn_trunk(&sm.view, &t);
++	CHECK(strstr(buf, "nxdn.trunk.cac_ok=3\n") && strstr(buf, "nxdn.trunk.cac_fail=0\n"));
++	CHECK(strstr(buf, "nxdn.trunk.site_known=1\n") && strstr(buf, "nxdn.trunk.location=123456\n"));
++	CHECK(strstr(buf, "nxdn.trunk.control_hz=851000000\n") && strstr(buf, "nxdn.trunk.listen_hz=851000000\n"));
++	CHECK(strstr(buf, "nxdn.trunk.tx_enabled=0\n") != NULL);
++	nxdn_defaults();
++	board_rx_ext_set(false);
++}
++
+ static void test_nxdn(void)
+ {
+ 	test_nxdn_rx();
++	test_nxdn_trunk_rx_only();
+ 	test_nxdn_monitor();
+ #if CONFIG_AIR_AES
+ 	test_nxdn_aes();
+diff --git a/tools/rfoundry_debug.py b/tools/rfoundry_debug.py
+index 0d29e3b..f177727 100644
+--- a/tools/rfoundry_debug.py
++++ b/tools/rfoundry_debug.py
+@@ -204,7 +204,7 @@ PRESS, LONG, REPEAT, DOWN, UP = range(5)
+ VIEW_SECTIONS = ["core", "channel", "dmr", "dmr_call", "dmr_stats", "hotspot", "link", "features", "dmr_data",
+                  "storage", "dmr_ext", "dmr_data_stats", "roam", "aprs", "aprs_set", "dmr_ip", "net", "snmp", "usrp",
+                  "sfr", "tasks", "crash", "watchdog", "reset", "air", "net_svc", "net_link", "cps", "board", "audio", "t3",
+-                 "t3_svc", "t3_roam", "voice_cap", "t3_msg", "t3_ra", "p25", "p25_trunk", "nxdn", "ysf"]
++                 "t3_svc", "t3_roam", "voice_cap", "t3_msg", "t3_ra", "p25", "p25_trunk", "nxdn", "ysf", "nxdn_trunk"]
+ 
+ OP_CHANNEL_STEP, OP_ZONE_POS, OP_ZONE, OP_VFO, OP_VFO_SET, OP_VFO_STEP, OP_POWER, OP_SQUELCH, OP_BANDWIDTH, \
+     OP_TONE, OP_MONITOR, OP_CLEAR_TEMP, OP_REPLY_CANCEL, OP_HOTSPOT_EXIT, OP_DMR_TARGET, OP_DMR_CONTACT, \

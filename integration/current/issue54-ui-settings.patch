@@ -1,0 +1,3627 @@
+diff --git a/core/position/position.c b/core/position/position.c
+index cad03d4..98350ea 100644
+--- a/core/position/position.c
++++ b/core/position/position.c
+@@ -381,6 +381,7 @@ bool position_gps(position_gps_t *out, uint32_t now_ms)
+ 		out->speed_kmh = motion ? p.gps.f.speed_kmh : 0xFFFFu;
+ 		out->course = motion ? p.gps.f.course : 0xFFFFu;
+ 		out->utc_hms = p.gps.f.utc_hms;
++		out->date = p.gps.f.date;
+ #if CONFIG_GPS_SKY
+ 		out->mode = p.sky.mode;
+ 		out->in_view = p.sky.n;
+diff --git a/core/position/position.h b/core/position/position.h
+index be9be58..7495d47 100644
+--- a/core/position/position.h
++++ b/core/position/position.h
+@@ -89,6 +89,7 @@ typedef struct {
+ 	uint16_t hdop10;	// x 10, 0xFFFF unknown
+ 	uint16_t speed_kmh, course;	// 0xFFFF unknown
+ 	uint32_t utc_hms;	// hhmmss of the last fix, 0xFFFFFFFF
++	uint32_t date;		// date from the last RMC fix, ddmmyy, 0 unknown
+ 	uint8_t mode;		// GSA (CONFIG_GPS_SKY): 1 no fix, 2 2D, 3 3D, 0 unknown
+ 	uint8_t in_view;	// satellites in the table (position_gps_sat)
+ } position_gps_t;
+diff --git a/core/radio/radio.h b/core/radio/radio.h
+index 02763ee..f0c7779 100644
+--- a/core/radio/radio.h
++++ b/core/radio/radio.h
+@@ -52,6 +52,9 @@ typedef enum { RADIO_VOX_OFF, RADIO_VOX_CHANNEL, RADIO_VOX_ALL } radio_vox_t;
+ #define RADIO_ZONE_SCAN_DWELL_MS	RADIO_ZONE_SCAN_DWELL_MIN_MS
+ #define RADIO_ZONE_SCAN_DWELL_MAX_MS	500u
+ 
++typedef enum { RADIO_LED_NORMAL, RADIO_LED_SCAN_AMBER, RADIO_LED_OFF } radio_led_mode_t;
++typedef enum { RADIO_PERMIT_DEFAULT, RADIO_PERMIT_CHIRP, RADIO_PERMIT_TRIPLE } radio_permit_style_t;
++
+ // The radio core's settings (docs/spec/radio-features.md). The radio core loads them from the settings store at
+ // start-up (docs/spec/settings-store.md 3) and saves every change made with radio_set_settings
+ typedef struct {
+@@ -68,12 +71,15 @@ typedef struct {
+ 	uint16_t zone_scan_dwell_ms;	// zone scan: its independent empty-channel dwell (25-500 ms)
+ 	bool scan_priority;	// zone scan: revisit the start channel between the others
+ 	bool scan_beep;		// a short beep when the scan stops on a signal
++	uint8_t led_mode;	// radio_led_mode_t
++	uint32_t scan_lo_hz, scan_hi_hz;	// optional VFO limits, both must be saved in the same active band
+ 	uint16_t dual_delay_ms;	// dual watch on one receiver: after a signal ends, stay on its channel this long (the
+ 				// reply), looking at the other one in between
+ 	// Beeps (CONFIG_BEEP)
+ 	uint8_t beep_level;	// 0 = silent .. 100: the loudest a beep gets (it follows the volume up to this)
+ 	bool key_beep;		// radio_req_beep(BEEP_KEY) sounds
+-	bool talk_permit;	// DMR: the talk permit tone when the voice goes on air (channels without no_beep)
++	bool talk_permit;	// play the talk permit for channels without no_beep
++	uint8_t permit_style;	// radio_permit_style_t
+ 	uint8_t tones_off;	// Settings > Sound tones off, bit n for radio_tone_rows[n] (radio_keys.h); a key of the
+ 				// codeplug's settings area holds over it (docs/spec/codeplug-settings.md 5.2)
+ 	// VOX (CONFIG_VOX)
+diff --git a/core/radio/radio_sm.c b/core/radio/radio_sm.c
+index 30c88bf..d54f989 100644
+--- a/core/radio/radio_sm.c
++++ b/core/radio/radio_sm.c
+@@ -243,6 +243,33 @@ static void activity(radio_sm_t *sm, uint32_t now_ms)
+ #endif
+ }
+ 
++#if CONFIG_DMR || (CONFIG_FM && CONFIG_BEEP)
++// The talk permit before keying (CAP_BEEP_NOT_ON_AIR): the hold's minimum covers the beep's start (beep_busy is true
++// from beep_play on); the hold lasts while the beep plays or its audio is still in the board's buffers, so none of it
++// is left to reach the modulator
++#define PERMIT_HOLD_MIN_MS	40u
++#define PERMIT_HOLD_MAX_MS	600u
++
++static bool permit_busy(void)
++{
++#if CONFIG_BEEP
++	const hal_audio_t *a = board.audio;
++	return beep_busy() || (a != NULL && a->spk_pending != NULL && a->spk_pending());
++#else
++	return false;
++#endif
++}
++
++static uint8_t permit_sound(const radio_sm_t *sm, uint8_t mode_default)
++{
++	switch (sm->set.permit_style) {
++	case RADIO_PERMIT_CHIRP: return BEEP_TX_PERMIT;
++	case RADIO_PERMIT_TRIPLE: return BEEP_TX_PERMIT_DV;
++	default: return mode_default;
++	}
++}
++#endif
++
+ // Whether a voice stream (DMR or P25) owns the PCM audio: beeps are mixed into it
+ static inline bool voice_streaming(void)
+ {
+@@ -560,6 +587,10 @@ static void led_signals(radio_sm_t *sm, bool *red, bool *green)
+ {
+ 	uint32_t now = sm->led_now;
+ 	bool timed = false;
++	if (sm->set.led_mode == RADIO_LED_OFF) {
++		*red = *green = sm->led_timed = false;
++		return;
++	}
+ 	if (ptt_line_stuck()) {
+ 		*red = ((now / RADIO_LED_STUCK_STEP_MS) & 1u) == 0;	// until the power cycle that releases it
+ 		*green = !*red;
+@@ -587,6 +618,14 @@ static void led_signals(radio_sm_t *sm, bool *red, bool *green)
+ 		*red = sm->wake_led;
+ 		timed = sm->wake_led;
+ 	}
++#endif
++#if CONFIG_SCAN
++	if (sm->set.led_mode == RADIO_LED_SCAN_AMBER && !*red && !*green &&
++	    (sm->scan.kind == SCAN_VFO || sm->scan.kind == SCAN_ZONE) &&
++	    (sm->scan.phase == SCAN_PH_LISTEN || sm->scan.phase == SCAN_PH_PROBE)) {
++		*red = *green = (now % 1000u) < 125u;
++		timed = true;
++	}
+ #endif
+ 	sm->led_timed = timed;
+ }
+@@ -1551,21 +1590,6 @@ static uint8_t hang_s(uint16_t ms, uint8_t dflt)
+ 	return (uint8_t)(s > 30u ? 30u : s);
+ }
+ 
+-// The talk permit before keying (CAP_BEEP_NOT_ON_AIR): the hold's minimum covers the beep's start (beep_busy is true
+-// from beep_play on); the hold lasts while the beep plays or its audio is still in the board's buffers, so none of it
+-// is left to reach the modulator
+-#define PERMIT_HOLD_MIN_MS	40u
+-
+-static bool permit_busy(void)
+-{
+-#if CONFIG_BEEP
+-	const hal_audio_t *a = board.audio;
+-	return beep_busy() || (a != NULL && a->spk_pending != NULL && a->spk_pending());
+-#else
+-	return false;
+-#endif
+-}
+-
+ // Whether the talk permit sounds before keying on this channel: the board can't play it on air, and it is on
+ static bool permit_before_key(const radio_sm_t *sm)
+ {
+@@ -2270,7 +2294,7 @@ static void dmr_follow(radio_sm_t *sm, uint32_t now_ms)
+ 	// ends (neither on no-beep channels). A board whose beeps can't sound on air plays a short permit before keying
+ 	// instead, in the stack's hold (permit_seq)
+ 	bool early = (board.caps & CAP_BEEP_NOT_ON_AIR) != 0;
+-	uint8_t permit = early ? BEEP_TX_PERMIT_SHORT : BEEP_TX_PERMIT;
++	uint8_t permit = permit_sound(sm, early ? BEEP_TX_PERMIT_SHORT : BEEP_TX_PERMIT);
+ 	if (cv->wake_admits != sm->dmr_wake_admits) {
+ 		sm->dmr_wake_admits = cv->wake_admits;
+ 		if (!sm->view.ch.no_beep && sm->set.talk_permit) {
+@@ -2280,14 +2304,14 @@ static void dmr_follow(radio_sm_t *sm, uint32_t now_ms)
+ 	if (cv->permit_seq != sm->dmr_permit_seq) {
+ 		sm->dmr_permit_seq = cv->permit_seq;
+ 		if (permit_before_key(sm)) {
+-			beep(sm, BEEP_TX_PERMIT_SHORT);	// the stack holds the key-up until it has played
++			beep(sm, permit);	// the stack holds the key-up until it has played
+ 		}
+ 	}
+ 	uint8_t st = sm->view.dmr.state;
+ 	if (st != sm->dmr_prev_state) {
+ 		if (!sm->view.ch.no_beep) {
+ 			if (st == RDMR_TX && sm->set.talk_permit && !early) {
+-				beep(sm, BEEP_TX_PERMIT);
++				beep(sm, permit);
+ 			} else if (sm->dmr_prev_state == RDMR_RX && (st == RDMR_IDLE || st == RDMR_RX_OTHER) &&
+ 				   sm->view.state != RS_TX_DENIED) {	// a refusal's idle: the call plays on
+ 				beep(sm, BEEP_CALL_END);
+@@ -4650,6 +4674,11 @@ static void scan_start(radio_sm_t *sm, uint8_t kind, uint32_t lo_hz, uint32_t hi
+ 					hi_hz = board.bands[i].hi_hz;
+ 				}
+ 			}
++			uint32_t lo = sm->set.scan_lo_hz, hi = sm->set.scan_hi_hz;
++			if (lo != 0 && lo >= lo_hz && hi <= hi_hz && hi > lo && hi - lo >= sm->view.vfo_step_hz) {
++				lo_hz = lo;
++				hi_hz = hi;
++			}
+ 		}
+ #if CONFIG_BCAST_FM
+ 		if (sm->view.bcast && radio_bcast_band(lo_hz) && radio_bcast_band(hi_hz)) {
+@@ -6437,8 +6466,6 @@ static void air_stop(radio_sm_t *sm)
+ // channel still receives, then the engine keys. Not on trunked channels (there the permit is the system's grant). The
+ // hold also waits for the beep's own stream to stop: transmitting starts the microphone's, which beep_service would
+ // stop under it
+-#define AIR_PERMIT_MAX_MS	600u	// keys after this long whatever the beep says
+-
+ static void air_key(radio_sm_t *sm, uint32_t now_ms, uint32_t hz);
+ 
+ // (no engine, or one that only receives: air_key refuses at once, no permit first)
+@@ -6456,7 +6483,7 @@ static void air_permit_poll(radio_sm_t *sm, uint32_t now_ms)
+ 		return;
+ 	}
+ #if CONFIG_BEEP
+-	if ((permit_busy() || beep_streaming()) && now_ms - sm->air_permit_ms < AIR_PERMIT_MAX_MS) {
++	if ((permit_busy() || beep_streaming()) && now_ms - sm->air_permit_ms < PERMIT_HOLD_MAX_MS) {
+ 		return;
+ 	}
+ #endif
+@@ -6729,6 +6756,63 @@ static void air_poll_tx(radio_sm_t *sm, uint32_t now_ms)
+ }
+ #endif
+ 
++static void fm_key(radio_sm_t *sm, uint32_t now_ms)
++{
++#if CONFIG_NET_USRP
++	// The host's audio replaces the microphone: never key without a way to send it
++	const hal_audio_tap_t *tap = board.audio_tap;
++	if (sm->host_audio && (tap == NULL || tap->fm_tx_inject == NULL)) {
++		deny(sm, TXDENY_MODE);
++		return;
++	}
++#endif
++#if RADIO_MDC_RX
++	mdc_rx_stop(sm);		// the receive audio path goes back before the transmitter takes the modem
++#endif
++	sm->view.state = RS_TX;		// speaker off, red LED on, before keying
++	sm->view.tx_auto = false;
++	sm->view.last_tx_ms = now_ms != 0 ? now_ms : 1;
++	sm->view.tx_deny = TXDENY_NONE;
++	sm->view.tx_elapsed_ms = 0;
++	sm->tx_start_ms = now_ms;
++	outputs(sm);
++	const channel_t *ch = &sm->view.ch;
++	if (!key_tx(ch->tx_hz, (radio_bw_t)ch->bw, sm->view.power, &ch->tx_tone)) {
++		deny(sm, board_refusal());
++		return;
++	}
++#if CONFIG_NET_USRP
++	// The board ends the injection itself at tx_off() / rx()
++	if (sm->host_audio && !tap->fm_tx_inject(audio_mux_fm_pull, AUDIO_TAP_VOICE)) {
++		board.radio->tx_off();
++		deny(sm, TXDENY_MODE);
++		return;
++	}
++#endif
++#if CONFIG_MDC1200
++	sm->mdc_phase = mdc_wanted(sm, CODEPLUG_ANI_PRE) ? MDC_PRE_WAIT : MDC_OFF;	// mdc_poll sends it
++#endif
++	changed(sm);
++}
++
++#if CONFIG_FM && CONFIG_BEEP
++static void fm_permit_poll(radio_sm_t *sm, uint32_t now_ms)
++{
++	uint32_t elapsed = now_ms - sm->fm_permit_ms;
++	if (sm->fm_permit_ms == 0 || elapsed < PERMIT_HOLD_MIN_MS ||
++	    (elapsed < PERMIT_HOLD_MAX_MS && (permit_busy() || beep_streaming())))
++		return;
++	sm->fm_permit_ms = 0;
++	if (!sm->ptt || sm->hotspot || sm->power_off_req || sm->view.ch.mode != RADIO_MODE_FM)
++		return;
++	uint8_t reason = tx_check(sm);
++	if (reason == TXDENY_NONE)
++		fm_key(sm, now_ms);
++	else
++		deny(sm, reason);
++}
++#endif
++
+ static void ptt_down(radio_sm_t *sm, uint32_t now_ms)
+ {
+ 	if (sm->ptt) {
+@@ -6842,7 +6926,7 @@ static void ptt_down(radio_sm_t *sm, uint32_t now_ms)
+ 			return;		// the last transmission is still ending: air_tick keys again once it is done
+ 		}
+ 		if (permit_on_air_mode(sm)) {
+-			beep(sm, BEEP_TX_PERMIT_DV);	// air_permit_poll keys once it has played
++			beep(sm, permit_sound(sm, BEEP_TX_PERMIT_DV));	// air_permit_poll keys once it has played
+ 			sm->air_permit_ms = now_ms != 0 ? now_ms : 1;
+ 			return;
+ 		}
+@@ -6850,41 +6934,15 @@ static void ptt_down(radio_sm_t *sm, uint32_t now_ms)
+ 		return;
+ 	}
+ #endif
+-#if CONFIG_NET_USRP
+-	// The host's audio replaces the microphone: never key without a way to send it
+-	const hal_audio_tap_t *tap = board.audio_tap;
+-	if (sm->host_audio && (tap == NULL || tap->fm_tx_inject == NULL)) {
+-		deny(sm, TXDENY_MODE);
++#if CONFIG_FM && CONFIG_BEEP
++	if (!sm->host_audio && sm->set.talk_permit && !sm->view.ch.no_beep &&
++	    sm->set.permit_style != RADIO_PERMIT_DEFAULT) {
++		beep(sm, permit_sound(sm, BEEP_TX_PERMIT));
++		sm->fm_permit_ms = now_ms != 0 ? now_ms : 1;
+ 		return;
+ 	}
+ #endif
+-#if RADIO_MDC_RX
+-	mdc_rx_stop(sm);		// the receive audio path goes back before the transmitter takes the modem
+-#endif
+-	sm->view.state = RS_TX;		// speaker off, red LED on, before keying
+-	sm->view.tx_auto = false;
+-	sm->view.last_tx_ms = now_ms != 0 ? now_ms : 1;
+-	sm->view.tx_deny = TXDENY_NONE;
+-	sm->view.tx_elapsed_ms = 0;
+-	sm->tx_start_ms = now_ms;
+-	outputs(sm);
+-	const channel_t *ch = &sm->view.ch;
+-	if (!key_tx(ch->tx_hz, (radio_bw_t)ch->bw, sm->view.power, &ch->tx_tone)) {
+-		deny(sm, board_refusal());
+-		return;
+-	}
+-#if CONFIG_NET_USRP
+-	// The board ends the injection itself at tx_off() / rx()
+-	if (sm->host_audio && !tap->fm_tx_inject(audio_mux_fm_pull, AUDIO_TAP_VOICE)) {
+-		board.radio->tx_off();
+-		deny(sm, TXDENY_MODE);
+-		return;
+-	}
+-#endif
+-#if CONFIG_MDC1200
+-	sm->mdc_phase = mdc_wanted(sm, CODEPLUG_ANI_PRE) ? MDC_PRE_WAIT : MDC_OFF;	// mdc_poll sends it
+-#endif
+-	changed(sm);
++	fm_key(sm, now_ms);
+ }
+ 
+ // PTT is up and nothing else is on the air: the roger beep (roger, and the setting), then the tail and the carrier
+@@ -6913,6 +6971,12 @@ static void ptt_release(radio_sm_t *sm, bool roger, uint32_t now_ms)
+ 	}
+ 	sm->ptt = false;
+ 	activity(sm, now_ms);
++#if CONFIG_FM && CONFIG_BEEP
++	if (sm->fm_permit_ms != 0) {
++		sm->fm_permit_ms = 0;
++		return;
++	}
++#endif
+ 	if (sm->host_audio) {
+ 		roger = false;		// the host sends its own audio, tones included
+ 	}
+@@ -7778,6 +7842,10 @@ static void settings_to_radio(const settings_t *st, radio_settings_t *s)
+ 		s->bcast_step = (uint8_t)(st->rs_bcast_step - 1u);
+ 		clamp_settings(s);
+ 	}
++	s->led_mode = st->rs_led_mode <= RADIO_LED_OFF ? st->rs_led_mode : RADIO_LED_NORMAL;
++	s->scan_lo_hz = st->rs_scan_lo_hz;
++	s->scan_hi_hz = st->rs_scan_hi_hz;
++	s->permit_style = st->rs_permit_style <= RADIO_PERMIT_TRIPLE ? st->rs_permit_style : RADIO_PERMIT_DEFAULT;
+ 	s->tones_off = settings_tones_off(st) & RADIO_TONES_MASK;	// 0, all on, in a record from before it
+ 	if (st->rs_stored != 1) {
+ 		return;
+@@ -7827,6 +7895,10 @@ static void radio_to_settings(const radio_settings_t *s, uint32_t now_ms)
+ 	st->rs_scan_dwell_ms = s->scan_dwell_ms;
+ 	st->zone_scan_dwell_25ms = (uint8_t)(s->zone_scan_dwell_ms / 25u);
+ 	st->rs_beep_level = s->beep_level;
++	st->rs_led_mode = s->led_mode;
++	st->rs_scan_lo_hz = s->scan_lo_hz;
++	st->rs_scan_hi_hz = s->scan_hi_hz;
++	st->rs_permit_style = s->permit_style;
+ 	st->rs_vox = s->vox;
+ 	st->rs_vox_level = s->vox_level;
+ 	st->rs_vox_tail_ms = s->vox_tail_ms;
+@@ -7862,6 +7934,11 @@ static void use_settings(radio_sm_t *sm, const radio_settings_t *s, uint32_t now
+ #endif
+ 	sm->set = *s;
+ 	clamp_settings(&sm->set);
++	if (sm->set.led_mode > RADIO_LED_OFF)
++		sm->set.led_mode = RADIO_LED_NORMAL;
++	if (sm->set.permit_style > RADIO_PERMIT_TRIPLE)
++		sm->set.permit_style = RADIO_PERMIT_DEFAULT;
++	outputs(sm);
+ 	apply_tot(sm);
+ #if CONFIG_SCAN
+ 	if (sm->scan.kind == SCAN_ZONE && sm->scan.cfg.dwell_ms != sm->set.zone_scan_dwell_ms) {
+@@ -8297,6 +8374,9 @@ void radio_sm_request(radio_sm_t *sm, const radio_req_t *req, uint32_t now_ms)
+ 		aprs_rf_abort(sm, now_ms);	// the user does something: an APRS transmission gives way
+ 	}
+ 	bool busy = sm->view.state == RS_TX || sm->hotspot;	// no retuning while transmitting or a hotspot
++#if CONFIG_FM && CONFIG_BEEP
++	busy = busy || sm->fm_permit_ms != 0;
++#endif
+ #if CONFIG_AIR_RAW
+ 	busy = busy || sm->air_bench;				// ... or while the air interface bench has the modem
+ #endif
+@@ -9374,6 +9454,9 @@ void radio_sm_poll(radio_sm_t *sm, uint32_t now_ms)
+ 	}
+ #if CONFIG_APRS
+ 	aprs_poll(sm, now_ms);	// before battery saving: beacons are due while the receiver sleeps too
++#endif
++#if CONFIG_FM && CONFIG_BEEP
++	fm_permit_poll(sm, now_ms);
+ #endif
+ 	// The reference trim changed (RREQ_RETUNE): one tune once it has held still, so stepping it drops a reception once,
+ 	// not at every step. It waits for an APRS job; while transmitting or a hotspot, for the end of it
+diff --git a/core/radio/radio_sm.h b/core/radio/radio_sm.h
+index 6d81578..d567151 100644
+--- a/core/radio/radio_sm.h
++++ b/core/radio/radio_sm.h
+@@ -302,6 +302,9 @@ typedef struct {
+ 	bool vol_hold;			// RREQ_VOLUME_HOLD: the level stays, the knob is ignored
+ 
+ 	bool ptt;			// PTT held
++#if CONFIG_FM && CONFIG_BEEP
++	uint32_t fm_permit_ms;	// PTT is held while the local FM talk-permit tone plays
++#endif
+ 	bool host_audio;		// this PTT is a host audio session's (USRP): its audio, not the microphone
+ 	uint32_t host_pushes;		// the host's audio pushes last seen, and when they last moved (the watchdog)
+ 	uint32_t host_push_ms;
+diff --git a/core/settings/settings.c b/core/settings/settings.c
+index f14138a..98f1105 100644
+--- a/core/settings/settings.c
++++ b/core/settings/settings.c
+@@ -29,7 +29,7 @@ _Static_assert(SETTINGS_PAGES <= SETTINGS_PAGES_MAX, "settings_t outgrew its pag
+ _Static_assert(sizeof(settings_t) % 4 == 0, "settings_t has tail padding");
+ _Static_assert(offsetof(settings_t, dual_b) == SETTINGS_PAGE_BYTES, "page 1 starts at its first field");
+ _Static_assert(offsetof(settings_t, ref_trim_ppb) % 2 == 0, "ref_trim_ppb is aligned");
+-_Static_assert(sizeof(settings_t) == 416, "settings_t changed size: update docs/spec/settings-store.md 3 and this");
++_Static_assert(sizeof(settings_t) == 428, "settings_t changed size: update docs/spec/settings-store.md 3 and this");
+ 
+ static settings_t live;			// under the quick lock
+ static settings_t saved;		// what the newest record holds (or the defaults)
+diff --git a/core/settings/settings.h b/core/settings/settings.h
+index cfbf611..553c15b 100644
+--- a/core/settings/settings.h
++++ b/core/settings/settings.h
+@@ -255,6 +255,10 @@ typedef struct {
+ 	// Zone scan's independent empty-channel dwell, in 25 ms units (25-500 ms). 0 or the old 50 ms default = 25 ms now
+ 	uint8_t zone_scan_dwell_25ms;	// was reserved_vfo
+ 	uint8_t home_name_first;	// 1: emphasize the memory channel name in Pink Home
++	uint8_t rs_led_mode;		// radio_led_mode_t; 0 keeps the original indicators
++	uint32_t rs_scan_lo_hz, rs_scan_hi_hz;	// 0 = no saved bounds
++	uint8_t rs_permit_style;		// radio_permit_style_t; 0 = by mode
++	uint8_t reserved_ui[3];
+ } settings_t;
+ 
+ // Pages: settings_t is stored as records of SETTINGS_PAGE_BYTES each (settings-store.md 2.1). Only the pages its size
+diff --git a/core/ui/lang/es.po b/core/ui/lang/es.po
+index d256c02..8018466 100644
+--- a/core/ui/lang/es.po
++++ b/core/ui/lang/es.po
+@@ -372,11 +372,21 @@ msgctxt "QUICK_TOAST_CANT_TX_THERE"
+ msgid "Can't transmit there"
+ msgstr "No se puede transmitir ahí"
+ 
++#: core/ui/ui_app.c core/ui/ui_menus.c
++msgctxt "WHY_NOT_IN_BUILD"
++msgid "Not in this build"
++msgstr "No incluido en esta versión"
++
+ #: core/ui/ui_app.c
+ msgctxt "WHY_COLOR_CODE_NOT_IN_BUILD"
+ msgid "Color code: not in this build"
+ msgstr "Código color: no disponible"
+ 
++#: core/ui/ui_app.c core/ui/ui_menus.c
++msgctxt "CHAN_TOAST_NAC_REPEATER"
++msgid "F7F is for repeaters"
++msgstr "F7F es para repetidores"
++
+ #: core/ui/ui_app.c
+ msgctxt "QUICK_WHY_FM_ONLY_DMR_CHANNEL"
+ msgid "FM only: this is a DMR channel"
+@@ -397,11 +407,6 @@ msgctxt "QUICK_WHY_FM_ONLY_YSF_CHANNEL"
+ msgid "FM only: this is YSF"
+ msgstr "Solo FM: es YSF"
+ 
+-#: core/ui/ui_app.c core/ui/ui_menus.c
+-msgctxt "WHY_NOT_IN_BUILD"
+-msgid "Not in this build"
+-msgstr "No incluido en esta versión"
+-
+ #: core/ui/ui_app.c core/ui/ui_menus.c
+ msgctxt "WHY_PRIVACY_NOT_IN_BUILD"
+ msgid "Privacy: not in this build"
+@@ -432,6 +437,11 @@ msgctxt "QUICK_TOAST_TONE_KEYS"
+ msgid "Up/Dn tone  # TX/RX"
+ msgstr "Arr/Ab tono  # TX/RX"
+ 
++#: core/ui/ui_app.c core/ui/ui_menus.c
++msgctxt "CHAN_TOAST_NO_AES_KEY"
++msgid "Load AES-256 keys with the CPS"
++msgstr "Carga las claves AES-256 en el CPS"
++
+ #: core/ui/ui_app.c
+ msgctxt "QUICK_WHY_AM_ONLY_AIR_BAND"
+ msgid "AM only in the air band"
+@@ -442,6 +452,21 @@ msgctxt "QUICK_WHY_FM_ONLY_BROADCAST"
+ msgid "FM only in the broadcast band"
+ msgstr "Solo FM en banda comercial"
+ 
++#: core/ui/ui_app.c
++msgctxt "QUICK_TOAST_TRUNK_ALL"
++msgid "Trunk: every group"
++msgstr "Troncal: todos los grupos"
++
++#: core/ui/ui_app.c
++msgctxt "QUICK_TOAST_TRUNK_GROUP"
++msgid "Trunk: this group"
++msgstr "Troncal: este grupo"
++
++#: core/ui/ui_app.c
++msgctxt "QUICK_TOAST_TRUNK_OFF"
++msgid "Trunk off"
++msgstr "Troncal apagado"
++
+ #: core/ui/ui_app.c
+ msgctxt "QUICK_TOAST_VOX_OFF"
+ msgid "VOX off"
+@@ -1317,6 +1342,11 @@ msgctxt "WORD_GRID"
+ msgid "Grid"
+ msgstr "Cuadrícula"
+ 
++#: core/ui/ui_gps.c
++msgctxt "GPS_TITLE_CLOCK"
++msgid "Clock"
++msgstr "Reloj"
++
+ #: core/ui/ui_gps.c
+ msgctxt "GPS_VALUE_GOOD"
+ msgid " good"
+@@ -1357,6 +1387,16 @@ msgctxt "GPS_STATE_NO_SIGNAL"
+ msgid "No signal"
+ msgstr "Sin señal"
+ 
++#: core/ui/ui_gps.c
++msgctxt "GPS_LABEL_LAT"
++msgid "Lat"
++msgstr "Lat"
++
++#: core/ui/ui_gps.c
++msgctxt "GPS_LABEL_LON"
++msgid "Lon"
++msgstr "Lon"
++
+ #: core/ui/ui_gps.c
+ msgctxt "GPS_BODY_USED"
+ msgid " used, "
+@@ -1372,16 +1412,6 @@ msgctxt "GPS_LABEL_SATS"
+ msgid "Sats"
+ msgstr "Sats"
+ 
+-#: core/ui/ui_gps.c
+-msgctxt "GPS_LABEL_LAT"
+-msgid "Lat"
+-msgstr "Lat"
+-
+-#: core/ui/ui_gps.c
+-msgctxt "GPS_LABEL_LON"
+-msgid "Lon"
+-msgstr "Lon"
+-
+ #: core/ui/ui_gps.c
+ msgctxt "GPS_LABEL_ALT"
+ msgid "Alt"
+@@ -1397,7 +1427,7 @@ msgctxt "GPS_EMPTY_NO_SATELLITES"
+ msgid "No satellites yet"
+ msgstr "Aún sin satélites"
+ 
+-#: core/ui/ui_gps.c core/ui/ui_menus.c core/ui/ui_screens.c
++#: core/ui/ui_gps.c core/ui/ui_menus.c
+ msgctxt "PART_OF"
+ msgid " of "
+ msgstr " de "
+@@ -1412,6 +1442,11 @@ msgctxt "GPS_EMPTY_NO_FIX"
+ msgid "No fix yet"
+ msgstr "Aún sin fijación"
+ 
++#: core/ui/ui_gps.c
++msgctxt "GPS_LABEL_DATE"
++msgid "Date"
++msgstr "Fecha"
++
+ #: core/ui/ui_gps.c
+ msgctxt "GPS_WHY_NO_GPS_OR_OFF"
+ msgid "No GPS, or it is off"
+@@ -2097,6 +2132,11 @@ msgctxt "CHAN_LABEL_DEST"
+ msgid "Destination"
+ msgstr "Destino"
+ 
++#: core/ui/ui_menus.c
++msgctxt "CHAN_LABEL_TRUNK"
++msgid "Trunk"
++msgstr "Troncal"
++
+ #: core/ui/ui_menus.c core/ui/ui_screens.c
+ msgctxt "WORD_RX_ONLY"
+ msgid "RX only"
+@@ -2122,16 +2162,6 @@ msgctxt "WORD_TONE_BURST"
+ msgid "Tone burst"
+ msgstr "Ráfaga de tono"
+ 
+-#: core/ui/ui_menus.c
+-msgctxt "CHAN_LABEL_DECODE_IDS"
+-msgid "Decode IDs"
+-msgstr "Decodificar ID"
+-
+-#: core/ui/ui_menus.c
+-msgctxt "ACTIVITY_BODY_LAST_ID"
+-msgid "Last ID "
+-msgstr "Último ID "
+-
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_LABEL_ID_TYPE"
+ msgid "ID type"
+@@ -2143,19 +2173,14 @@ msgid "Send ID"
+ msgstr "Enviar ID"
+ 
+ #: core/ui/ui_menus.c
+-msgctxt "VALUE_AT_START"
+-msgid "At start"
+-msgstr "Al inicio"
+-
+-#: core/ui/ui_menus.c
+-msgctxt "VALUE_AT_END"
+-msgid "At end"
+-msgstr "Al final"
++msgctxt "CHAN_LABEL_OWN_ID"
++msgid "Own ID"
++msgstr "ID propio"
+ 
+ #: core/ui/ui_menus.c
+-msgctxt "VALUE_START_AND_END"
+-msgid "Start and end"
+-msgstr "Inicio y final"
++msgctxt "CHAN_LABEL_DECODE_IDS"
++msgid "Decode IDs"
++msgstr "Decodificar ID"
+ 
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_LABEL_COLOR_CODE"
+@@ -2177,11 +2202,6 @@ msgctxt "CHAN_LABEL_RX_GROUP_LIST"
+ msgid "RX group list"
+ msgstr "Lista grupos RX"
+ 
+-#: core/ui/ui_menus.c
+-msgctxt "CHAN_LABEL_OWN_ID"
+-msgid "Own ID"
+-msgstr "ID propio"
+-
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_LABEL_DIRECT_MODE"
+ msgid "Direct mode"
+@@ -2217,6 +2237,21 @@ msgctxt "LABEL_BATTERY_SAVER"
+ msgid "Battery saver"
+ msgstr "Ahorro batería"
+ 
++#: core/ui/ui_menus.c
++msgctxt "CHAN_LABEL_DMR_PRIVACY"
++msgid "Privacy"
++msgstr ""
++
++#: core/ui/ui_menus.c
++msgctxt "CHAN_LABEL_DMR_KEY"
++msgid "Key ID"
++msgstr ""
++
++#: core/ui/ui_menus.c
++msgctxt "CHAN_LABEL_AES_KEY"
++msgid "AES-256 key"
++msgstr "Clave AES-256"
++
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_ROW_TUNE_TO"
+ msgid "Tune to this ch"
+@@ -2242,6 +2277,16 @@ msgctxt "CHAN_LABEL_DATA_TYPE"
+ msgid "Data type"
+ msgstr "Tipo de datos"
+ 
++#: core/ui/ui_menus.c
++msgctxt "CHAN_VALUE_TRUNK_ALL"
++msgid "All groups"
++msgstr "Todos los grupos"
++
++#: core/ui/ui_menus.c
++msgctxt "CHAN_VALUE_TRUNK_GROUP"
++msgid "Group"
++msgstr "Grupo"
++
+ #: core/ui/ui_menus.c
+ msgctxt "VALUE_YES"
+ msgid "Yes"
+@@ -2252,6 +2297,21 @@ msgctxt "VALUE_NO"
+ msgid "No"
+ msgstr "No"
+ 
++#: core/ui/ui_menus.c
++msgctxt "VALUE_AT_START"
++msgid "At start"
++msgstr "Al inicio"
++
++#: core/ui/ui_menus.c
++msgctxt "VALUE_AT_END"
++msgid "At end"
++msgstr "Al final"
++
++#: core/ui/ui_menus.c
++msgctxt "VALUE_START_AND_END"
++msgid "Start and end"
++msgstr "Inicio y final"
++
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_VALUE_SCAN_SKIPPED"
+ msgid "Skipped"
+@@ -2312,11 +2372,6 @@ msgctxt "CHAN_TOAST_DCS_DIGITS"
+ msgid "DCS codes use digits 0-7"
+ msgstr "Códigos DCS: dígitos 0-7"
+ 
+-#: core/ui/ui_menus.c
+-msgctxt "CHAN_TOAST_NAC_REPEATER"
+-msgid "F7F is for repeaters"
+-msgstr "F7F es para repetidores"
+-
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_TOAST_NXDN_ID_MAX"
+ msgid "NXDN IDs go up to 65519"
+@@ -2952,6 +3007,11 @@ msgctxt "VALUE_NOT_SET"
+ msgid "Not set"
+ msgstr "Sin definir"
+ 
++#: core/ui/ui_menus.c
++msgctxt "MYID_LABEL_SPLASH_PREVIEW"
++msgid "Preview splash"
++msgstr "Vista previa del inicio"
++
+ #: core/ui/ui_menus.c
+ msgctxt "MYID_LABEL_RADIO_NAME"
+ msgid "Radio name"
+@@ -2967,11 +3027,6 @@ msgctxt "MYID_LABEL_BOOT_2"
+ msgid "Boot 2"
+ msgstr "Inicio 2"
+ 
+-#: core/ui/ui_menus.c
+-msgctxt "MYID_LABEL_SPLASH_PREVIEW"
+-msgid "Preview splash"
+-msgstr "Vista previa del inicio"
+-
+ #: core/ui/ui_menus.c
+ msgctxt "BODY_SAVED_IN_CODEPLUG"
+ msgid "Saved in the codeplug"
+@@ -3467,6 +3522,26 @@ msgctxt "TOOLS_ROW_SHARES_RECEIVED"
+ msgid "Zones/Chs Received"
+ msgstr "Zonas/Can recibidos"
+ 
++#: core/ui/ui_menus.c
++msgctxt "TOOLS_ROW_ZONE_SCAN_SPEED"
++msgid "Zone scan speed"
++msgstr ""
++
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_RX_PAST_BANDS"
++msgid "RX past bands"
++msgstr "RX fuera de banda"
++
++#: core/ui/ui_menus.c
++msgctxt "TOOLS_ROW_SCAN_LOW"
++msgid "Scan low"
++msgstr "Límite inferior"
++
++#: core/ui/ui_menus.c
++msgctxt "TOOLS_ROW_SCAN_HIGH"
++msgid "Scan high"
++msgstr "Límite superior"
++
+ #: core/ui/ui_menus.c
+ msgctxt "WORD_DUAL_WATCH"
+ msgid "Dual watch"
+@@ -3527,7 +3602,7 @@ msgctxt "SET_VALUE_THEME_HIGH_CONTRAST"
+ msgid "High contrast"
+ msgstr "Alto contraste"
+ 
+-#: core/ui/ui_menus.c
++#: core/ui/ui_menus.c core/ui/ui_screens.c
+ msgctxt "VALUE_DEFAULT"
+ msgid "Default"
+ msgstr "Predet."
+@@ -3672,6 +3747,21 @@ msgctxt "SET_VALUE_SFR_RX_DUAL_PATH"
+ msgid "Dual-path RX"
+ msgstr "RX doble vía"
+ 
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_EMPTY_CHANNEL_DWELL"
++msgid "Empty-channel dwell"
++msgstr ""
++
++#: core/ui/ui_menus.c
++msgctxt "SET_VALUE_PERMIT_CHIRP"
++msgid "Chirp"
++msgstr "Chirrido"
++
++#: core/ui/ui_menus.c
++msgctxt "SET_VALUE_PERMIT_TRIPLE"
++msgid "Triple beep"
++msgstr "Triple pitido"
++
+ #: core/ui/ui_menus.c core/ui/ui_screens.c
+ msgctxt "TITLE_VOLUME"
+ msgid "Volume"
+@@ -3737,6 +3827,21 @@ msgctxt "SET_LABEL_VIBRATE"
+ msgid "Vibrate"
+ msgstr "Vibrar"
+ 
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_TALK_PERMIT_SOUND"
++msgid "Talk permit sound"
++msgstr "Sonido de permiso"
++
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_ROGER_BEEP"
++msgid "FM roger beep"
++msgstr "Pitido final FM"
++
++#: core/ui/ui_menus.c
++msgctxt "SET_VALUE_SCAN_AMBER"
++msgid "Scan amber"
++msgstr "Ámbar al escanear"
++
+ #: core/ui/ui_menus.c
+ msgctxt "SET_LABEL_BRIGHTNESS"
+ msgid "Brightness"
+@@ -3782,6 +3887,11 @@ msgctxt "SET_LABEL_LARGE_CHANNEL_NAME"
+ msgid "Large channel name"
+ msgstr "Nombre de canal grande"
+ 
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_STATUS_LEDS"
++msgid "Status LEDs"
++msgstr "LED de estado"
++
+ #: core/ui/ui_menus.c
+ msgctxt "SET_LABEL_LANGUAGE"
+ msgid "Language"
+@@ -4012,11 +4122,6 @@ msgctxt "SET_ROW_CRASH_LOG"
+ msgid "Crash log"
+ msgstr "Log de fallos"
+ 
+-#: core/ui/ui_menus.c
+-msgctxt "SET_LABEL_RX_PAST_BANDS"
+-msgid "RX past bands"
+-msgstr "RX fuera de banda"
+-
+ #: core/ui/ui_menus.c
+ msgctxt "SET_ROW_FREQ_TRIM"
+ msgid "Freq trim"
+@@ -4437,6 +4542,11 @@ msgctxt "HOME_CHIP_BROADCAST_FM"
+ msgid "Broadcast FM"
+ msgstr "FM comercial"
+ 
++#: core/ui/ui_screens.c
++msgctxt "HOME_CHIP_CPU_SLOW"
++msgid "CPU slow"
++msgstr "CPU insuficiente"
++
+ #: core/ui/ui_screens.c
+ msgctxt "HW_BODY_RESTART_TO_APPLY"
+ msgid "Restart to apply"
+@@ -4547,11 +4657,6 @@ msgctxt "DENY_WHY_CPU"
+ msgid "CPU too slow for voice"
+ msgstr "CPU insuficiente para voz"
+ 
+-#: core/ui/ui_screens.c
+-msgctxt "HOME_CHIP_CPU_SLOW"
+-msgid "CPU slow"
+-msgstr "CPU insuficiente"
+-
+ #: core/ui/ui_screens.c
+ msgctxt "DENY_WHY_P25T_NO_CC"
+ msgid "No control channel"
+@@ -4732,56 +4837,6 @@ msgctxt "HOME_CHIP_PRIVACY"
+ msgid "Priv"
+ msgstr "Priv"
+ 
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_BODY_PRIVATE_ID"
+-msgid "Private "
+-msgstr "Privada "
+-
+-#: core/ui/ui_screens.c
+-msgctxt "STATE_TALKING"
+-msgid "TALKING"
+-msgstr "HABLANDO"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_STATE_WAKING_RPT"
+-msgid "WAKING RPT"
+-msgstr "DESPER RPT"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_STATE_WAITING"
+-msgid "WAITING"
+-msgstr "ESPERA"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_STATE_ADMITTED"
+-msgid "ADMITTED"
+-msgstr "ADMITIDO"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_STATE_ENDING"
+-msgid "ENDING"
+-msgstr "CERRANDO"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_BODY_TO_PRIVATE"
+-msgid " Private"
+-msgstr " Privada"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_BODY_TO_GROUP"
+-msgid " Group"
+-msgstr " Grupo"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_HINT_FINISHING"
+-msgid "Finishing the call"
+-msgstr "Terminando la llamada"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_HINT_RELEASE_PTT"
+-msgid "Release PTT to stop"
+-msgstr "Suelta PTT para parar"
+-
+ #: core/ui/ui_screens.c
+ msgctxt "CALL_CHIP_LATE"
+ msgid " late"
+@@ -4822,6 +4877,11 @@ msgctxt "STATE_SENDING"
+ msgid "SENDING"
+ msgstr "ENVIANDO"
+ 
++#: core/ui/ui_screens.c
++msgctxt "STATE_TALKING"
++msgid "TALKING"
++msgstr "HABLANDO"
++
+ #: core/ui/ui_screens.c
+ msgctxt "ACTIVITY_BODY_LEFT_OF"
+ msgid " left of "
+@@ -4842,6 +4902,11 @@ msgctxt "ACTIVITY_BODY_TX_WAITS"
+ msgid "Transmit waits for it"
+ msgstr "Sin TX hasta entonces"
+ 
++#: core/ui/ui_screens.c
++msgctxt "ACTIVITY_BODY_LAST_ID"
++msgid "Last ID "
++msgstr "Último ID "
++
+ #: core/ui/ui_screens.c
+ msgctxt "ACTIVITY_BODY_LAST"
+ msgid "Last activity "
+@@ -4892,6 +4957,46 @@ msgctxt "HOME_HINT_VFO"
+ msgid "0-9 freq  * Quick  Up/Dn"
+ msgstr "0-9 frec  * Rápido  Arr/Ab"
+ 
++#: core/ui/ui_screens.c
++msgctxt "CALL_HINT_RELEASE_PTT"
++msgid "Release PTT to stop"
++msgstr "Suelta PTT para parar"
++
++#: core/ui/ui_screens.c
++msgctxt "CALL_STATE_WAKING_RPT"
++msgid "WAKING RPT"
++msgstr "DESPER RPT"
++
++#: core/ui/ui_screens.c
++msgctxt "CALL_STATE_WAITING"
++msgid "WAITING"
++msgstr "ESPERA"
++
++#: core/ui/ui_screens.c
++msgctxt "CALL_STATE_ADMITTED"
++msgid "ADMITTED"
++msgstr "ADMITIDO"
++
++#: core/ui/ui_screens.c
++msgctxt "CALL_STATE_ENDING"
++msgid "ENDING"
++msgstr "CERRANDO"
++
++#: core/ui/ui_screens.c
++msgctxt "CALL_HINT_FINISHING"
++msgid "Finishing the call"
++msgstr "Terminando la llamada"
++
++#: core/ui/ui_screens.c
++msgctxt "CALL_BODY_PRIVATE_ID"
++msgid "Private "
++msgstr "Privada "
++
++#: core/ui/ui_screens.c
++msgctxt "CALL_BODY_TO_GROUP"
++msgid " Group"
++msgstr " Grupo"
++
+ #: core/ui/ui_screens.c
+ msgctxt "DUAL_BODY_HEARD"
+ msgid "Heard "
+@@ -5102,6 +5207,21 @@ msgctxt "QUICK_LABEL_TX_FREQ"
+ msgid "{TX freq|TXFreq}"
+ msgstr "{Frec TX|FrecTX}"
+ 
++#: core/ui/ui_screens.c
++msgctxt "QUICK_LABEL_CODE"
++msgid "Code"
++msgstr ""
++
++#: core/ui/ui_screens.c
++msgctxt "QUICK_LABEL_DEST"
++msgid "{Destination|Dest}"
++msgstr ""
++
++#: core/ui/ui_screens.c
++msgctxt "QUICK_LABEL_TRUNK"
++msgid "Trunk"
++msgstr "Tronc"
++
+ #: core/ui/ui_screens.c
+ msgctxt "QUICK_LABEL_TONE_TX"
+ msgid "Tone TX"
+@@ -5122,6 +5242,11 @@ msgctxt "QUICK_VALUE_ALL"
+ msgid "All"
+ msgstr "Todos"
+ 
++#: core/ui/ui_screens.c
++msgctxt "QUICK_VALUE_TRUNK_GROUP"
++msgid "Grp"
++msgstr "Grp"
++
+ #: core/ui/ui_screens.c
+ msgctxt "QUICK_HINT_SPLIT"
+ msgid "{Up/Dn: +/- offset  Type: TX freq|Up/Dn +/- offset  0-9 TX freq|Up/Dn offset  0-9 TX freq|Up/Dn +/-  0-9 TX freq}"
+@@ -5162,6 +5287,11 @@ msgctxt "STORE_ERR_CHANNEL_READ"
+ msgid "Couldn't read the channel: not saved"
+ msgstr "Error al leer el canal: no guardado"
+ 
++#: core/ui/ui_svc_storage.c
++msgctxt "STORE_ERR_TARGET_NOT_STORED"
++msgid "Not a stored contact: for now only"
++msgstr "Contacto no guardado: solo por ahora"
++
+ #: core/ui/ui_svc_storage.c
+ msgctxt "STORE_ERR_ZONE_FULL"
+ msgid "Zone full: not saved"
+@@ -5192,11 +5322,6 @@ msgctxt "STORE_ERR_TARGET_CHANNEL_READ"
+ msgid "Couldn't read the channel: for now only"
+ msgstr "Error al leer el canal: solo por ahora"
+ 
+-#: core/ui/ui_svc_storage.c
+-msgctxt "STORE_ERR_TARGET_NOT_STORED"
+-msgid "Not a stored contact: for now only"
+-msgstr "Contacto no guardado: solo por ahora"
+-
+ #: core/ui/ui_svc_storage.c
+ msgctxt "STORE_ERR_TARGET_NOT_WRITTEN"
+ msgid "Codeplug not written: for now only"
+@@ -5241,49 +5366,3 @@ msgstr "Zona no legible por esta radio"
+ msgctxt "SHARE_ERR_OFFER_GONE"
+ msgid "The offer is gone"
+ msgstr "La oferta ya no existe"
+-
+-msgid "AES-256 key"
+-msgstr "Clave AES-256"
+-
+-msgid "Load AES-256 keys with the CPS"
+-msgstr "Carga las claves AES-256 en el CPS"
+-
+-#: core/ui/ui_menus.c
+-msgctxt "CHAN_LABEL_TRUNK"
+-msgid "Trunk"
+-msgstr "Troncal"
+-
+-#: core/ui/ui_menus.c
+-msgctxt "CHAN_VALUE_TRUNK_ALL"
+-msgid "All groups"
+-msgstr "Todos los grupos"
+-
+-#: core/ui/ui_menus.c
+-msgctxt "CHAN_VALUE_TRUNK_GROUP"
+-msgid "Group"
+-msgstr "Grupo"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "QUICK_LABEL_TRUNK"
+-msgid "Trunk"
+-msgstr "Tronc"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "QUICK_VALUE_TRUNK_GROUP"
+-msgid "Grp"
+-msgstr "Grp"
+-
+-#: core/ui/ui_app.c
+-msgctxt "QUICK_TOAST_TRUNK_ALL"
+-msgid "Trunk: every group"
+-msgstr "Troncal: todos los grupos"
+-
+-#: core/ui/ui_app.c
+-msgctxt "QUICK_TOAST_TRUNK_GROUP"
+-msgid "Trunk: this group"
+-msgstr "Troncal: este grupo"
+-
+-#: core/ui/ui_app.c
+-msgctxt "QUICK_TOAST_TRUNK_OFF"
+-msgid "Trunk off"
+-msgstr "Troncal apagado"
+diff --git a/core/ui/lang/fr.po b/core/ui/lang/fr.po
+index 6d8a6fc..eec664b 100644
+--- a/core/ui/lang/fr.po
++++ b/core/ui/lang/fr.po
+@@ -372,11 +372,21 @@ msgctxt "QUICK_TOAST_CANT_TX_THERE"
+ msgid "Can't transmit there"
+ msgstr "Émission impossible"
+ 
++#: core/ui/ui_app.c core/ui/ui_menus.c
++msgctxt "WHY_NOT_IN_BUILD"
++msgid "Not in this build"
++msgstr "Non disponible"
++
+ #: core/ui/ui_app.c
+ msgctxt "WHY_COLOR_CODE_NOT_IN_BUILD"
+ msgid "Color code: not in this build"
+ msgstr "Code coul indispo."
+ 
++#: core/ui/ui_app.c core/ui/ui_menus.c
++msgctxt "CHAN_TOAST_NAC_REPEATER"
++msgid "F7F is for repeaters"
++msgstr "F7F: pour relais"
++
+ #: core/ui/ui_app.c
+ msgctxt "QUICK_WHY_FM_ONLY_DMR_CHANNEL"
+ msgid "FM only: this is a DMR channel"
+@@ -397,11 +407,6 @@ msgctxt "QUICK_WHY_FM_ONLY_YSF_CHANNEL"
+ msgid "FM only: this is YSF"
+ msgstr "FM seul: canal YSF"
+ 
+-#: core/ui/ui_app.c core/ui/ui_menus.c
+-msgctxt "WHY_NOT_IN_BUILD"
+-msgid "Not in this build"
+-msgstr "Non disponible"
+-
+ #: core/ui/ui_app.c core/ui/ui_menus.c
+ msgctxt "WHY_PRIVACY_NOT_IN_BUILD"
+ msgid "Privacy: not in this build"
+@@ -432,6 +437,11 @@ msgctxt "QUICK_TOAST_TONE_KEYS"
+ msgid "Up/Dn tone  # TX/RX"
+ msgstr "Haut/Bas ton  # TX/RX"
+ 
++#: core/ui/ui_app.c core/ui/ui_menus.c
++msgctxt "CHAN_TOAST_NO_AES_KEY"
++msgid "Load AES-256 keys with the CPS"
++msgstr ""
++
+ #: core/ui/ui_app.c
+ msgctxt "QUICK_WHY_AM_ONLY_AIR_BAND"
+ msgid "AM only in the air band"
+@@ -442,6 +452,21 @@ msgctxt "QUICK_WHY_FM_ONLY_BROADCAST"
+ msgid "FM only in the broadcast band"
+ msgstr "FM seule (Radio FM)"
+ 
++#: core/ui/ui_app.c
++msgctxt "QUICK_TOAST_TRUNK_ALL"
++msgid "Trunk: every group"
++msgstr "Trunk : tous les groupes"
++
++#: core/ui/ui_app.c
++msgctxt "QUICK_TOAST_TRUNK_GROUP"
++msgid "Trunk: this group"
++msgstr "Trunk : ce groupe"
++
++#: core/ui/ui_app.c
++msgctxt "QUICK_TOAST_TRUNK_OFF"
++msgid "Trunk off"
++msgstr "Trunk désactivé"
++
+ #: core/ui/ui_app.c
+ msgctxt "QUICK_TOAST_VOX_OFF"
+ msgid "VOX off"
+@@ -1317,6 +1342,11 @@ msgctxt "WORD_GRID"
+ msgid "Grid"
+ msgstr "Grille"
+ 
++#: core/ui/ui_gps.c
++msgctxt "GPS_TITLE_CLOCK"
++msgid "Clock"
++msgstr "Horloge"
++
+ #: core/ui/ui_gps.c
+ msgctxt "GPS_VALUE_GOOD"
+ msgid " good"
+@@ -1357,6 +1387,16 @@ msgctxt "GPS_STATE_NO_SIGNAL"
+ msgid "No signal"
+ msgstr "Aucun signal"
+ 
++#: core/ui/ui_gps.c
++msgctxt "GPS_LABEL_LAT"
++msgid "Lat"
++msgstr "Lat"
++
++#: core/ui/ui_gps.c
++msgctxt "GPS_LABEL_LON"
++msgid "Lon"
++msgstr "Lon"
++
+ #: core/ui/ui_gps.c
+ msgctxt "GPS_BODY_USED"
+ msgid " used, "
+@@ -1372,16 +1412,6 @@ msgctxt "GPS_LABEL_SATS"
+ msgid "Sats"
+ msgstr "Sats"
+ 
+-#: core/ui/ui_gps.c
+-msgctxt "GPS_LABEL_LAT"
+-msgid "Lat"
+-msgstr "Lat"
+-
+-#: core/ui/ui_gps.c
+-msgctxt "GPS_LABEL_LON"
+-msgid "Lon"
+-msgstr "Lon"
+-
+ #: core/ui/ui_gps.c
+ msgctxt "GPS_LABEL_ALT"
+ msgid "Alt"
+@@ -1397,7 +1427,7 @@ msgctxt "GPS_EMPTY_NO_SATELLITES"
+ msgid "No satellites yet"
+ msgstr "Aucun satellite"
+ 
+-#: core/ui/ui_gps.c core/ui/ui_menus.c core/ui/ui_screens.c
++#: core/ui/ui_gps.c core/ui/ui_menus.c
+ msgctxt "PART_OF"
+ msgid " of "
+ msgstr " sur "
+@@ -1412,6 +1442,11 @@ msgctxt "GPS_EMPTY_NO_FIX"
+ msgid "No fix yet"
+ msgstr "Pas de fix"
+ 
++#: core/ui/ui_gps.c
++msgctxt "GPS_LABEL_DATE"
++msgid "Date"
++msgstr "Date"
++
+ #: core/ui/ui_gps.c
+ msgctxt "GPS_WHY_NO_GPS_OR_OFF"
+ msgid "No GPS, or it is off"
+@@ -2097,6 +2132,11 @@ msgctxt "CHAN_LABEL_DEST"
+ msgid "Destination"
+ msgstr "Destination"
+ 
++#: core/ui/ui_menus.c
++msgctxt "CHAN_LABEL_TRUNK"
++msgid "Trunk"
++msgstr "Trunking"
++
+ #: core/ui/ui_menus.c core/ui/ui_screens.c
+ msgctxt "WORD_RX_ONLY"
+ msgid "RX only"
+@@ -2122,16 +2162,6 @@ msgctxt "WORD_TONE_BURST"
+ msgid "Tone burst"
+ msgstr "Tonalité d'appel"
+ 
+-#: core/ui/ui_menus.c
+-msgctxt "CHAN_LABEL_DECODE_IDS"
+-msgid "Decode IDs"
+-msgstr "Décoder les ID"
+-
+-#: core/ui/ui_menus.c
+-msgctxt "ACTIVITY_BODY_LAST_ID"
+-msgid "Last ID "
+-msgstr "Dernier ID "
+-
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_LABEL_ID_TYPE"
+ msgid "ID type"
+@@ -2143,19 +2173,14 @@ msgid "Send ID"
+ msgstr "Envoyer l'ID"
+ 
+ #: core/ui/ui_menus.c
+-msgctxt "VALUE_AT_START"
+-msgid "At start"
+-msgstr "Au début"
+-
+-#: core/ui/ui_menus.c
+-msgctxt "VALUE_AT_END"
+-msgid "At end"
+-msgstr "À la fin"
++msgctxt "CHAN_LABEL_OWN_ID"
++msgid "Own ID"
++msgstr "ID propre"
+ 
+ #: core/ui/ui_menus.c
+-msgctxt "VALUE_START_AND_END"
+-msgid "Start and end"
+-msgstr "Début et fin"
++msgctxt "CHAN_LABEL_DECODE_IDS"
++msgid "Decode IDs"
++msgstr "Décoder les ID"
+ 
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_LABEL_COLOR_CODE"
+@@ -2177,11 +2202,6 @@ msgctxt "CHAN_LABEL_RX_GROUP_LIST"
+ msgid "RX group list"
+ msgstr "Groupes RX"
+ 
+-#: core/ui/ui_menus.c
+-msgctxt "CHAN_LABEL_OWN_ID"
+-msgid "Own ID"
+-msgstr "ID propre"
+-
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_LABEL_DIRECT_MODE"
+ msgid "Direct mode"
+@@ -2217,6 +2237,21 @@ msgctxt "LABEL_BATTERY_SAVER"
+ msgid "Battery saver"
+ msgstr "Écono. batterie"
+ 
++#: core/ui/ui_menus.c
++msgctxt "CHAN_LABEL_DMR_PRIVACY"
++msgid "Privacy"
++msgstr ""
++
++#: core/ui/ui_menus.c
++msgctxt "CHAN_LABEL_DMR_KEY"
++msgid "Key ID"
++msgstr ""
++
++#: core/ui/ui_menus.c
++msgctxt "CHAN_LABEL_AES_KEY"
++msgid "AES-256 key"
++msgstr ""
++
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_ROW_TUNE_TO"
+ msgid "Tune to this ch"
+@@ -2242,6 +2277,16 @@ msgctxt "CHAN_LABEL_DATA_TYPE"
+ msgid "Data type"
+ msgstr "Type de données"
+ 
++#: core/ui/ui_menus.c
++msgctxt "CHAN_VALUE_TRUNK_ALL"
++msgid "All groups"
++msgstr "Tous les groupes"
++
++#: core/ui/ui_menus.c
++msgctxt "CHAN_VALUE_TRUNK_GROUP"
++msgid "Group"
++msgstr "Groupe"
++
+ #: core/ui/ui_menus.c
+ msgctxt "VALUE_YES"
+ msgid "Yes"
+@@ -2252,6 +2297,21 @@ msgctxt "VALUE_NO"
+ msgid "No"
+ msgstr "Non"
+ 
++#: core/ui/ui_menus.c
++msgctxt "VALUE_AT_START"
++msgid "At start"
++msgstr "Au début"
++
++#: core/ui/ui_menus.c
++msgctxt "VALUE_AT_END"
++msgid "At end"
++msgstr "À la fin"
++
++#: core/ui/ui_menus.c
++msgctxt "VALUE_START_AND_END"
++msgid "Start and end"
++msgstr "Début et fin"
++
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_VALUE_SCAN_SKIPPED"
+ msgid "Skipped"
+@@ -2312,11 +2372,6 @@ msgctxt "CHAN_TOAST_DCS_DIGITS"
+ msgid "DCS codes use digits 0-7"
+ msgstr "Codes DCS: 0 à 7"
+ 
+-#: core/ui/ui_menus.c
+-msgctxt "CHAN_TOAST_NAC_REPEATER"
+-msgid "F7F is for repeaters"
+-msgstr "F7F: pour relais"
+-
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_TOAST_NXDN_ID_MAX"
+ msgid "NXDN IDs go up to 65519"
+@@ -2952,6 +3007,11 @@ msgctxt "VALUE_NOT_SET"
+ msgid "Not set"
+ msgstr "Non défini"
+ 
++#: core/ui/ui_menus.c
++msgctxt "MYID_LABEL_SPLASH_PREVIEW"
++msgid "Preview splash"
++msgstr "Aperçu du démarrage"
++
+ #: core/ui/ui_menus.c
+ msgctxt "MYID_LABEL_RADIO_NAME"
+ msgid "Radio name"
+@@ -2967,11 +3027,6 @@ msgctxt "MYID_LABEL_BOOT_2"
+ msgid "Boot 2"
+ msgstr "Démarrage 2"
+ 
+-#: core/ui/ui_menus.c
+-msgctxt "MYID_LABEL_SPLASH_PREVIEW"
+-msgid "Preview splash"
+-msgstr "Aperçu du démarrage"
+-
+ #: core/ui/ui_menus.c
+ msgctxt "BODY_SAVED_IN_CODEPLUG"
+ msgid "Saved in the codeplug"
+@@ -3467,6 +3522,26 @@ msgctxt "TOOLS_ROW_SHARES_RECEIVED"
+ msgid "Zones/Chs Received"
+ msgstr "Zones/Canaux reçus"
+ 
++#: core/ui/ui_menus.c
++msgctxt "TOOLS_ROW_ZONE_SCAN_SPEED"
++msgid "Zone scan speed"
++msgstr ""
++
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_RX_PAST_BANDS"
++msgid "RX past bands"
++msgstr "RX hors bandes"
++
++#: core/ui/ui_menus.c
++msgctxt "TOOLS_ROW_SCAN_LOW"
++msgid "Scan low"
++msgstr "Limite basse"
++
++#: core/ui/ui_menus.c
++msgctxt "TOOLS_ROW_SCAN_HIGH"
++msgid "Scan high"
++msgstr "Limite haute"
++
+ #: core/ui/ui_menus.c
+ msgctxt "WORD_DUAL_WATCH"
+ msgid "Dual watch"
+@@ -3527,7 +3602,7 @@ msgctxt "SET_VALUE_THEME_HIGH_CONTRAST"
+ msgid "High contrast"
+ msgstr "Contraste élevé"
+ 
+-#: core/ui/ui_menus.c
++#: core/ui/ui_menus.c core/ui/ui_screens.c
+ msgctxt "VALUE_DEFAULT"
+ msgid "Default"
+ msgstr "Par défaut"
+@@ -3672,6 +3747,21 @@ msgctxt "SET_VALUE_SFR_RX_DUAL_PATH"
+ msgid "Dual-path RX"
+ msgstr "RX double voie"
+ 
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_EMPTY_CHANNEL_DWELL"
++msgid "Empty-channel dwell"
++msgstr ""
++
++#: core/ui/ui_menus.c
++msgctxt "SET_VALUE_PERMIT_CHIRP"
++msgid "Chirp"
++msgstr "Pépiement"
++
++#: core/ui/ui_menus.c
++msgctxt "SET_VALUE_PERMIT_TRIPLE"
++msgid "Triple beep"
++msgstr "Triple bip"
++
+ #: core/ui/ui_menus.c core/ui/ui_screens.c
+ msgctxt "TITLE_VOLUME"
+ msgid "Volume"
+@@ -3737,6 +3827,21 @@ msgctxt "SET_LABEL_VIBRATE"
+ msgid "Vibrate"
+ msgstr "Vibration"
+ 
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_TALK_PERMIT_SOUND"
++msgid "Talk permit sound"
++msgstr "Son accès TX"
++
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_ROGER_BEEP"
++msgid "FM roger beep"
++msgstr "Bip de fin FM"
++
++#: core/ui/ui_menus.c
++msgctxt "SET_VALUE_SCAN_AMBER"
++msgid "Scan amber"
++msgstr "Ambre en balayage"
++
+ #: core/ui/ui_menus.c
+ msgctxt "SET_LABEL_BRIGHTNESS"
+ msgid "Brightness"
+@@ -3782,6 +3887,11 @@ msgctxt "SET_LABEL_LARGE_CHANNEL_NAME"
+ msgid "Large channel name"
+ msgstr "Nom de canal agrandi"
+ 
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_STATUS_LEDS"
++msgid "Status LEDs"
++msgstr "Voyants"
++
+ #: core/ui/ui_menus.c
+ msgctxt "SET_LABEL_LANGUAGE"
+ msgid "Language"
+@@ -4012,11 +4122,6 @@ msgctxt "SET_ROW_CRASH_LOG"
+ msgid "Crash log"
+ msgstr "Journal plantages"
+ 
+-#: core/ui/ui_menus.c
+-msgctxt "SET_LABEL_RX_PAST_BANDS"
+-msgid "RX past bands"
+-msgstr "RX hors bandes"
+-
+ #: core/ui/ui_menus.c
+ msgctxt "SET_ROW_FREQ_TRIM"
+ msgid "Freq trim"
+@@ -4437,6 +4542,11 @@ msgctxt "HOME_CHIP_BROADCAST_FM"
+ msgid "Broadcast FM"
+ msgstr "FM Commerciale"
+ 
++#: core/ui/ui_screens.c
++msgctxt "HOME_CHIP_CPU_SLOW"
++msgid "CPU slow"
++msgstr "CPU trop lent"
++
+ #: core/ui/ui_screens.c
+ msgctxt "HW_BODY_RESTART_TO_APPLY"
+ msgid "Restart to apply"
+@@ -4547,11 +4657,6 @@ msgctxt "DENY_WHY_CPU"
+ msgid "CPU too slow for voice"
+ msgstr "CPU trop lent pour la voix"
+ 
+-#: core/ui/ui_screens.c
+-msgctxt "HOME_CHIP_CPU_SLOW"
+-msgid "CPU slow"
+-msgstr "CPU trop lent"
+-
+ #: core/ui/ui_screens.c
+ msgctxt "DENY_WHY_P25T_NO_CC"
+ msgid "No control channel"
+@@ -4732,56 +4837,6 @@ msgctxt "HOME_CHIP_PRIVACY"
+ msgid "Priv"
+ msgstr "Priv"
+ 
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_BODY_PRIVATE_ID"
+-msgid "Private "
+-msgstr "Privé "
+-
+-#: core/ui/ui_screens.c
+-msgctxt "STATE_TALKING"
+-msgid "TALKING"
+-msgstr "ÉMISSION"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_STATE_WAKING_RPT"
+-msgid "WAKING RPT"
+-msgstr "RÉVEIL RPT"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_STATE_WAITING"
+-msgid "WAITING"
+-msgstr "EN ATTENTE"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_STATE_ADMITTED"
+-msgid "ADMITTED"
+-msgstr "ADMIS"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_STATE_ENDING"
+-msgid "ENDING"
+-msgstr "FIN"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_BODY_TO_PRIVATE"
+-msgid " Private"
+-msgstr " Privé"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_BODY_TO_GROUP"
+-msgid " Group"
+-msgstr " Groupe"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_HINT_FINISHING"
+-msgid "Finishing the call"
+-msgstr "Fin de l'appel"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_HINT_RELEASE_PTT"
+-msgid "Release PTT to stop"
+-msgstr "Relâcher PTT p/ stop"
+-
+ #: core/ui/ui_screens.c
+ msgctxt "CALL_CHIP_LATE"
+ msgid " late"
+@@ -4822,6 +4877,11 @@ msgctxt "STATE_SENDING"
+ msgid "SENDING"
+ msgstr "ÉMISSION"
+ 
++#: core/ui/ui_screens.c
++msgctxt "STATE_TALKING"
++msgid "TALKING"
++msgstr "ÉMISSION"
++
+ #: core/ui/ui_screens.c
+ msgctxt "ACTIVITY_BODY_LEFT_OF"
+ msgid " left of "
+@@ -4842,6 +4902,11 @@ msgctxt "ACTIVITY_BODY_TX_WAITS"
+ msgid "Transmit waits for it"
+ msgstr "Pas de TX avant"
+ 
++#: core/ui/ui_screens.c
++msgctxt "ACTIVITY_BODY_LAST_ID"
++msgid "Last ID "
++msgstr "Dernier ID "
++
+ #: core/ui/ui_screens.c
+ msgctxt "ACTIVITY_BODY_LAST"
+ msgid "Last activity "
+@@ -4892,6 +4957,46 @@ msgctxt "HOME_HINT_VFO"
+ msgid "0-9 freq  * Quick  Up/Dn"
+ msgstr "0-9 frq *Rap Ht/Bas"
+ 
++#: core/ui/ui_screens.c
++msgctxt "CALL_HINT_RELEASE_PTT"
++msgid "Release PTT to stop"
++msgstr "Relâcher PTT p/ stop"
++
++#: core/ui/ui_screens.c
++msgctxt "CALL_STATE_WAKING_RPT"
++msgid "WAKING RPT"
++msgstr "RÉVEIL RPT"
++
++#: core/ui/ui_screens.c
++msgctxt "CALL_STATE_WAITING"
++msgid "WAITING"
++msgstr "EN ATTENTE"
++
++#: core/ui/ui_screens.c
++msgctxt "CALL_STATE_ADMITTED"
++msgid "ADMITTED"
++msgstr "ADMIS"
++
++#: core/ui/ui_screens.c
++msgctxt "CALL_STATE_ENDING"
++msgid "ENDING"
++msgstr "FIN"
++
++#: core/ui/ui_screens.c
++msgctxt "CALL_HINT_FINISHING"
++msgid "Finishing the call"
++msgstr "Fin de l'appel"
++
++#: core/ui/ui_screens.c
++msgctxt "CALL_BODY_PRIVATE_ID"
++msgid "Private "
++msgstr "Privé "
++
++#: core/ui/ui_screens.c
++msgctxt "CALL_BODY_TO_GROUP"
++msgid " Group"
++msgstr " Groupe"
++
+ #: core/ui/ui_screens.c
+ msgctxt "DUAL_BODY_HEARD"
+ msgid "Heard "
+@@ -5102,6 +5207,21 @@ msgctxt "QUICK_LABEL_TX_FREQ"
+ msgid "{TX freq|TXFreq}"
+ msgstr "{Fréq TX|FréqTX}"
+ 
++#: core/ui/ui_screens.c
++msgctxt "QUICK_LABEL_CODE"
++msgid "Code"
++msgstr ""
++
++#: core/ui/ui_screens.c
++msgctxt "QUICK_LABEL_DEST"
++msgid "{Destination|Dest}"
++msgstr ""
++
++#: core/ui/ui_screens.c
++msgctxt "QUICK_LABEL_TRUNK"
++msgid "Trunk"
++msgstr "Trunk"
++
+ #: core/ui/ui_screens.c
+ msgctxt "QUICK_LABEL_TONE_TX"
+ msgid "Tone TX"
+@@ -5122,6 +5242,11 @@ msgctxt "QUICK_VALUE_ALL"
+ msgid "All"
+ msgstr "Tous"
+ 
++#: core/ui/ui_screens.c
++msgctxt "QUICK_VALUE_TRUNK_GROUP"
++msgid "Grp"
++msgstr "Grp"
++
+ #: core/ui/ui_screens.c
+ msgctxt "QUICK_HINT_SPLIT"
+ msgid "{Up/Dn: +/- offset  Type: TX freq|Up/Dn +/- offset  0-9 TX freq|Up/Dn offset  0-9 TX freq|Up/Dn +/-  0-9 TX freq}"
+@@ -5162,6 +5287,11 @@ msgctxt "STORE_ERR_CHANNEL_READ"
+ msgid "Couldn't read the channel: not saved"
+ msgstr "Erreur lect. canal"
+ 
++#: core/ui/ui_svc_storage.c
++msgctxt "STORE_ERR_TARGET_NOT_STORED"
++msgid "Not a stored contact: for now only"
++msgstr "Contact non stocké"
++
+ #: core/ui/ui_svc_storage.c
+ msgctxt "STORE_ERR_ZONE_FULL"
+ msgid "Zone full: not saved"
+@@ -5192,11 +5322,6 @@ msgctxt "STORE_ERR_TARGET_CHANNEL_READ"
+ msgid "Couldn't read the channel: for now only"
+ msgstr "Erreur lecture canal"
+ 
+-#: core/ui/ui_svc_storage.c
+-msgctxt "STORE_ERR_TARGET_NOT_STORED"
+-msgid "Not a stored contact: for now only"
+-msgstr "Contact non stocké"
+-
+ #: core/ui/ui_svc_storage.c
+ msgctxt "STORE_ERR_TARGET_NOT_WRITTEN"
+ msgid "Codeplug not written: for now only"
+@@ -5241,43 +5366,3 @@ msgstr "Zone non lue radio"
+ msgctxt "SHARE_ERR_OFFER_GONE"
+ msgid "The offer is gone"
+ msgstr "L'offre a expiré"
+-
+-#: core/ui/ui_menus.c
+-msgctxt "CHAN_LABEL_TRUNK"
+-msgid "Trunk"
+-msgstr "Trunking"
+-
+-#: core/ui/ui_menus.c
+-msgctxt "CHAN_VALUE_TRUNK_ALL"
+-msgid "All groups"
+-msgstr "Tous les groupes"
+-
+-#: core/ui/ui_menus.c
+-msgctxt "CHAN_VALUE_TRUNK_GROUP"
+-msgid "Group"
+-msgstr "Groupe"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "QUICK_LABEL_TRUNK"
+-msgid "Trunk"
+-msgstr "Trunk"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "QUICK_VALUE_TRUNK_GROUP"
+-msgid "Grp"
+-msgstr "Grp"
+-
+-#: core/ui/ui_app.c
+-msgctxt "QUICK_TOAST_TRUNK_ALL"
+-msgid "Trunk: every group"
+-msgstr "Trunk : tous les groupes"
+-
+-#: core/ui/ui_app.c
+-msgctxt "QUICK_TOAST_TRUNK_GROUP"
+-msgid "Trunk: this group"
+-msgstr "Trunk : ce groupe"
+-
+-#: core/ui/ui_app.c
+-msgctxt "QUICK_TOAST_TRUNK_OFF"
+-msgid "Trunk off"
+-msgstr "Trunk désactivé"
+diff --git a/core/ui/lang/it.po b/core/ui/lang/it.po
+index 6192756..adbbc80 100644
+--- a/core/ui/lang/it.po
++++ b/core/ui/lang/it.po
+@@ -372,11 +372,21 @@ msgctxt "QUICK_TOAST_CANT_TX_THERE"
+ msgid "Can't transmit there"
+ msgstr "Non si può trasmettere lì"
+ 
++#: core/ui/ui_app.c core/ui/ui_menus.c
++msgctxt "WHY_NOT_IN_BUILD"
++msgid "Not in this build"
++msgstr "Non incluso in questa versione"
++
+ #: core/ui/ui_app.c
+ msgctxt "WHY_COLOR_CODE_NOT_IN_BUILD"
+ msgid "Color code: not in this build"
+ msgstr "Color code: non in questa build"
+ 
++#: core/ui/ui_app.c core/ui/ui_menus.c
++msgctxt "CHAN_TOAST_NAC_REPEATER"
++msgid "F7F is for repeaters"
++msgstr "F7F è per i ripetitori"
++
+ #: core/ui/ui_app.c
+ msgctxt "QUICK_WHY_FM_ONLY_DMR_CHANNEL"
+ msgid "FM only: this is a DMR channel"
+@@ -397,11 +407,6 @@ msgctxt "QUICK_WHY_FM_ONLY_YSF_CHANNEL"
+ msgid "FM only: this is YSF"
+ msgstr "Solo FM: questo è YSF"
+ 
+-#: core/ui/ui_app.c core/ui/ui_menus.c
+-msgctxt "WHY_NOT_IN_BUILD"
+-msgid "Not in this build"
+-msgstr "Non incluso in questa versione"
+-
+ #: core/ui/ui_app.c core/ui/ui_menus.c
+ msgctxt "WHY_PRIVACY_NOT_IN_BUILD"
+ msgid "Privacy: not in this build"
+@@ -432,6 +437,11 @@ msgctxt "QUICK_TOAST_TONE_KEYS"
+ msgid "Up/Dn tone  # TX/RX"
+ msgstr "Su/Giù tono  # TX/RX"
+ 
++#: core/ui/ui_app.c core/ui/ui_menus.c
++msgctxt "CHAN_TOAST_NO_AES_KEY"
++msgid "Load AES-256 keys with the CPS"
++msgstr ""
++
+ #: core/ui/ui_app.c
+ msgctxt "QUICK_WHY_AM_ONLY_AIR_BAND"
+ msgid "AM only in the air band"
+@@ -442,6 +452,21 @@ msgctxt "QUICK_WHY_FM_ONLY_BROADCAST"
+ msgid "FM only in the broadcast band"
+ msgstr "Solo FM in banda broadcast"
+ 
++#: core/ui/ui_app.c
++msgctxt "QUICK_TOAST_TRUNK_ALL"
++msgid "Trunk: every group"
++msgstr "Trunk: tutti i gruppi"
++
++#: core/ui/ui_app.c
++msgctxt "QUICK_TOAST_TRUNK_GROUP"
++msgid "Trunk: this group"
++msgstr "Trunk: questo gruppo"
++
++#: core/ui/ui_app.c
++msgctxt "QUICK_TOAST_TRUNK_OFF"
++msgid "Trunk off"
++msgstr "Trunk spento"
++
+ #: core/ui/ui_app.c
+ msgctxt "QUICK_TOAST_VOX_OFF"
+ msgid "VOX off"
+@@ -1317,6 +1342,11 @@ msgctxt "WORD_GRID"
+ msgid "Grid"
+ msgstr "Griglia"
+ 
++#: core/ui/ui_gps.c
++msgctxt "GPS_TITLE_CLOCK"
++msgid "Clock"
++msgstr "Orologio"
++
+ #: core/ui/ui_gps.c
+ msgctxt "GPS_VALUE_GOOD"
+ msgid " good"
+@@ -1357,6 +1387,16 @@ msgctxt "GPS_STATE_NO_SIGNAL"
+ msgid "No signal"
+ msgstr "Nessun segnale"
+ 
++#: core/ui/ui_gps.c
++msgctxt "GPS_LABEL_LAT"
++msgid "Lat"
++msgstr "Lat"
++
++#: core/ui/ui_gps.c
++msgctxt "GPS_LABEL_LON"
++msgid "Lon"
++msgstr "Lon"
++
+ #: core/ui/ui_gps.c
+ msgctxt "GPS_BODY_USED"
+ msgid " used, "
+@@ -1372,16 +1412,6 @@ msgctxt "GPS_LABEL_SATS"
+ msgid "Sats"
+ msgstr "Sat"
+ 
+-#: core/ui/ui_gps.c
+-msgctxt "GPS_LABEL_LAT"
+-msgid "Lat"
+-msgstr "Lat"
+-
+-#: core/ui/ui_gps.c
+-msgctxt "GPS_LABEL_LON"
+-msgid "Lon"
+-msgstr "Lon"
+-
+ #: core/ui/ui_gps.c
+ msgctxt "GPS_LABEL_ALT"
+ msgid "Alt"
+@@ -1397,7 +1427,7 @@ msgctxt "GPS_EMPTY_NO_SATELLITES"
+ msgid "No satellites yet"
+ msgstr "Ancora nessun satellite"
+ 
+-#: core/ui/ui_gps.c core/ui/ui_menus.c core/ui/ui_screens.c
++#: core/ui/ui_gps.c core/ui/ui_menus.c
+ msgctxt "PART_OF"
+ msgid " of "
+ msgstr " di "
+@@ -1412,6 +1442,11 @@ msgctxt "GPS_EMPTY_NO_FIX"
+ msgid "No fix yet"
+ msgstr "Ancora nessun fix"
+ 
++#: core/ui/ui_gps.c
++msgctxt "GPS_LABEL_DATE"
++msgid "Date"
++msgstr "Data"
++
+ #: core/ui/ui_gps.c
+ msgctxt "GPS_WHY_NO_GPS_OR_OFF"
+ msgid "No GPS, or it is off"
+@@ -2097,6 +2132,11 @@ msgctxt "CHAN_LABEL_DEST"
+ msgid "Destination"
+ msgstr "Destinazione"
+ 
++#: core/ui/ui_menus.c
++msgctxt "CHAN_LABEL_TRUNK"
++msgid "Trunk"
++msgstr "Trunking"
++
+ #: core/ui/ui_menus.c core/ui/ui_screens.c
+ msgctxt "WORD_RX_ONLY"
+ msgid "RX only"
+@@ -2122,16 +2162,6 @@ msgctxt "WORD_TONE_BURST"
+ msgid "Tone burst"
+ msgstr "Tono di apertura"
+ 
+-#: core/ui/ui_menus.c
+-msgctxt "CHAN_LABEL_DECODE_IDS"
+-msgid "Decode IDs"
+-msgstr "Decodifica ID"
+-
+-#: core/ui/ui_menus.c
+-msgctxt "ACTIVITY_BODY_LAST_ID"
+-msgid "Last ID "
+-msgstr "Ultimo ID "
+-
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_LABEL_ID_TYPE"
+ msgid "ID type"
+@@ -2143,19 +2173,14 @@ msgid "Send ID"
+ msgstr "Invia ID"
+ 
+ #: core/ui/ui_menus.c
+-msgctxt "VALUE_AT_START"
+-msgid "At start"
+-msgstr "All'inizio"
+-
+-#: core/ui/ui_menus.c
+-msgctxt "VALUE_AT_END"
+-msgid "At end"
+-msgstr "Alla fine"
++msgctxt "CHAN_LABEL_OWN_ID"
++msgid "Own ID"
++msgstr "ID proprio"
+ 
+ #: core/ui/ui_menus.c
+-msgctxt "VALUE_START_AND_END"
+-msgid "Start and end"
+-msgstr "Inizio e fine"
++msgctxt "CHAN_LABEL_DECODE_IDS"
++msgid "Decode IDs"
++msgstr "Decodifica ID"
+ 
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_LABEL_COLOR_CODE"
+@@ -2177,11 +2202,6 @@ msgctxt "CHAN_LABEL_RX_GROUP_LIST"
+ msgid "RX group list"
+ msgstr "Lista gruppi RX"
+ 
+-#: core/ui/ui_menus.c
+-msgctxt "CHAN_LABEL_OWN_ID"
+-msgid "Own ID"
+-msgstr "ID proprio"
+-
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_LABEL_DIRECT_MODE"
+ msgid "Direct mode"
+@@ -2217,6 +2237,21 @@ msgctxt "LABEL_BATTERY_SAVER"
+ msgid "Battery saver"
+ msgstr "Risparmio batt."
+ 
++#: core/ui/ui_menus.c
++msgctxt "CHAN_LABEL_DMR_PRIVACY"
++msgid "Privacy"
++msgstr ""
++
++#: core/ui/ui_menus.c
++msgctxt "CHAN_LABEL_DMR_KEY"
++msgid "Key ID"
++msgstr ""
++
++#: core/ui/ui_menus.c
++msgctxt "CHAN_LABEL_AES_KEY"
++msgid "AES-256 key"
++msgstr ""
++
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_ROW_TUNE_TO"
+ msgid "Tune to this ch"
+@@ -2242,6 +2277,16 @@ msgctxt "CHAN_LABEL_DATA_TYPE"
+ msgid "Data type"
+ msgstr "Tipo di dati"
+ 
++#: core/ui/ui_menus.c
++msgctxt "CHAN_VALUE_TRUNK_ALL"
++msgid "All groups"
++msgstr "Tutti i gruppi"
++
++#: core/ui/ui_menus.c
++msgctxt "CHAN_VALUE_TRUNK_GROUP"
++msgid "Group"
++msgstr "Gruppo"
++
+ #: core/ui/ui_menus.c
+ msgctxt "VALUE_YES"
+ msgid "Yes"
+@@ -2252,6 +2297,21 @@ msgctxt "VALUE_NO"
+ msgid "No"
+ msgstr "No"
+ 
++#: core/ui/ui_menus.c
++msgctxt "VALUE_AT_START"
++msgid "At start"
++msgstr "All'inizio"
++
++#: core/ui/ui_menus.c
++msgctxt "VALUE_AT_END"
++msgid "At end"
++msgstr "Alla fine"
++
++#: core/ui/ui_menus.c
++msgctxt "VALUE_START_AND_END"
++msgid "Start and end"
++msgstr "Inizio e fine"
++
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_VALUE_SCAN_SKIPPED"
+ msgid "Skipped"
+@@ -2312,11 +2372,6 @@ msgctxt "CHAN_TOAST_DCS_DIGITS"
+ msgid "DCS codes use digits 0-7"
+ msgstr "Codici DCS: cifre 0-7"
+ 
+-#: core/ui/ui_menus.c
+-msgctxt "CHAN_TOAST_NAC_REPEATER"
+-msgid "F7F is for repeaters"
+-msgstr "F7F è per i ripetitori"
+-
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_TOAST_NXDN_ID_MAX"
+ msgid "NXDN IDs go up to 65519"
+@@ -2952,6 +3007,11 @@ msgctxt "VALUE_NOT_SET"
+ msgid "Not set"
+ msgstr "Non impostato"
+ 
++#: core/ui/ui_menus.c
++msgctxt "MYID_LABEL_SPLASH_PREVIEW"
++msgid "Preview splash"
++msgstr "Anteprima avvio"
++
+ #: core/ui/ui_menus.c
+ msgctxt "MYID_LABEL_RADIO_NAME"
+ msgid "Radio name"
+@@ -2967,11 +3027,6 @@ msgctxt "MYID_LABEL_BOOT_2"
+ msgid "Boot 2"
+ msgstr "Avvio 2"
+ 
+-#: core/ui/ui_menus.c
+-msgctxt "MYID_LABEL_SPLASH_PREVIEW"
+-msgid "Preview splash"
+-msgstr "Anteprima avvio"
+-
+ #: core/ui/ui_menus.c
+ msgctxt "BODY_SAVED_IN_CODEPLUG"
+ msgid "Saved in the codeplug"
+@@ -3467,6 +3522,26 @@ msgctxt "TOOLS_ROW_SHARES_RECEIVED"
+ msgid "Zones/Chs Received"
+ msgstr "Zone/Can. ricevuti"
+ 
++#: core/ui/ui_menus.c
++msgctxt "TOOLS_ROW_ZONE_SCAN_SPEED"
++msgid "Zone scan speed"
++msgstr ""
++
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_RX_PAST_BANDS"
++msgid "RX past bands"
++msgstr "RX fuori banda"
++
++#: core/ui/ui_menus.c
++msgctxt "TOOLS_ROW_SCAN_LOW"
++msgid "Scan low"
++msgstr "Limite inferiore"
++
++#: core/ui/ui_menus.c
++msgctxt "TOOLS_ROW_SCAN_HIGH"
++msgid "Scan high"
++msgstr "Limite superiore"
++
+ #: core/ui/ui_menus.c
+ msgctxt "WORD_DUAL_WATCH"
+ msgid "Dual watch"
+@@ -3527,7 +3602,7 @@ msgctxt "SET_VALUE_THEME_HIGH_CONTRAST"
+ msgid "High contrast"
+ msgstr "Alto contrasto"
+ 
+-#: core/ui/ui_menus.c
++#: core/ui/ui_menus.c core/ui/ui_screens.c
+ msgctxt "VALUE_DEFAULT"
+ msgid "Default"
+ msgstr "Predefinito"
+@@ -3672,6 +3747,21 @@ msgctxt "SET_VALUE_SFR_RX_DUAL_PATH"
+ msgid "Dual-path RX"
+ msgstr "RX doppia via"
+ 
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_EMPTY_CHANNEL_DWELL"
++msgid "Empty-channel dwell"
++msgstr ""
++
++#: core/ui/ui_menus.c
++msgctxt "SET_VALUE_PERMIT_CHIRP"
++msgid "Chirp"
++msgstr "Trillo"
++
++#: core/ui/ui_menus.c
++msgctxt "SET_VALUE_PERMIT_TRIPLE"
++msgid "Triple beep"
++msgstr "Triplo bip"
++
+ #: core/ui/ui_menus.c core/ui/ui_screens.c
+ msgctxt "TITLE_VOLUME"
+ msgid "Volume"
+@@ -3737,6 +3827,21 @@ msgctxt "SET_LABEL_VIBRATE"
+ msgid "Vibrate"
+ msgstr "Vibrazione"
+ 
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_TALK_PERMIT_SOUND"
++msgid "Talk permit sound"
++msgstr "Suono via libera"
++
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_ROGER_BEEP"
++msgid "FM roger beep"
++msgstr "Bip finale FM"
++
++#: core/ui/ui_menus.c
++msgctxt "SET_VALUE_SCAN_AMBER"
++msgid "Scan amber"
++msgstr "Ambra in scansione"
++
+ #: core/ui/ui_menus.c
+ msgctxt "SET_LABEL_BRIGHTNESS"
+ msgid "Brightness"
+@@ -3782,6 +3887,11 @@ msgctxt "SET_LABEL_LARGE_CHANNEL_NAME"
+ msgid "Large channel name"
+ msgstr "Nome canale grande"
+ 
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_STATUS_LEDS"
++msgid "Status LEDs"
++msgstr "LED di stato"
++
+ #: core/ui/ui_menus.c
+ msgctxt "SET_LABEL_LANGUAGE"
+ msgid "Language"
+@@ -4012,11 +4122,6 @@ msgctxt "SET_ROW_CRASH_LOG"
+ msgid "Crash log"
+ msgstr "Log crash"
+ 
+-#: core/ui/ui_menus.c
+-msgctxt "SET_LABEL_RX_PAST_BANDS"
+-msgid "RX past bands"
+-msgstr "RX fuori banda"
+-
+ #: core/ui/ui_menus.c
+ msgctxt "SET_ROW_FREQ_TRIM"
+ msgid "Freq trim"
+@@ -4437,6 +4542,11 @@ msgctxt "HOME_CHIP_BROADCAST_FM"
+ msgid "Broadcast FM"
+ msgstr "FM broadcast"
+ 
++#: core/ui/ui_screens.c
++msgctxt "HOME_CHIP_CPU_SLOW"
++msgid "CPU slow"
++msgstr "CPU lenta"
++
+ #: core/ui/ui_screens.c
+ msgctxt "HW_BODY_RESTART_TO_APPLY"
+ msgid "Restart to apply"
+@@ -4547,11 +4657,6 @@ msgctxt "DENY_WHY_CPU"
+ msgid "CPU too slow for voice"
+ msgstr "CPU troppo lenta per la voce"
+ 
+-#: core/ui/ui_screens.c
+-msgctxt "HOME_CHIP_CPU_SLOW"
+-msgid "CPU slow"
+-msgstr "CPU lenta"
+-
+ #: core/ui/ui_screens.c
+ msgctxt "DENY_WHY_P25T_NO_CC"
+ msgid "No control channel"
+@@ -4732,56 +4837,6 @@ msgctxt "HOME_CHIP_PRIVACY"
+ msgid "Priv"
+ msgstr "Priv"
+ 
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_BODY_PRIVATE_ID"
+-msgid "Private "
+-msgstr "Privata "
+-
+-#: core/ui/ui_screens.c
+-msgctxt "STATE_TALKING"
+-msgid "TALKING"
+-msgstr "TRASM."
+-
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_STATE_WAKING_RPT"
+-msgid "WAKING RPT"
+-msgstr "RPT SVEGL."
+-
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_STATE_WAITING"
+-msgid "WAITING"
+-msgstr "ATTESA"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_STATE_ADMITTED"
+-msgid "ADMITTED"
+-msgstr "AMMESSO"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_STATE_ENDING"
+-msgid "ENDING"
+-msgstr "FINE"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_BODY_TO_PRIVATE"
+-msgid " Private"
+-msgstr " Privata"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_BODY_TO_GROUP"
+-msgid " Group"
+-msgstr " Gruppo"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_HINT_FINISHING"
+-msgid "Finishing the call"
+-msgstr "Fine della chiamata"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_HINT_RELEASE_PTT"
+-msgid "Release PTT to stop"
+-msgstr "Rilascia PTT per fermare"
+-
+ #: core/ui/ui_screens.c
+ msgctxt "CALL_CHIP_LATE"
+ msgid " late"
+@@ -4822,6 +4877,11 @@ msgctxt "STATE_SENDING"
+ msgid "SENDING"
+ msgstr "INVIO"
+ 
++#: core/ui/ui_screens.c
++msgctxt "STATE_TALKING"
++msgid "TALKING"
++msgstr "TRASM."
++
+ #: core/ui/ui_screens.c
+ msgctxt "ACTIVITY_BODY_LEFT_OF"
+ msgid " left of "
+@@ -4842,6 +4902,11 @@ msgctxt "ACTIVITY_BODY_TX_WAITS"
+ msgid "Transmit waits for it"
+ msgstr "Niente TX fino ad allora"
+ 
++#: core/ui/ui_screens.c
++msgctxt "ACTIVITY_BODY_LAST_ID"
++msgid "Last ID "
++msgstr "Ultimo ID "
++
+ #: core/ui/ui_screens.c
+ msgctxt "ACTIVITY_BODY_LAST"
+ msgid "Last activity "
+@@ -4892,6 +4957,46 @@ msgctxt "HOME_HINT_VFO"
+ msgid "0-9 freq  * Quick  Up/Dn"
+ msgstr "0-9 freq  * Rapido  Su/Giù"
+ 
++#: core/ui/ui_screens.c
++msgctxt "CALL_HINT_RELEASE_PTT"
++msgid "Release PTT to stop"
++msgstr "Rilascia PTT per fermare"
++
++#: core/ui/ui_screens.c
++msgctxt "CALL_STATE_WAKING_RPT"
++msgid "WAKING RPT"
++msgstr "RPT SVEGL."
++
++#: core/ui/ui_screens.c
++msgctxt "CALL_STATE_WAITING"
++msgid "WAITING"
++msgstr "ATTESA"
++
++#: core/ui/ui_screens.c
++msgctxt "CALL_STATE_ADMITTED"
++msgid "ADMITTED"
++msgstr "AMMESSO"
++
++#: core/ui/ui_screens.c
++msgctxt "CALL_STATE_ENDING"
++msgid "ENDING"
++msgstr "FINE"
++
++#: core/ui/ui_screens.c
++msgctxt "CALL_HINT_FINISHING"
++msgid "Finishing the call"
++msgstr "Fine della chiamata"
++
++#: core/ui/ui_screens.c
++msgctxt "CALL_BODY_PRIVATE_ID"
++msgid "Private "
++msgstr "Privata "
++
++#: core/ui/ui_screens.c
++msgctxt "CALL_BODY_TO_GROUP"
++msgid " Group"
++msgstr " Gruppo"
++
+ #: core/ui/ui_screens.c
+ msgctxt "DUAL_BODY_HEARD"
+ msgid "Heard "
+@@ -5102,6 +5207,21 @@ msgctxt "QUICK_LABEL_TX_FREQ"
+ msgid "{TX freq|TXFreq}"
+ msgstr "{Freq. TX|FreqTX}"
+ 
++#: core/ui/ui_screens.c
++msgctxt "QUICK_LABEL_CODE"
++msgid "Code"
++msgstr ""
++
++#: core/ui/ui_screens.c
++msgctxt "QUICK_LABEL_DEST"
++msgid "{Destination|Dest}"
++msgstr ""
++
++#: core/ui/ui_screens.c
++msgctxt "QUICK_LABEL_TRUNK"
++msgid "Trunk"
++msgstr "Trunk"
++
+ #: core/ui/ui_screens.c
+ msgctxt "QUICK_LABEL_TONE_TX"
+ msgid "Tone TX"
+@@ -5122,6 +5242,11 @@ msgctxt "QUICK_VALUE_ALL"
+ msgid "All"
+ msgstr "Tutti"
+ 
++#: core/ui/ui_screens.c
++msgctxt "QUICK_VALUE_TRUNK_GROUP"
++msgid "Grp"
++msgstr "Grp"
++
+ #: core/ui/ui_screens.c
+ msgctxt "QUICK_HINT_SPLIT"
+ msgid "{Up/Dn: +/- offset  Type: TX freq|Up/Dn +/- offset  0-9 TX freq|Up/Dn offset  0-9 TX freq|Up/Dn +/-  0-9 TX freq}"
+@@ -5162,6 +5287,11 @@ msgctxt "STORE_ERR_CHANNEL_READ"
+ msgid "Couldn't read the channel: not saved"
+ msgstr "Lettura canale non riuscita: non salvato"
+ 
++#: core/ui/ui_svc_storage.c
++msgctxt "STORE_ERR_TARGET_NOT_STORED"
++msgid "Not a stored contact: for now only"
++msgstr "Non è un contatto salvato: solo per ora"
++
+ #: core/ui/ui_svc_storage.c
+ msgctxt "STORE_ERR_ZONE_FULL"
+ msgid "Zone full: not saved"
+@@ -5192,11 +5322,6 @@ msgctxt "STORE_ERR_TARGET_CHANNEL_READ"
+ msgid "Couldn't read the channel: for now only"
+ msgstr "Lettura canale non riuscita: solo per ora"
+ 
+-#: core/ui/ui_svc_storage.c
+-msgctxt "STORE_ERR_TARGET_NOT_STORED"
+-msgid "Not a stored contact: for now only"
+-msgstr "Non è un contatto salvato: solo per ora"
+-
+ #: core/ui/ui_svc_storage.c
+ msgctxt "STORE_ERR_TARGET_NOT_WRITTEN"
+ msgid "Codeplug not written: for now only"
+@@ -5241,43 +5366,3 @@ msgstr "Zona non leggibile qui"
+ msgctxt "SHARE_ERR_OFFER_GONE"
+ msgid "The offer is gone"
+ msgstr "L'offerta non c'è più"
+-
+-#: core/ui/ui_menus.c
+-msgctxt "CHAN_LABEL_TRUNK"
+-msgid "Trunk"
+-msgstr "Trunking"
+-
+-#: core/ui/ui_menus.c
+-msgctxt "CHAN_VALUE_TRUNK_ALL"
+-msgid "All groups"
+-msgstr "Tutti i gruppi"
+-
+-#: core/ui/ui_menus.c
+-msgctxt "CHAN_VALUE_TRUNK_GROUP"
+-msgid "Group"
+-msgstr "Gruppo"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "QUICK_LABEL_TRUNK"
+-msgid "Trunk"
+-msgstr "Trunk"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "QUICK_VALUE_TRUNK_GROUP"
+-msgid "Grp"
+-msgstr "Grp"
+-
+-#: core/ui/ui_app.c
+-msgctxt "QUICK_TOAST_TRUNK_ALL"
+-msgid "Trunk: every group"
+-msgstr "Trunk: tutti i gruppi"
+-
+-#: core/ui/ui_app.c
+-msgctxt "QUICK_TOAST_TRUNK_GROUP"
+-msgid "Trunk: this group"
+-msgstr "Trunk: questo gruppo"
+-
+-#: core/ui/ui_app.c
+-msgctxt "QUICK_TOAST_TRUNK_OFF"
+-msgid "Trunk off"
+-msgstr "Trunk spento"
+diff --git a/core/ui/lang/zh.po b/core/ui/lang/zh.po
+index 4a35e84..31878bf 100644
+--- a/core/ui/lang/zh.po
++++ b/core/ui/lang/zh.po
+@@ -374,11 +374,21 @@ msgctxt "QUICK_TOAST_CANT_TX_THERE"
+ msgid "Can't transmit there"
+ msgstr "此处不可发射"
+ 
++#: core/ui/ui_app.c core/ui/ui_menus.c
++msgctxt "WHY_NOT_IN_BUILD"
++msgid "Not in this build"
++msgstr "本版本无"
++
+ #: core/ui/ui_app.c
+ msgctxt "WHY_COLOR_CODE_NOT_IN_BUILD"
+ msgid "Color code: not in this build"
+ msgstr "色码：本版本无"
+ 
++#: core/ui/ui_app.c core/ui/ui_menus.c
++msgctxt "CHAN_TOAST_NAC_REPEATER"
++msgid "F7F is for repeaters"
++msgstr "F7F 仅用于中继台"
++
+ #: core/ui/ui_app.c
+ msgctxt "QUICK_WHY_FM_ONLY_DMR_CHANNEL"
+ msgid "FM only: this is a DMR channel"
+@@ -399,11 +409,6 @@ msgctxt "QUICK_WHY_FM_ONLY_YSF_CHANNEL"
+ msgid "FM only: this is YSF"
+ msgstr "仅 FM：这是 YSF"
+ 
+-#: core/ui/ui_app.c core/ui/ui_menus.c
+-msgctxt "WHY_NOT_IN_BUILD"
+-msgid "Not in this build"
+-msgstr "本版本无"
+-
+ #: core/ui/ui_app.c core/ui/ui_menus.c
+ msgctxt "WHY_PRIVACY_NOT_IN_BUILD"
+ msgid "Privacy: not in this build"
+@@ -434,6 +439,11 @@ msgctxt "QUICK_TOAST_TONE_KEYS"
+ msgid "Up/Dn tone  # TX/RX"
+ msgstr "上下键选亚音  # 收发"
+ 
++#: core/ui/ui_app.c core/ui/ui_menus.c
++msgctxt "CHAN_TOAST_NO_AES_KEY"
++msgid "Load AES-256 keys with the CPS"
++msgstr ""
++
+ #: core/ui/ui_app.c
+ msgctxt "QUICK_WHY_AM_ONLY_AIR_BAND"
+ msgid "AM only in the air band"
+@@ -444,6 +454,21 @@ msgctxt "QUICK_WHY_FM_ONLY_BROADCAST"
+ msgid "FM only in the broadcast band"
+ msgstr "广播波段仅 FM"
+ 
++#: core/ui/ui_app.c
++msgctxt "QUICK_TOAST_TRUNK_ALL"
++msgid "Trunk: every group"
++msgstr "集群：所有组"
++
++#: core/ui/ui_app.c
++msgctxt "QUICK_TOAST_TRUNK_GROUP"
++msgid "Trunk: this group"
++msgstr "集群：本组"
++
++#: core/ui/ui_app.c
++msgctxt "QUICK_TOAST_TRUNK_OFF"
++msgid "Trunk off"
++msgstr "集群关闭"
++
+ #: core/ui/ui_app.c
+ msgctxt "QUICK_TOAST_VOX_OFF"
+ msgid "VOX off"
+@@ -1319,6 +1344,11 @@ msgctxt "WORD_GRID"
+ msgid "Grid"
+ msgstr "网格"
+ 
++#: core/ui/ui_gps.c
++msgctxt "GPS_TITLE_CLOCK"
++msgid "Clock"
++msgstr "时钟"
++
+ #: core/ui/ui_gps.c
+ msgctxt "GPS_VALUE_GOOD"
+ msgid " good"
+@@ -1359,6 +1389,16 @@ msgctxt "GPS_STATE_NO_SIGNAL"
+ msgid "No signal"
+ msgstr "无信号"
+ 
++#: core/ui/ui_gps.c
++msgctxt "GPS_LABEL_LAT"
++msgid "Lat"
++msgstr "纬度"
++
++#: core/ui/ui_gps.c
++msgctxt "GPS_LABEL_LON"
++msgid "Lon"
++msgstr "经度"
++
+ #: core/ui/ui_gps.c
+ msgctxt "GPS_BODY_USED"
+ msgid " used, "
+@@ -1374,16 +1414,6 @@ msgctxt "GPS_LABEL_SATS"
+ msgid "Sats"
+ msgstr "卫星"
+ 
+-#: core/ui/ui_gps.c
+-msgctxt "GPS_LABEL_LAT"
+-msgid "Lat"
+-msgstr "纬度"
+-
+-#: core/ui/ui_gps.c
+-msgctxt "GPS_LABEL_LON"
+-msgid "Lon"
+-msgstr "经度"
+-
+ #: core/ui/ui_gps.c
+ msgctxt "GPS_LABEL_ALT"
+ msgid "Alt"
+@@ -1399,7 +1429,7 @@ msgctxt "GPS_EMPTY_NO_SATELLITES"
+ msgid "No satellites yet"
+ msgstr "暂无卫星"
+ 
+-#: core/ui/ui_gps.c core/ui/ui_menus.c core/ui/ui_screens.c
++#: core/ui/ui_gps.c core/ui/ui_menus.c
+ msgctxt "PART_OF"
+ msgid " of "
+ msgstr " / "
+@@ -1414,6 +1444,11 @@ msgctxt "GPS_EMPTY_NO_FIX"
+ msgid "No fix yet"
+ msgstr "尚未定位"
+ 
++#: core/ui/ui_gps.c
++msgctxt "GPS_LABEL_DATE"
++msgid "Date"
++msgstr "日期"
++
+ #: core/ui/ui_gps.c
+ msgctxt "GPS_WHY_NO_GPS_OR_OFF"
+ msgid "No GPS, or it is off"
+@@ -2099,6 +2134,11 @@ msgctxt "CHAN_LABEL_DEST"
+ msgid "Destination"
+ msgstr "目标"
+ 
++#: core/ui/ui_menus.c
++msgctxt "CHAN_LABEL_TRUNK"
++msgid "Trunk"
++msgstr "集群"
++
+ #: core/ui/ui_menus.c core/ui/ui_screens.c
+ msgctxt "WORD_RX_ONLY"
+ msgid "RX only"
+@@ -2124,16 +2164,6 @@ msgctxt "WORD_TONE_BURST"
+ msgid "Tone burst"
+ msgstr "突发音"
+ 
+-#: core/ui/ui_menus.c
+-msgctxt "CHAN_LABEL_DECODE_IDS"
+-msgid "Decode IDs"
+-msgstr "解码 ID"
+-
+-#: core/ui/ui_menus.c
+-msgctxt "ACTIVITY_BODY_LAST_ID"
+-msgid "Last ID "
+-msgstr "最近 ID "
+-
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_LABEL_ID_TYPE"
+ msgid "ID type"
+@@ -2145,19 +2175,14 @@ msgid "Send ID"
+ msgstr "发送 ID"
+ 
+ #: core/ui/ui_menus.c
+-msgctxt "VALUE_AT_START"
+-msgid "At start"
+-msgstr "开始时"
+-
+-#: core/ui/ui_menus.c
+-msgctxt "VALUE_AT_END"
+-msgid "At end"
+-msgstr "结束时"
++msgctxt "CHAN_LABEL_OWN_ID"
++msgid "Own ID"
++msgstr "自身 ID"
+ 
+ #: core/ui/ui_menus.c
+-msgctxt "VALUE_START_AND_END"
+-msgid "Start and end"
+-msgstr "开始和结束"
++msgctxt "CHAN_LABEL_DECODE_IDS"
++msgid "Decode IDs"
++msgstr "解码 ID"
+ 
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_LABEL_COLOR_CODE"
+@@ -2179,11 +2204,6 @@ msgctxt "CHAN_LABEL_RX_GROUP_LIST"
+ msgid "RX group list"
+ msgstr "接收组列表"
+ 
+-#: core/ui/ui_menus.c
+-msgctxt "CHAN_LABEL_OWN_ID"
+-msgid "Own ID"
+-msgstr "自身 ID"
+-
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_LABEL_DIRECT_MODE"
+ msgid "Direct mode"
+@@ -2219,6 +2239,21 @@ msgctxt "LABEL_BATTERY_SAVER"
+ msgid "Battery saver"
+ msgstr "省电"
+ 
++#: core/ui/ui_menus.c
++msgctxt "CHAN_LABEL_DMR_PRIVACY"
++msgid "Privacy"
++msgstr ""
++
++#: core/ui/ui_menus.c
++msgctxt "CHAN_LABEL_DMR_KEY"
++msgid "Key ID"
++msgstr ""
++
++#: core/ui/ui_menus.c
++msgctxt "CHAN_LABEL_AES_KEY"
++msgid "AES-256 key"
++msgstr ""
++
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_ROW_TUNE_TO"
+ msgid "Tune to this ch"
+@@ -2244,6 +2279,16 @@ msgctxt "CHAN_LABEL_DATA_TYPE"
+ msgid "Data type"
+ msgstr "数据类型"
+ 
++#: core/ui/ui_menus.c
++msgctxt "CHAN_VALUE_TRUNK_ALL"
++msgid "All groups"
++msgstr "所有组"
++
++#: core/ui/ui_menus.c
++msgctxt "CHAN_VALUE_TRUNK_GROUP"
++msgid "Group"
++msgstr "本组"
++
+ #: core/ui/ui_menus.c
+ msgctxt "VALUE_YES"
+ msgid "Yes"
+@@ -2254,6 +2299,21 @@ msgctxt "VALUE_NO"
+ msgid "No"
+ msgstr "否"
+ 
++#: core/ui/ui_menus.c
++msgctxt "VALUE_AT_START"
++msgid "At start"
++msgstr "开始时"
++
++#: core/ui/ui_menus.c
++msgctxt "VALUE_AT_END"
++msgid "At end"
++msgstr "结束时"
++
++#: core/ui/ui_menus.c
++msgctxt "VALUE_START_AND_END"
++msgid "Start and end"
++msgstr "开始和结束"
++
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_VALUE_SCAN_SKIPPED"
+ msgid "Skipped"
+@@ -2314,11 +2374,6 @@ msgctxt "CHAN_TOAST_DCS_DIGITS"
+ msgid "DCS codes use digits 0-7"
+ msgstr "DCS 码仅用 0-7"
+ 
+-#: core/ui/ui_menus.c
+-msgctxt "CHAN_TOAST_NAC_REPEATER"
+-msgid "F7F is for repeaters"
+-msgstr "F7F 仅用于中继台"
+-
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_TOAST_NXDN_ID_MAX"
+ msgid "NXDN IDs go up to 65519"
+@@ -2954,6 +3009,11 @@ msgctxt "VALUE_NOT_SET"
+ msgid "Not set"
+ msgstr "未设置"
+ 
++#: core/ui/ui_menus.c
++msgctxt "MYID_LABEL_SPLASH_PREVIEW"
++msgid "Preview splash"
++msgstr "预览开机画面"
++
+ #: core/ui/ui_menus.c
+ msgctxt "MYID_LABEL_RADIO_NAME"
+ msgid "Radio name"
+@@ -2969,11 +3029,6 @@ msgctxt "MYID_LABEL_BOOT_2"
+ msgid "Boot 2"
+ msgstr "启动文字2"
+ 
+-#: core/ui/ui_menus.c
+-msgctxt "MYID_LABEL_SPLASH_PREVIEW"
+-msgid "Preview splash"
+-msgstr "预览开机画面"
+-
+ #: core/ui/ui_menus.c
+ msgctxt "BODY_SAVED_IN_CODEPLUG"
+ msgid "Saved in the codeplug"
+@@ -3469,6 +3524,26 @@ msgctxt "TOOLS_ROW_SHARES_RECEIVED"
+ msgid "Zones/Chs Received"
+ msgstr "收到的区域/信道"
+ 
++#: core/ui/ui_menus.c
++msgctxt "TOOLS_ROW_ZONE_SCAN_SPEED"
++msgid "Zone scan speed"
++msgstr ""
++
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_RX_PAST_BANDS"
++msgid "RX past bands"
++msgstr "超频段接收"
++
++#: core/ui/ui_menus.c
++msgctxt "TOOLS_ROW_SCAN_LOW"
++msgid "Scan low"
++msgstr "扫描下限"
++
++#: core/ui/ui_menus.c
++msgctxt "TOOLS_ROW_SCAN_HIGH"
++msgid "Scan high"
++msgstr "扫描上限"
++
+ #: core/ui/ui_menus.c
+ msgctxt "WORD_DUAL_WATCH"
+ msgid "Dual watch"
+@@ -3529,7 +3604,7 @@ msgctxt "SET_VALUE_THEME_HIGH_CONTRAST"
+ msgid "High contrast"
+ msgstr "高对比度"
+ 
+-#: core/ui/ui_menus.c
++#: core/ui/ui_menus.c core/ui/ui_screens.c
+ msgctxt "VALUE_DEFAULT"
+ msgid "Default"
+ msgstr "默认"
+@@ -3674,6 +3749,21 @@ msgctxt "SET_VALUE_SFR_RX_DUAL_PATH"
+ msgid "Dual-path RX"
+ msgstr "双路接收"
+ 
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_EMPTY_CHANNEL_DWELL"
++msgid "Empty-channel dwell"
++msgstr ""
++
++#: core/ui/ui_menus.c
++msgctxt "SET_VALUE_PERMIT_CHIRP"
++msgid "Chirp"
++msgstr "提示音"
++
++#: core/ui/ui_menus.c
++msgctxt "SET_VALUE_PERMIT_TRIPLE"
++msgid "Triple beep"
++msgstr "3 声提示"
++
+ #: core/ui/ui_menus.c core/ui/ui_screens.c
+ msgctxt "TITLE_VOLUME"
+ msgid "Volume"
+@@ -3739,6 +3829,21 @@ msgctxt "SET_LABEL_VIBRATE"
+ msgid "Vibrate"
+ msgstr "振动"
+ 
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_TALK_PERMIT_SOUND"
++msgid "Talk permit sound"
++msgstr "发射许可提示音"
++
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_ROGER_BEEP"
++msgid "FM roger beep"
++msgstr "FM 结束提示音"
++
++#: core/ui/ui_menus.c
++msgctxt "SET_VALUE_SCAN_AMBER"
++msgid "Scan amber"
++msgstr "扫描提示"
++
+ #: core/ui/ui_menus.c
+ msgctxt "SET_LABEL_BRIGHTNESS"
+ msgid "Brightness"
+@@ -3784,6 +3889,11 @@ msgctxt "SET_LABEL_LARGE_CHANNEL_NAME"
+ msgid "Large channel name"
+ msgstr "大号信道名"
+ 
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_STATUS_LEDS"
++msgid "Status LEDs"
++msgstr "状态 LED"
++
+ #: core/ui/ui_menus.c
+ msgctxt "SET_LABEL_LANGUAGE"
+ msgid "Language"
+@@ -4014,11 +4124,6 @@ msgctxt "SET_ROW_CRASH_LOG"
+ msgid "Crash log"
+ msgstr "崩溃日志"
+ 
+-#: core/ui/ui_menus.c
+-msgctxt "SET_LABEL_RX_PAST_BANDS"
+-msgid "RX past bands"
+-msgstr "超频段接收"
+-
+ #: core/ui/ui_menus.c
+ msgctxt "SET_ROW_FREQ_TRIM"
+ msgid "Freq trim"
+@@ -4439,6 +4544,11 @@ msgctxt "HOME_CHIP_BROADCAST_FM"
+ msgid "Broadcast FM"
+ msgstr "调频广播"
+ 
++#: core/ui/ui_screens.c
++msgctxt "HOME_CHIP_CPU_SLOW"
++msgid "CPU slow"
++msgstr "CPU 不足"
++
+ #: core/ui/ui_screens.c
+ msgctxt "HW_BODY_RESTART_TO_APPLY"
+ msgid "Restart to apply"
+@@ -4549,11 +4659,6 @@ msgctxt "DENY_WHY_CPU"
+ msgid "CPU too slow for voice"
+ msgstr "CPU 不足，无语音"
+ 
+-#: core/ui/ui_screens.c
+-msgctxt "HOME_CHIP_CPU_SLOW"
+-msgid "CPU slow"
+-msgstr "CPU 不足"
+-
+ #: core/ui/ui_screens.c
+ msgctxt "DENY_WHY_P25T_NO_CC"
+ msgid "No control channel"
+@@ -4734,56 +4839,6 @@ msgctxt "HOME_CHIP_PRIVACY"
+ msgid "Priv"
+ msgstr "加密"
+ 
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_BODY_PRIVATE_ID"
+-msgid "Private "
+-msgstr "个呼 "
+-
+-#: core/ui/ui_screens.c
+-msgctxt "STATE_TALKING"
+-msgid "TALKING"
+-msgstr "通话中"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_STATE_WAKING_RPT"
+-msgid "WAKING RPT"
+-msgstr "唤醒中继"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_STATE_WAITING"
+-msgid "WAITING"
+-msgstr "等待"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_STATE_ADMITTED"
+-msgid "ADMITTED"
+-msgstr "已准许"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_STATE_ENDING"
+-msgid "ENDING"
+-msgstr "结束中"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_BODY_TO_PRIVATE"
+-msgid " Private"
+-msgstr " 个呼"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_BODY_TO_GROUP"
+-msgid " Group"
+-msgstr " 组呼"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_HINT_FINISHING"
+-msgid "Finishing the call"
+-msgstr "正在结束通话"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "CALL_HINT_RELEASE_PTT"
+-msgid "Release PTT to stop"
+-msgstr "松开 PTT 停止"
+-
+ #: core/ui/ui_screens.c
+ msgctxt "CALL_CHIP_LATE"
+ msgid " late"
+@@ -4824,6 +4879,11 @@ msgctxt "STATE_SENDING"
+ msgid "SENDING"
+ msgstr "发送中"
+ 
++#: core/ui/ui_screens.c
++msgctxt "STATE_TALKING"
++msgid "TALKING"
++msgstr "通话中"
++
+ #: core/ui/ui_screens.c
+ msgctxt "ACTIVITY_BODY_LEFT_OF"
+ msgid " left of "
+@@ -4844,6 +4904,11 @@ msgctxt "ACTIVITY_BODY_TX_WAITS"
+ msgid "Transmit waits for it"
+ msgstr "设置前不能发射"
+ 
++#: core/ui/ui_screens.c
++msgctxt "ACTIVITY_BODY_LAST_ID"
++msgid "Last ID "
++msgstr "最近 ID "
++
+ #: core/ui/ui_screens.c
+ msgctxt "ACTIVITY_BODY_LAST"
+ msgid "Last activity "
+@@ -4894,6 +4959,46 @@ msgctxt "HOME_HINT_VFO"
+ msgid "0-9 freq  * Quick  Up/Dn"
+ msgstr "0-9 频率  * 快捷  上下"
+ 
++#: core/ui/ui_screens.c
++msgctxt "CALL_HINT_RELEASE_PTT"
++msgid "Release PTT to stop"
++msgstr "松开 PTT 停止"
++
++#: core/ui/ui_screens.c
++msgctxt "CALL_STATE_WAKING_RPT"
++msgid "WAKING RPT"
++msgstr "唤醒中继"
++
++#: core/ui/ui_screens.c
++msgctxt "CALL_STATE_WAITING"
++msgid "WAITING"
++msgstr "等待"
++
++#: core/ui/ui_screens.c
++msgctxt "CALL_STATE_ADMITTED"
++msgid "ADMITTED"
++msgstr "已准许"
++
++#: core/ui/ui_screens.c
++msgctxt "CALL_STATE_ENDING"
++msgid "ENDING"
++msgstr "结束中"
++
++#: core/ui/ui_screens.c
++msgctxt "CALL_HINT_FINISHING"
++msgid "Finishing the call"
++msgstr "正在结束通话"
++
++#: core/ui/ui_screens.c
++msgctxt "CALL_BODY_PRIVATE_ID"
++msgid "Private "
++msgstr "个呼 "
++
++#: core/ui/ui_screens.c
++msgctxt "CALL_BODY_TO_GROUP"
++msgid " Group"
++msgstr " 组呼"
++
+ #: core/ui/ui_screens.c
+ msgctxt "DUAL_BODY_HEARD"
+ msgid "Heard "
+@@ -5104,6 +5209,21 @@ msgctxt "QUICK_LABEL_TX_FREQ"
+ msgid "{TX freq|TXFreq}"
+ msgstr "{发射频率|发频}"
+ 
++#: core/ui/ui_screens.c
++msgctxt "QUICK_LABEL_CODE"
++msgid "Code"
++msgstr ""
++
++#: core/ui/ui_screens.c
++msgctxt "QUICK_LABEL_DEST"
++msgid "{Destination|Dest}"
++msgstr ""
++
++#: core/ui/ui_screens.c
++msgctxt "QUICK_LABEL_TRUNK"
++msgid "Trunk"
++msgstr "集群"
++
+ #: core/ui/ui_screens.c
+ msgctxt "QUICK_LABEL_TONE_TX"
+ msgid "Tone TX"
+@@ -5124,6 +5244,11 @@ msgctxt "QUICK_VALUE_ALL"
+ msgid "All"
+ msgstr "全部"
+ 
++#: core/ui/ui_screens.c
++msgctxt "QUICK_VALUE_TRUNK_GROUP"
++msgid "Grp"
++msgstr "本组"
++
+ #: core/ui/ui_screens.c
+ msgctxt "QUICK_HINT_SPLIT"
+ msgid "{Up/Dn: +/- offset  Type: TX freq|Up/Dn +/- offset  0-9 TX freq|Up/Dn offset  0-9 TX freq|Up/Dn +/-  0-9 TX freq}"
+@@ -5164,6 +5289,11 @@ msgctxt "STORE_ERR_CHANNEL_READ"
+ msgid "Couldn't read the channel: not saved"
+ msgstr "信道读取失败：未保存"
+ 
++#: core/ui/ui_svc_storage.c
++msgctxt "STORE_ERR_TARGET_NOT_STORED"
++msgid "Not a stored contact: for now only"
++msgstr "非已存联系人：仅临时"
++
+ #: core/ui/ui_svc_storage.c
+ msgctxt "STORE_ERR_ZONE_FULL"
+ msgid "Zone full: not saved"
+@@ -5194,11 +5324,6 @@ msgctxt "STORE_ERR_TARGET_CHANNEL_READ"
+ msgid "Couldn't read the channel: for now only"
+ msgstr "信道读取失败：仅临时"
+ 
+-#: core/ui/ui_svc_storage.c
+-msgctxt "STORE_ERR_TARGET_NOT_STORED"
+-msgid "Not a stored contact: for now only"
+-msgstr "非已存联系人：仅临时"
+-
+ #: core/ui/ui_svc_storage.c
+ msgctxt "STORE_ERR_TARGET_NOT_WRITTEN"
+ msgid "Codeplug not written: for now only"
+@@ -5243,43 +5368,3 @@ msgstr "本机无法识别该区域"
+ msgctxt "SHARE_ERR_OFFER_GONE"
+ msgid "The offer is gone"
+ msgstr "该邀请已失效"
+-
+-#: core/ui/ui_menus.c
+-msgctxt "CHAN_LABEL_TRUNK"
+-msgid "Trunk"
+-msgstr "集群"
+-
+-#: core/ui/ui_menus.c
+-msgctxt "CHAN_VALUE_TRUNK_ALL"
+-msgid "All groups"
+-msgstr "所有组"
+-
+-#: core/ui/ui_menus.c
+-msgctxt "CHAN_VALUE_TRUNK_GROUP"
+-msgid "Group"
+-msgstr "本组"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "QUICK_LABEL_TRUNK"
+-msgid "Trunk"
+-msgstr "集群"
+-
+-#: core/ui/ui_screens.c
+-msgctxt "QUICK_VALUE_TRUNK_GROUP"
+-msgid "Grp"
+-msgstr "本组"
+-
+-#: core/ui/ui_app.c
+-msgctxt "QUICK_TOAST_TRUNK_ALL"
+-msgid "Trunk: every group"
+-msgstr "集群：所有组"
+-
+-#: core/ui/ui_app.c
+-msgctxt "QUICK_TOAST_TRUNK_GROUP"
+-msgid "Trunk: this group"
+-msgstr "集群：本组"
+-
+-#: core/ui/ui_app.c
+-msgctxt "QUICK_TOAST_TRUNK_OFF"
+-msgid "Trunk off"
+-msgstr "集群关闭"
+diff --git a/core/ui/ui_gps.c b/core/ui/ui_gps.c
+index 1bcbc9d..7234bac 100644
+--- a/core/ui/ui_gps.c
++++ b/core/ui/ui_gps.c
+@@ -1,7 +1,7 @@
+ // SPDX-License-Identifier: MIT
+ // Copyright (c) 2026 The RadioFoundry Authors
+ // Tools > Position with CONFIG_GPS_SKY (docs/spec/ui.md 2.3): the board GPS on four pages, Up / Down (the knob, the
+-// digits 1-4) to turn them. Status: the fix, satellites, position, altitude, speed, dilution, time. Sky: where each
++// digits) to turn them. Status: the fix, satellites, position, altitude, speed, dilution, time. Sky: where each
+ // satellite is (a polar plot, north up), filled when the fix uses it. Signal: each satellite with a signal as a bar. Grid:
+ // the Maidenhead locator large, the position in degrees, minutes and seconds. Nothing is kept: every draw reads the
+ // service again, the satellites one at a time.
+@@ -15,9 +15,9 @@
+ #include "fmt.h"
+ #include "i18n.h"
+ 
+-enum { PG_STATUS, PG_SKY, PG_SIGNAL, PG_GRID, PG_COUNT };
++enum { PG_STATUS, PG_SKY, PG_SIGNAL, PG_GRID, PG_CLOCK, PG_COUNT };
+ static const tr_id_t page_names[PG_COUNT] = { TRN(GPS_TITLE_STATUS, "Status"), TRN(GPS_TITLE_SKY, "Sky"),
+-	TRN(GPS_TITLE_SIGNAL, "Signal"), TRN(WORD_GRID, "Grid") };
++	TRN(GPS_TITLE_SIGNAL, "Signal"), TRN(WORD_GRID, "Grid"), TRN(GPS_TITLE_CLOCK, "Clock") };
+ static const char sys_letter[UI_GNSS_COUNT] = { 'G', 'R', 'E', 'C', 'J' };
+ static const char *const sys_names[UI_GNSS_COUNT] = { "GPS", "GLONASS", "Galileo", "BeiDou", "QZSS" };
+ static const char *const sys_short[UI_GNSS_COUNT] = { "GPS", "GLO", "GAL", "BDS", "QZS" };
+@@ -25,10 +25,10 @@ static const char *const sys_short[UI_GNSS_COUNT] = { "GPS", "GLO", "GAL", "BDS"
+ 
+ static uint8_t page;
+ 
+-// A tall panel has room for the grid on Status: three pages, no Grid page
++// A tall panel has room for the grid on Status, without a separate Grid page
+ static uint8_t page_count(void)
+ {
+-	return gfx_height() >= UI_TALL_PX ? PG_GRID : PG_COUNT;
++	return gfx_height() >= UI_TALL_PX ? PG_COUNT - 1 : PG_COUNT;
+ }
+ 
+ // A system's color; every one is also named in the legend (P5). Ink on a monochrome panel
+@@ -277,7 +277,7 @@ static void draw_status(const ui_position_t *p, int y)
+ 	char buf[32];
+ 	sbuf_t b;
+ 	const font_t *big = gfx_width() >= 200 ? ui_layout.large : ui_layout.medium;
+-	bool grid = page_count() == PG_GRID && p->fix;	// tall panels have no separate Grid page
++	bool grid = gfx_height() >= UI_TALL_PX && p->fix;	// tall panels have no separate Grid page
+ 	gfx_text(big, 0, y, fix_word(p), p->fix ? ui_col.rx : ui_col.warn);
+ 	if (grid) {
+ 		char loc[7];
+@@ -549,20 +549,47 @@ static void draw_grid(const ui_position_t *p, int y)
+ 	row(&y, "", buf, ui_col.dim);
+ }
+ 
++static void draw_clock(const ui_position_t *p, int y)
++{
++	if (!p->fix || p->utc_hms == 0xFFFFFFFFu) {
++		gfx_text(ui_layout.small, 0, y, TR(GPS_EMPTY_NO_FIX, "No fix yet"), ui_col.warn);
++		return;
++	}
++	char text[16];
++	sbuf_t b;
++	sb_init(&b, text, sizeof text);
++	sb_u32(&b, p->utc_hms / 10000u, 2);
++	sb_chr(&b, ':');
++	sb_u32(&b, p->utc_hms / 100u % 100u, 2);
++	sb_chr(&b, ':');
++	sb_u32(&b, p->utc_hms % 100u, 2);
++	if (!row(&y, "UTC", text, ui_col.fg) || p->utc_date == 0)
++		return;
++	sb_init(&b, text, sizeof text);
++	sb_u32(&b, p->utc_date % 100u + 2000u, 4);
++	sb_chr(&b, '-');
++	sb_u32(&b, p->utc_date / 100u % 100u, 2);
++	sb_chr(&b, '-');
++	sb_u32(&b, p->utc_date / 10000u, 2);
++	row(&y, TR(GPS_LABEL_DATE, "Date"), text, ui_col.fg);
++}
++
+ static void gps_draw(void)
+ {
+ 	ui_position_t p;
+ 	gfx_clear(ui_col.bg);
+-	int y = ui_draw_top(ui_view(), &ui_st, "GPS", tr(page_names[page])) + 2;
++	uint8_t current = gfx_height() >= UI_TALL_PX && page == PG_GRID ? PG_CLOCK : page;
++	int y = ui_draw_top(ui_view(), &ui_st, "GPS", tr(page_names[current])) + 2;
+ 	if (!ui_svc_position(&p)) {
+ 		gfx_text(ui_layout.small, 0, y, TR(GPS_WHY_NO_GPS_OR_OFF, "No GPS, or it is off"), ui_col.warn);
+ 		gfx_text(ui_layout.small, 0, y + ui_layout.small->h + 2,
+ 			TR(GPS_FIX_SETTINGS_LOCATION, "Settings > Location"), ui_col.dim);
+ 	} else {
+-		switch (page) {
++		switch (current) {
+ 		case PG_SKY: draw_sky(&p, y); break;
+ 		case PG_SIGNAL: draw_signal(&p, y); break;
+ 		case PG_GRID: draw_grid(&p, y); break;
++		case PG_CLOCK: draw_clock(&p, y); break;
+ 		default: draw_status(&p, y); break;
+ 		}
+ 	}
+diff --git a/core/ui/ui_menus.c b/core/ui/ui_menus.c
+index fc4f97e..e8d700f 100644
+--- a/core/ui/ui_menus.c
++++ b/core/ui/ui_menus.c
+@@ -6810,7 +6810,7 @@ void ui_crash_tick(uint32_t now_ms)
+ // user guide) is the same everywhere. The one a radio may not have (Battery) is last, so no radio has a gap; a build
+ // without diagnostics skips 7
+ enum { T_SCAN, T_POSITION, T_HOTSPOT, T_USB_NET, T_SFR, T_ROAM, T_DIAG, T_APRS, T_BATTERY, T_ZONE_OFFER,
+-       T_ZONE_SCAN, T_RX_EXT, T_COUNT };
++       T_ZONE_SCAN, T_RX_EXT, T_VFO_SCAN_LOW, T_VFO_SCAN_HIGH, T_COUNT };
+ 
+ // Defined with the generic settings groups below; appended to Tools so every existing tool keeps its number
+ #if CONFIG_SCAN && CONFIG_UI_SETTINGS
+@@ -6825,6 +6825,8 @@ static bool tool_shown(uint16_t i)
+ 	if (i == T_ZONE_OFFER)
+ 		return offer_waiting();	// 0 on the keypad: only while another radio's zone waits
+ #endif
++	if (i == T_VFO_SCAN_LOW || i == T_VFO_SCAN_HIGH)
++		return CONFIG_SCAN && CONFIG_VFO && ui_view()->vfo;
+ 	return (i != T_DIAG || CONFIG_DIAG) && (i != T_BATTERY || board_volts() != BOARD_VOLTS_NONE) &&
+ 	       (i != T_ZONE_SCAN || (CONFIG_SCAN && CONFIG_UI_SETTINGS)) &&
+ 	       (i != T_RX_EXT || (CONFIG_RX_EXT && board.rx_ext_count != 0)) && i != T_ZONE_OFFER;
+@@ -6876,7 +6878,8 @@ static void tools_item(uint16_t row, ui_item_t *it)
+ 		TRN(TITLE_DIAGNOSTICS, "Diagnostics"), TRX(WORD_APRS, "APRS"), TRN(TITLE_BATTERY, "Battery"),
+ 		TRN(TOOLS_ROW_SHARES_RECEIVED, "Zones/Chs Received"),
+ 		TRN(TOOLS_ROW_ZONE_SCAN_SPEED, "Zone scan speed"),
+-		TRN(SET_LABEL_RX_PAST_BANDS, "RX past bands") };
++		TRN(SET_LABEL_RX_PAST_BANDS, "RX past bands"),
++		TRN(TOOLS_ROW_SCAN_LOW, "Scan low"), TRN(TOOLS_ROW_SCAN_HIGH, "Scan high") };
+ 	uint16_t i = tools_row(row);
+ 	if (i >= T_COUNT)
+ 		return;
+@@ -6929,6 +6932,15 @@ static void tools_item(uint16_t row, ui_item_t *it)
+ 		sb_u32(&b, ui_st.battery_pct, 1);
+ 		sb_chr(&b, '%');
+ 		break;
++	case T_VFO_SCAN_LOW:
++	case T_VFO_SCAN_HIGH: {
++		int32_t hz = ui_svc_setting_get(i == T_VFO_SCAN_LOW ? UI_SET_VFO_SCAN_LOW : UI_SET_VFO_SCAN_HIGH);
++		if (hz > 0)
++			sb_freq(&b, (uint32_t)hz);
++		else
++			sb_str(&b, TR(VALUE_AUTO, "Auto"));
++		break;
++	}
+ 	case T_ZONE_SCAN:
+ 		sb_i32(&b, ui_svc_setting_get(UI_SET_ZONE_SCAN_DWELL));
+ 		sb_str(&b, " ms");
+@@ -6967,8 +6979,17 @@ static void tools_item(uint16_t row, ui_item_t *it)
+ 
+ static void tools_select(uint16_t row, bool hold)
+ {
+-	(void)hold;
+-	switch (tools_row(row)) {
++	uint16_t tool = tools_row(row);
++	switch (tool) {
++	case T_VFO_SCAN_LOW:
++	case T_VFO_SCAN_HIGH: {
++		const radio_view_t *v = ui_view();
++		if (!v->vfo || v->scan != 0)
++			break;
++		uint8_t id = tool == T_VFO_SCAN_LOW ? UI_SET_VFO_SCAN_LOW : UI_SET_VFO_SCAN_HIGH;
++		ui_svc_setting_set(id, hold ? 0 : (int32_t)v->ch.rx_hz);
++		break;
++	}
+ 	case T_RX_EXT:
+ #if CONFIG_RX_EXT
+ 	{
+@@ -7260,6 +7281,9 @@ static const set_item_t s_zone_scan[] = {
+ 	     UI_SET_ZONE_SCAN_DWELL, v_zone_scan_dwell, n_zone_scan_dwell),
+ };
+ 
++static const int16_t v_permit[] = { RADIO_PERMIT_DEFAULT, RADIO_PERMIT_CHIRP, RADIO_PERMIT_TRIPLE };
++static const tr_id_t n_permit[] = { TRN(VALUE_DEFAULT, "Default"), TRN(SET_VALUE_PERMIT_CHIRP, "Chirp"),
++	TRN(SET_VALUE_PERMIT_TRIPLE, "Triple beep") };
+ static const set_item_t s_sound[] = {
+ 	NUMBER(TRN(TITLE_VOLUME, "Volume"), "speaker loudness", UI_SET_VOLUME, 0, RADIO_VOLUME_MAX, 1, NULL),
+ 	TOGGLE(TRN(SET_LABEL_KEY_TONES, "Key tones"), "beep", UI_SET_KEY_TONES),
+@@ -7276,7 +7300,20 @@ static const set_item_t s_sound[] = {
+ #if CONFIG_VIBRATE
+ 	TOGGLE(TRN(SET_LABEL_VIBRATE, "Vibrate"), "vibration motor silent", UI_SET_VIBRATE),
+ #endif
++	LIST(TRN(SET_LABEL_TALK_PERMIT_SOUND, "Talk permit sound"), "FM analog chirp", UI_SET_PERMIT_STYLE, v_permit, n_permit),
++	TOGGLE(TRN(SET_LABEL_ROGER_BEEP, "FM roger beep"), "transmit end tone", UI_SET_ROGER_BEEP),
+ };
++static const int16_t v_led_mode[] = { RADIO_LED_NORMAL,
++#if CONFIG_SCAN
++	RADIO_LED_SCAN_AMBER,
++#endif
++	RADIO_LED_OFF };
++static const tr_id_t n_led_mode[] = { TRN(VALUE_DEFAULT, "Default"),
++#if CONFIG_SCAN
++	TRN(SET_VALUE_SCAN_AMBER, "Scan amber"),
++#endif
++	TRN(VALUE_OFF, "Off") };
++
+ static const set_item_t s_display[] = {
+ 	NUMBER(TRN(SET_LABEL_BRIGHTNESS, "Brightness"), "backlight", UI_SET_BRIGHTNESS, 10, 100, 10, "%"),
+ 	LIST(TRN(SET_LABEL_BACKLIGHT_DIM_OFF, "Backlight Dim/Off"), "timeout", UI_SET_BACKLIGHT_S, v_backlight,
+@@ -7297,6 +7334,7 @@ static const set_item_t s_display[] = {
+ 		v_style, n_style),
+ 	TOGGLE(TRN(SET_LABEL_LARGE_CHANNEL_NAME, "Large channel name"), "Home Pink frequency name", UI_SET_HOME_NAME_FIRST),
+ #endif
++	LIST(TRN(SET_LABEL_STATUS_LEDS, "Status LEDs"), "light amber blink scan", UI_SET_RADIO_LED_MODE, v_led_mode, n_led_mode),
+ 	// Last, so the rows above keep their places; its search words are "language" in other languages, for a user who
+ 	// can't read the English
+ 	ACTION(TRN(SET_LABEL_LANGUAGE, "Language"), "idioma langue sprache lingua taal jezyk", SA_LANGUAGE),
+@@ -7722,8 +7760,12 @@ static const char *set_why_not(const set_item_t *s)
+ 	case UI_SET_VOICE_PROMPTS:
+ 		return TR(WHY_VOICE_PROMPTS_NOT_IN_BUILD, "Voice prompts: not in this build");
+ 	case UI_SET_TALK_PERMIT:
+-		return CONFIG_DMR && CONFIG_BEEP ? NULL :
++	case UI_SET_PERMIT_STYLE:
++		return CONFIG_BEEP && (CONFIG_FM || CONFIG_DMR) ? NULL :
+ 			TR(WHY_PERMIT_TONE_NOT_IN_BUILD, "Talk permit tone: not in this build");
++	case UI_SET_ROGER_BEEP:
++		return CONFIG_FM_TX_TONES && board.radio != NULL && board.radio->tx_tone != NULL ? NULL :
++			TR(WHY_TONES_NOT_IN_BUILD, "Tones: not in this build");
+ 	case UI_SET_CALL_END_TONE:
+ 		return CONFIG_DMR && CONFIG_BEEP ? NULL : CONFIG_BEEP ?
+ 			TR(WHY_DMR_NOT_IN_BUILD, "DMR: not in this build") :
+diff --git a/core/ui/ui_svc.h b/core/ui/ui_svc.h
+index 7e9e8d4..bcbd81f 100644
+--- a/core/ui/ui_svc.h
++++ b/core/ui/ui_svc.h
+@@ -260,6 +260,7 @@ typedef struct {
+ 	uint16_t hdop10;	// horizontal dilution x 10, 0xFFFF unknown
+ 	uint16_t speed_kmh, course;	// 0xFFFF unknown
+ 	uint32_t utc_hms;	// hhmmss, 0xFFFFFFFF unknown
++	uint32_t utc_date;	// GPS RMC ddmmyy, 0 unknown
+ } ui_position_t;
+ bool ui_svc_position(ui_position_t *out);	// false: no GPS on this radio (or off)
+ // One satellite for the GPS screen's sky plot and signal bars
+@@ -449,6 +450,9 @@ typedef enum {
+ 	UI_SET_EMERGENCY_TONE,
+ 	UI_SET_CLASSIC_STYLE,	// use the RadioFoundry interface and boot artwork (CONFIG_UI_KAWAII)
+ 	UI_SET_HOME_NAME_FIRST,	// primary text on Pink Home (CONFIG_UI_KAWAII)
++	UI_SET_RADIO_LED_MODE,	// radio_led_mode_t (Settings > Display)
++	UI_SET_VFO_SCAN_LOW, UI_SET_VFO_SCAN_HIGH,	// saved VFO bounds in Hz
++	UI_SET_PERMIT_STYLE, UI_SET_ROGER_BEEP,	// radio_settings_t (Settings > Sound)
+ 	UI_SET_COUNT
+ } ui_setting_t;
+ 
+diff --git a/core/ui/ui_svc_position.c b/core/ui/ui_svc_position.c
+index 39c4dc3..db388f2 100644
+--- a/core/ui/ui_svc_position.c
++++ b/core/ui/ui_svc_position.c
+@@ -28,6 +28,7 @@ bool ui_svc_position(ui_position_t *out)
+ 	out->speed_kmh = g.speed_kmh;
+ 	out->course = g.course;
+ 	out->utc_hms = g.utc_hms;
++	out->utc_date = g.date;
+ 	return true;
+ }
+ 
+diff --git a/core/ui/ui_svc_radio.c b/core/ui/ui_svc_radio.c
+index 39bd0e9..5aeec7d 100644
+--- a/core/ui/ui_svc_radio.c
++++ b/core/ui/ui_svc_radio.c
+@@ -624,6 +624,21 @@ void ui_svc_apply(uint8_t id, int32_t value)
+ 	case UI_SET_SCAN_TONE:
+ 		rs.scan_beep = value != 0;
+ 		break;
++	case UI_SET_PERMIT_STYLE:
++		rs.permit_style = (uint8_t)v16;
++		break;
++	case UI_SET_ROGER_BEEP:
++		rs.roger_beep = value != 0;
++		break;
++	case UI_SET_VFO_SCAN_LOW:
++		rs.scan_lo_hz = value > 0 ? (uint32_t)value : 0;
++		break;
++	case UI_SET_VFO_SCAN_HIGH:
++		rs.scan_hi_hz = value > 0 ? (uint32_t)value : 0;
++		break;
++	case UI_SET_RADIO_LED_MODE:
++		rs.led_mode = (uint8_t)v16;
++		break;
+ 	case UI_SET_ZONE_SCAN_DWELL:
+ 		rs.zone_scan_dwell_ms = v16;
+ 		break;
+diff --git a/core/ui/ui_svc_storage.c b/core/ui/ui_svc_storage.c
+index 116a659..d285c68 100644
+--- a/core/ui/ui_svc_storage.c
++++ b/core/ui/ui_svc_storage.c
+@@ -307,6 +307,17 @@ int32_t ui_svc_setting_get(uint8_t id)
+ 	case UI_SET_SCAN_TONE:
+ 		radio_get_settings(&rs);
+ 		return id == UI_SET_TALK_PERMIT ? rs.talk_permit : rs.scan_beep;
++	case UI_SET_PERMIT_STYLE:
++	case UI_SET_ROGER_BEEP:
++		radio_get_settings(&rs);
++		return id == UI_SET_PERMIT_STYLE ? rs.permit_style : rs.roger_beep;
++	case UI_SET_VFO_SCAN_LOW:
++	case UI_SET_VFO_SCAN_HIGH:
++		radio_get_settings(&rs);
++		return (int32_t)(id == UI_SET_VFO_SCAN_LOW ? rs.scan_lo_hz : rs.scan_hi_hz);
++	case UI_SET_RADIO_LED_MODE:
++		radio_get_settings(&rs);
++		return rs.led_mode;
+ 	case UI_SET_ZONE_SCAN_DWELL:
+ 		radio_get_settings(&rs);
+ 		return rs.zone_scan_dwell_ms;
+@@ -438,6 +449,11 @@ bool ui_svc_setting_set(uint8_t id, int32_t value)
+ 	case UI_SET_REPLY_S:
+ 	case UI_SET_TALK_PERMIT:
+ 	case UI_SET_SCAN_TONE:
++	case UI_SET_RADIO_LED_MODE:
++	case UI_SET_PERMIT_STYLE:
++	case UI_SET_ROGER_BEEP:
++	case UI_SET_VFO_SCAN_LOW:
++	case UI_SET_VFO_SCAN_HIGH:
+ 	case UI_SET_ZONE_SCAN_DWELL:
+ #if CONFIG_SFR
+ 	case UI_SET_SFR_RX:
+diff --git a/docs/spec/radio-features.md b/docs/spec/radio-features.md
+index 5138001..6940862 100644
+--- a/docs/spec/radio-features.md
++++ b/docs/spec/radio-features.md
+@@ -62,7 +62,8 @@ tuned channel or frequency is the core view's as usual.
+   channel as a channel change would (P25, NXDN, YSF: the engine starts there). Left out: parked channels, P25 trunked
+   channels, NXDN channels at a rate the board can't receive, and YSF channels at a deviation the board can't receive ([p25.md](p25.md) 7.1, [nxdn.md](nxdn.md) 6.4, [ysf.md](ysf.md) 8).
+ - **VFO scan** steps the VFO frequency by its step from `lo` to `hi` and wraps. Without a range it sweeps the board
+-  band the VFO frequency is in. Both ends must be in one band, at least one step apart.
++  band the VFO frequency is in. **Tools > Scan low** and **Scan high** save the tuned VFO frequency as each bound.
++  Hold OK to clear a bound. Both saved ends must be in the VFO's current band and at least one step apart.
+ - **Dual watch** alternates between two channels, skip flags ignored (2.1). `radio_req_scan_dual(pos)` (the debug
+   link's) watches the current channel and position `pos` of the current zone. The UI on top of it (A and B, the
+   screens, the keys) is in [dual-watch.md](../ux/dual-watch.md).
+@@ -461,6 +462,7 @@ The ID is 4 hex digits. There are no names for IDs yet. Untested on a radio.
+ | TX permit | 1568, 1047, 1568, 1319 Hz, 40 ms each, no gaps (the MOTOTRBO chirp) | DMR: the channel is granted (unless the codeplug channel has "no beep", or `talk_permit` is off: Settings > Sound > Talk permit tone) |
+ | TX permit, before keying | the same chirp | The TX permit on boards with `CAP_BEEP_NOT_ON_AIR`, whose beeps can't sound while DMR transmits: once the call is admitted, the stack holds the key-up (`dmr_call_config_t.permit_hold_ms`, `permit_busy`) while the radio still receives and this tone plays. It keys once the tone and the driver's buffers have played out (`hal_audio_t.spk_pending`): at least 40 ms, at most 400 ms (`DMR_CALL_PERMIT_MAX_MS`). The same conditions as the TX permit |
+ | TX permit, P25 / NXDN / YSF | 910 Hz 70 ms, 30 ms, 60 ms with 20 ms gaps (the ASTRO 25 permit) | PTT on a conventional P25, NXDN or YSF channel whose engine can transmit: the tone plays while the channel still receives, then the engine keys (`air_permit_poll`): once the beep, its own stream and the driver's buffers are done, at least 40 ms, at most 600 ms. PTT let go during it: nothing is keyed. The same conditions as the TX permit; never on trunked channels |
++| TX permit, FM | selected chirp or triple beep | For local PTT when a sound is selected instead of Default. Waits for the tone to finish before keying. Releasing PTT during the wait cancels the transmission. |
+ | TX deny | 300 Hz 400 ms | any TX refusal but a busy channel (3.1), unless Settings > Sound > TX denied tone is off (settings area key 0x0006) |
+ | call end | 1200 Hz 50 ms, 900 Hz 70 ms | DMR: a played call ended (unless "no beep", or Settings > Sound > Call end tone is off: settings area key 0x0003) |
+ | TOT warning | 1000 Hz 100 ms twice | 3.2, unless Settings > Sound > TOT warning tone is off (settings area key 0x0004) |
+@@ -691,6 +693,9 @@ over that (`radio_sm.c` `led_signals`, the times in `radio_sm.h`), for radios wi
+ | A TX deny, every reason (`RS_TX_DENIED`), and a repeater that didn't wake after a short press was let go | red, green, red, green, red, green, `RADIO_LED_DENY_STEP_MS` (100 ms) each, once, with the deny tone (none for a busy channel, 3.1); then what the state shows. A transmission that starts during it ends it |
+ | The PTT line stuck low, which only a power cycle releases ([gotchas.md](gotchas.md) 16.5) | red and green in turn, 125 ms each, until the power cycle |
+ 
++Settings > Display > Status LEDs can disable both indicators. Scan amber lights red and green together for 125 ms
++per second while a zone or VFO scan searches, yielding to receive, transmit and timed PTT indications.
++
+ Once the repeater answers and the voice goes out, red is solid as for any transmission. The tick and the poll keep
+ calling `outputs()` while a signal runs, so it keeps time when nothing else changes.
+ 
+diff --git a/docs/spec/settings-store.md b/docs/spec/settings-store.md
+index 615e93c..a527ac5 100644
+--- a/docs/spec/settings-store.md
++++ b/docs/spec/settings-store.md
+@@ -76,7 +76,7 @@ so with two pages a sector is erased once every 64 saves.
+ ### 2.1 Pages
+ 
+ `settings_t` is longer than one slot's payload, so it is stored as pages: page k holds bytes `236 * k` on.
+-`SETTINGS_PAGES` is the number its size needs (2 now, 416 bytes); the page field allows 16 (3776 bytes). Each page is
++`SETTINGS_PAGES` is the number its size needs (2 now, 428 bytes); the page field allows 16 (3776 bytes). Each page is
+ a record with its own length, so `settings_t` grows by appending fields, and a short page fills the fields it has.
+ 
+ | Rule | Why |
+@@ -171,6 +171,8 @@ callsign. The own DMR ID is always the codeplug's.
+ | VFO digital | Page 1, appended after `air_epoch`. Each VFO stores its NXDN rate, YSF deviation and AES key selection per protocol. Older records keep the existing mode and the default digital settings. |
+ | Tier III kill | Page 1, appended after `t3_stun`: `t3_kill`, bit 0 (`SETTINGS_T3_KILLED`) a kill taken ([dmr-trunking.md](dmr-trunking.md) 7.9): no DMR at all, in any build, until a factory reset clears it; bits 1-7 reserved (0). Then `air_epoch` (16 bits, was `reserved10[2]`): the start's number for the air modes' encryption ([air-encryption.md](air-encryption.md) 1), raised by one at every boot. 0 (an older record) = not killed |
+ | crash report | packed into spare bits, so an older record reads as off with no target: the mode (0 off, 1 ask, 2 send at once) in `accent` bits 4-5; the target's codeplug contact number (0 none, else 1..1024, 11 bits) bits 0-5 in `theme` bits 2-7 and bits 6-10 in `updown_home` bits 2-6. `theme` and `updown_home` keep their value in bits 0-1; read and write them through `settings_theme` / `settings_updown_home` and `settings_crash_*` (`settings.h`). Firmware from before reads a `theme` or `updown_home` with these bits as out of range: the dark theme and Up/Down = channel ([crash-log.md](crash-log.md) 5.2) |
++| scan limits and LEDs | Page 1 appends `rs_led_mode` (default, scan amber, off) and both optional VFO limits in Hz. Zero keeps the original indicators and scans the entire current band. |
++| talk permit style | The appended `rs_permit_style` byte lets the owner pick a chirp or three beeps across modes. Zero keeps each mode's original behavior. The existing flags still store talk-permit enable and FM roger beep. |
+ | visual style | Page 1: `classic_style` uses the first byte reserved after the VFO digital settings. Zero uses the build's default style. One uses RadioFoundry styling and boot artwork. The appended byte `home_name_first` is 1 for a larger channel name on Pink Home, 0 for the default frequency emphasis. Older records read 0. |
+ 
+ All of these are still layout 1: they were appended before any firmware with the settings store shipped. Page 0
+diff --git a/docs/spec/ui.md b/docs/spec/ui.md
+index 0b5f749..126665c 100644
+--- a/docs/spec/ui.md
++++ b/docs/spec/ui.md
+@@ -313,7 +313,7 @@ they show the change within a fraction of a second.
+ 
+ ### 2.3 GPS screen
+ 
+-With `CONFIG_GPS_SKY`, Tools > Position (`gps`, `ui_gps.c`) has four pages, three on a panel at least `UI_TALL_PX` tall
++With `CONFIG_GPS_SKY`, Tools > Position (`gps`, `ui_gps.c`) has five pages, four on a panel at least `UI_TALL_PX` tall
+ (Status takes in Grid there). Up and Down (the knob) turn them and wrap; the digits go to one. It opens on Status. Every draw reads `ui_svc_position` and the satellites one at a time
+ (`ui_svc_gps_sat`), so the screen keeps only its page and the last UTM projection, where built.
+ 
+@@ -322,6 +322,7 @@ With `CONFIG_GPS_SKY`, Tools > Position (`gps`, `ui_gps.c`) has four pages, thre
+ | Status | fix type, speed in km/h with course when known, and the coordinates in the format selected under Settings > Location > Position format (decimal degrees, DMS, Maidenhead, or WGS 84 UTM). Additional rows show satellites, altitude, HDOP and UTC when they fit. Tall panels also show the locator beside the fix type. UTM shows the zone, hemisphere, easting and northing in meters for 80°S through 84°N |
+ | Sky | a polar plot, north up: the horizon and 45 degree rings, each satellite with a known position as a dot, filled when the fix uses it, hollow when not, gray when it has no signal. Labeled (G12, C23) where the plot is 80 px or wider: right of the dot, else left, and left out where it would touch another dot or label. A legend names each system heard with used / seen: full names where they fit, else GPS, GLO, GAL, BDS, QZS. Beside the plot, or under it in two columns on a tall panel |
+ | Signal | satellites in the fix of those seen, then one bar per satellite with a signal (SNR above 0), its height the SNR (50 dB-Hz full), filled when used. The satellite numbers under the bars: one row where two digits fit a bar, else two rows taking turns |
++| Clock | UTC time and the UTC calendar date of the current GPS fix. |
+ | Grid | the Maidenhead locator (6 characters) large, then the position in degrees, minutes, seconds and in decimal degrees (6 decimals). "No fix yet" without a fix. Not on a tall panel |
+ 
+ Colors name the system (GPS blue, GLONASS red, Galileo yellow, BeiDou green, QZSS purple; darker on the light theme),
+diff --git a/docs/user/12-scan.md b/docs/user/12-scan.md
+index b8d3142..d860a18 100644
+--- a/docs/user/12-scan.md
++++ b/docs/user/12-scan.md
+@@ -14,6 +14,11 @@ Which radios have scan and dual watch verified is in the [Radio reference](23-ra
+ On a channel the radio scans the current zone ("Scanning this zone"). In the VFO it sweeps the band the VFO frequency
+ is in ("Scanning the band"). The status line shows SCAN, and the channel name changes as the scan moves.
+ 
++For a narrower VFO scan, tune the lower frequency and press **OK** on **Tools > Scan low**. Tune the upper frequency
++and press **OK** on **Tools > Scan high**. The radio remembers both. When the limits are in the active band and at least
++one VFO step apart, scanning stays within them. Set the step under **Settings > Talk & listen > VFO step**. Hold **OK**
++on either limit to clear it and scan the full band again.
++
+ A scan needs at least one other channel to go to. It doesn't run in hotspot mode or while you transmit.
+ 
+ If dual watch is running, starting a scan stops it. The radio stays on the selected channel and scans from there.
+@@ -202,5 +207,3 @@ Starting dual watch stops a zone scan. With **Large text** on (Settings > Displa
+ marked with an arrow.
+ 
+ [Design and layouts for every display](../ux/dual-watch.md)
+-
+-The radio core can also scan a VFO range set by two frequencies. There is no menu item for that yet.
+diff --git a/docs/user/17-settings.md b/docs/user/17-settings.md
+index 0af1304..a15be4b 100644
+--- a/docs/user/17-settings.md
++++ b/docs/user/17-settings.md
+@@ -39,6 +39,8 @@ Some settings are on the menu before the feature behind them exists, or don't ap
+ | Volume | 0 to 16 | 8 | The speaker volume, on radios without a volume knob only (the row is not shown on the others). 0 is mute. The **Volume** key opens a screen that changes it faster ([Radio reference](23-radios.md#key-roles)) | Works |
+ | Tone volume | 0 to 10 | 5 | The loudest the radio's beeps get. Beeps follow the speaker volume up to this level, so turning the volume down makes them quieter too | Works |
+ | Talk permit tone | On, Off | On | The tone when a DMR transmission starts (MOTOTRBO-style chirp), and before a P25 or NXDN one (three 910 Hz beeps) ([DMR](09-dmr.md#the-talk-permit-tone)) | Works |
++| Talk permit sound | Default, Chirp, Triple beep | Default | Pick a local sound for all supported modes. Chirp or Triple beep also enables a tone before the radio keys on FM. | Works |
++| FM roger beep | On, Off | Off | Send a tone pair over the air when PTT is released on FM. | On radios with an FM transmit tone |
+ | Call end tone | On, Off | On | The two-note beep when a DMR call you heard ends | Works |
+ | TOT warning tone | On, Off | On | The beep a few seconds before the transmit time-out cuts a transmission | Works |
+ | Battery tone | On, Off | On | The beeps for a low and a critical battery | Works |
+@@ -60,6 +62,7 @@ Some settings are on the menu before the feature behind them exists, or don't ap
+ | Filled status bar | On, Off | On | Fills the top status line with the highlight color (light gray with Default, white in the high-contrast theme) and draws its text black. Not on radios with a monochrome screen | Works |
+ | Large text | On, Off | Off | Home shows only the status line, the channel and the talk target, large | Works |
+ | Large channel name | On, Off | Off | On Pink Home, emphasizes a stored channel’s name and keeps the frequency visible | Works |
++| Status LEDs | Default, Scan amber, Off | Default | Gives an amber blink while a zone or VFO scan is searching, or turns the indicators off | Works |
+ | Hint row | On, Off | On | The bottom line with key hints | Works |
+ | Talkgroup name first | On, Off | Off | Home's talk line reads "World TG 91" instead of "TG 91 World": on a small screen the name is what fits. A side key set to **TG name / number** switches it too. On radios with DMR | Works |
+ | Language | English, Español, Italiano | English, or the Radio language picked in the web installer | The language of the menus and messages. A factory reset goes back to that default. The list shows every language RadioFoundry has; one that isn't in your firmware is dimmed. Pick it when you install with the web flasher to get it ([Installing](02-installing.md)). Names, callsigns and the standard radio abbreviations (TG, CC, VFO) stay as they are | Works |
+@@ -104,6 +107,8 @@ Some settings are on the menu before the feature behind them exists, or don't ap
+ 
+ #### Position
+ 
++**Tools > Position > Clock** shows UTC time and date once the GPS has a fix. Use **Up** or **Down** to reach Clock.
++
+ Your position is used by DMR calls (Send in DMR calls), by location requests from a dispatcher (Answer GPS requests)
+ and by APRS. None of them needs the others: a radio without APRS still reports its position over DMR.
+ 
+diff --git a/tests/host/radioFeaturesTest.c b/tests/host/radioFeaturesTest.c
+index 7b1ad71..11ea4af 100644
+--- a/tests/host/radioFeaturesTest.c
++++ b/tests/host/radioFeaturesTest.c
+@@ -1397,6 +1397,61 @@ static void test_zone_scan_timing_options(void)
+ 	}
+ }
+ 
++static void test_scan_boundaries_and_leds(void)
++{
++	start();
++	req(RREQ_VFO_SET, 146000000);
++	radio_settings_t s = sm.set;
++	s.scan_lo_hz = 146000000u;
++	s.scan_hi_hz = 146100000u;
++	s.led_mode = RADIO_LED_SCAN_AMBER;
++	radio_sm_set_settings(&sm, &s, now);
++	req(RREQ_SCAN, RSCAN_VFO);
++	CHECK(sm.scan.lo_hz == 146000000u && sm.scan.hi_hz == 146100000u);
++	bool amber = false, dark = false;
++	for (unsigned i = 0; i < 55; i++) {
++		run(20);
++		CHECK(hw.led[LED_RED] == hw.led[LED_GREEN]);
++		amber |= hw.led[LED_RED];
++		dark |= !hw.led[LED_RED];
++		CHECK(sm.view.ch.rx_hz >= 146000000u && sm.view.ch.rx_hz <= 146100000u);
++	}
++	CHECK(amber && dark);
++	s.led_mode = RADIO_LED_OFF;
++	radio_sm_set_settings(&sm, &s, now);
++	req(RREQ_SCAN, RSCAN_STOP);
++	req(RREQ_PTT, 1);
++	CHECK(sm.view.state == RS_TX && !hw.led[LED_RED] && !hw.led[LED_GREEN]);
++	req(RREQ_PTT, 0);
++	req(RREQ_VFO_SET, 446000000);
++	req(RREQ_SCAN, RSCAN_VFO);
++	CHECK(sm.scan.lo_hz != s.scan_lo_hz && sm.scan.hi_hz != s.scan_hi_hz);
++	req(RREQ_SCAN, RSCAN_STOP);
++}
++
++#if CONFIG_FM && CONFIG_BEEP
++static void test_fm_permit(void)
++{
++	start();
++	radio_settings_t s = sm.set;
++	s.permit_style = RADIO_PERMIT_TRIPLE;
++	radio_sm_set_settings(&sm, &s, now);
++	req(RREQ_PTT, 1);
++	CHECK(hw.tx_calls == 0);
++	run(80);
++	CHECK(hw.tx_calls == 0);
++	req(RREQ_PTT, 0);
++	run(700);
++	CHECK(hw.tx_calls == 0);
++	req(RREQ_PTT, 1);
++	run(700);
++	CHECK(hw.tx_calls == 1 && sm.view.state == RS_TX);
++	req(RREQ_PTT, 0);
++	run(300);
++	CHECK(sm.view.state == RS_IDLE);
++}
++#endif
++
+ static void test_vfo_scan(void)
+ {
+ 	start();
+@@ -4011,6 +4066,10 @@ int main(void)
+ 	test_zone_scan_dwell_setting();
+ 	test_zone_scan_timing_options();
+ 	test_vfo_scan();
++	test_scan_boundaries_and_leds();
++#if CONFIG_FM && CONFIG_BEEP
++	test_fm_permit();
++#endif
+ 	test_mixed_scan();
+ 	test_scan_dmr_mid_call();
+ 	test_scan_dmr_digital_monitor();
+diff --git a/tests/host/sim/ui_sim.c b/tests/host/sim/ui_sim.c
+index a1d75d5..7c18ad3 100644
+--- a/tests/host/sim/ui_sim.c
++++ b/tests/host/sim/ui_sim.c
+@@ -2377,6 +2377,7 @@ bool ui_svc_position(ui_position_t *out)
+ 	out->speed_kmh = 4;
+ 	out->course = 45;
+ 	out->utc_hms = 123519;
++	out->utc_date = 231126;
+ 	return true;
+ }
+ 
+diff --git a/tests/host/uiFlowTest.c b/tests/host/uiFlowTest.c
+index 04c8ed0..84573d0 100644
+--- a/tests/host/uiFlowTest.c
++++ b/tests/host/uiFlowTest.c
+@@ -970,6 +970,7 @@ static const flow_t flows[] = {
+ 	{ "G GPS status page", "", "ok 6 2", "shows=3D_Fix", 3, false },
+ 	{ "G GPS sky page", "ok 6 2", "down", "screen=gps shows=Sky", 1, false },
+ 	{ "G GPS signal page", "ok 6 2", "3", "shows=9_of_14_in_the_fix", 1, false },
++	{ "G GPS clock page", "ok 6 2", "up", "shows=2026-11-23", 1, false },
+ 	{ "G GPS grid page", "ok 6 2", "4", "shows=FN42li", 1, false },
+ 	{ "G GPS pages wrap", "ok 6 2", "up down", "shows=Status", 2, false },
+ 	{ "A KISS on USB", "ok 6 8", "up up up ok", "aprs_kiss=1", 4, false },
+@@ -1431,6 +1432,9 @@ static const flow_t flows_s[] = {
+ 
+ static void run_flow(const flow_t *f, const sim_geom_t *g, sim_map_t map, const char *mapname)
+ {
++	if (strcmp(f->name, "G GPS grid page") == 0 && g->h - 2 * g->inset_tb >= UI_TALL_PX)
++		return; // On a tall panel the locator already appears on Status.
++
+ 	char err[300];
+ 	char exp[300];
+ 	sim_reset(g, map);

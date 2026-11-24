@@ -1,0 +1,102 @@
+diff --git a/core/position/position.c b/core/position/position.c
+index 07f044a..cad03d4 100644
+--- a/core/position/position.c
++++ b/core/position/position.c
+@@ -27,8 +27,10 @@ static struct {
+ 	fix_t gps;
+ 	bool gps_off;		// Settings > Location > GPS is off: the board's fix doesn't count (position_gps_enable)
+ 	bool gps_heard;		// the board GPS has sent a valid sentence (fix or not), last at gps_heard_ms
+-	uint32_t gps_heard_ms;
++	bool gps_motion;	// speed belongs to a valid RMC received since the last loss of fix
+ 	uint8_t gps_sats;	// satellites used, from its last GGA
++	uint32_t gps_heard_ms;
++	uint32_t gps_motion_ms;
+ 	uint16_t gps_hdop10;	// ... and its dilution x 10, 0xFFFF unknown
+ #if CONFIG_GPS_SKY
+ 	nmea_sky_t sky;		// the satellites (GSV, GSA) for the GPS screen
+@@ -301,6 +303,12 @@ void position_nmea(const char *s, size_t n, bool gps, uint32_t now_ms)
+ 	if (gps && pos) {
+ 		p.gps_heard = true;
+ 		p.gps_heard_ms = now_ms;
++		if (!x.fix) {
++			p.gps_motion = false;
++		} else if (x.kind == NMEA_RMC) {
++			p.gps_motion = x.speed_kn10 != 0xFFFFu;
++			p.gps_motion_ms = now_ms;
++		}
+ 		if (x.kind == NMEA_GGA) {
+ 			p.gps_sats = x.sats;
+ 			p.gps_hdop10 = x.hdop10;
+@@ -349,7 +357,7 @@ void position_gps_enable(bool on)
+ 	p.gps_off = !on;
+ 	if (!on) {
+ 		p.gps.valid = false;
+-		p.gps_heard = false;
++		p.gps_heard = p.gps_motion = false;
+ #if CONFIG_GPS_SKY
+ 		nmea_sky_init(&p.sky);
+ #endif
+@@ -368,8 +376,10 @@ bool position_gps(position_gps_t *out, uint32_t now_ms)
+ 		out->lon = p.gps.f.lon;
+ 		out->alt_m = p.gps.f.alt_m;
+ 		out->hdop10 = p.gps_hdop10;
+-		out->speed_kmh = p.gps.f.speed_kmh;
+-		out->course = p.gps.f.course;
++		bool motion = out->fix && p.gps_motion &&
++			(int32_t)(now_ms - p.gps_motion_ms) < (int32_t)POSITION_STALE_MS;
++		out->speed_kmh = motion ? p.gps.f.speed_kmh : 0xFFFFu;
++		out->course = motion ? p.gps.f.course : 0xFFFFu;
+ 		out->utc_hms = p.gps.f.utc_hms;
+ #if CONFIG_GPS_SKY
+ 		out->mode = p.sky.mode;
+diff --git a/docs/spec/position.md b/docs/spec/position.md
+index 0894e60..397f1aa 100644
+--- a/docs/spec/position.md
++++ b/docs/spec/position.md
+@@ -76,7 +76,8 @@ the GPS driver's task, readers are the radio, UI and debug link tasks. Each read
+ 
+ `position_gps()` gives the UI the board GPS as it is now: false while Settings > Location > GPS is off or no valid
+ sentence came for 60 s, else the last fix (60 s old at most), satellites used and HDOP (GGA), speed, course and time
+-(RMC).
++(RMC). The board's speed and course expire from the Position screen independently of the position, since GGA
++has no motion fields. A lost fix or switching GPS off discards these measurements until the next valid RMC.
+ 
+ With `CONFIG_GPS_SKY`, `nmea_sky.c` also reads the board GPS's satellite sentences:
+ 
+diff --git a/tests/host/radioCoreTest.c b/tests/host/radioCoreTest.c
+index 6b9f1ae..124189a 100644
+--- a/tests/host/radioCoreTest.c
++++ b/tests/host/radioCoreTest.c
+@@ -4171,6 +4171,8 @@ static void test_position(void)
+ {
+ 	static const char gga[] = "$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47";
+ 	static const char rmc[] = "$GPRMC,123519,A,4807.038,N,01131.000,E,022.4,084.4,230394,003.1,W*6A";
++	static const char nofix[] = "$GPGGA,123519,,,,,0,05,,,M,,M,,*6E";
++	static const char still[] = "$GPRMC,123519,A,4807.038,N,01131.000,E,000.0,084.4,230394,003.1,W*6E";
+ 	lrrpPosition_t lp;
+ 	ui_position_t up;
+ 	int32_t lat, lon;
+@@ -4259,6 +4261,23 @@ static void test_position(void)
+ 	position_gps_enable(false);
+ 	CHECK(!ui_svc_position(&up) && !dmrDataServiceOwnPosition(&lp));
+ 	position_gps_enable(true);
++	// GGA gives a valid position again, but not speed or heading from before GPS was turned off.
++	position_nmea(gga, strlen(gga), true, now);
++	CHECK(ui_svc_position(&up) && up.fix && up.speed_kmh == 0xFFFFu && up.course == 0xFFFFu);
++	// A fresh GGA does not keep an older RMC's motion valid after its normal expiry.
++	position_nmea(rmc, strlen(rmc), true, now - POSITION_STALE_MS + 1);
++	position_nmea(gga, strlen(gga), true, now);
++	CHECK(ui_svc_position(&up) && up.fix && up.speed_kmh == 41 && up.course == 84);
++	run(10);
++	CHECK(ui_svc_position(&up) && up.fix && up.speed_kmh == 0xFFFFu && up.course == 0xFFFFu);
++	// Reacquiring after a lost fix may also produce GGA before the next RMC.
++	position_nmea(rmc, strlen(rmc), true, now);
++	position_nmea(nofix, strlen(nofix), true, now);
++	CHECK(ui_svc_position(&up) && !up.fix);
++	position_nmea(gga, strlen(gga), true, now);
++	CHECK(ui_svc_position(&up) && up.fix && up.speed_kmh == 0xFFFFu && up.course == 0xFFFFu);
++	position_nmea(still, strlen(still), true, now);
++	CHECK(ui_svc_position(&up) && up.fix && up.speed_kmh == 0 && up.course == 0xFFFFu);
+ 
+ 	// A radio without a GPS: the fixed position typed in Settings > Location is what LRRP answers with and what
+ 	// goes out in calls, after a restart too

@@ -1,0 +1,263 @@
+diff --git a/core/radio/radio_sm.c b/core/radio/radio_sm.c
+index 0efb7e0..17eb252 100644
+--- a/core/radio/radio_sm.c
++++ b/core/radio/radio_sm.c
+@@ -758,6 +758,9 @@ static uint8_t air_heard(const radio_sm_t *sm);
+ #endif
+ 
+ #if CONFIG_BCAST_FM
++// Let the tuner finish before a scan uses its RSSI. A failed tune must not block the scan indefinitely.
++#define RADIO_BCAST_SCAN_TUNE_MS 200u
++
+ // The broadcast receiver on or off. Off mutes it first
+ static void bcast_power(radio_sm_t *sm, bool on)
+ {
+@@ -780,6 +783,7 @@ static void bcast_power(radio_sm_t *sm, bool on)
+ static void bcast_tune(radio_sm_t *sm)
+ {
+ 	sm->view.bcast = !sm->view.am && !sm->hotspot && radio_bcast_channel(&sm->view.ch);
++	sm->view.bcast_khz = 0;
+ 	if (!sm->view.bcast) {
+ 		bcast_power(sm, false);
+ 		sm->view.bcast_fault = false;
+@@ -793,7 +797,8 @@ static void bcast_tune(radio_sm_t *sm)
+ static void bcast_status(radio_sm_t *sm, radio_status_t *st)
+ {
+ 	bcast_status_t bs;
+-	bool got = sm->bcast_on && board.bcast->status(&bs);
++	bool got = sm->bcast_on && board.bcast->status(&bs) && !bs.tuning &&
++		   bs.khz == radio_bcast_khz(sm->view.ch.rx_hz);
+ 	uint8_t rssi = got ? bs.rssi : 0;
+ 	sm->view.bcast_khz = got ? bs.khz : 0;
+ 	st->rssi_dbm = (int16_t)(rssi + RADIO_BCAST_DBUV_DBM);
+@@ -4570,7 +4575,12 @@ static bool scan_step(radio_sm_t *sm, uint32_t now_ms)
+ 		}
+ 		dual_busy_set(sm, (uint8_t)(sm->view.dual_busy & ~(1u << sm->dual_at)));	// the watch hears it itself now
+ 	} else if (sc->kind == SCAN_VFO) {
+-		uint32_t hz = scan_next_hz(sc, sm->view.ch.rx_hz, sm->view.vfo_step_hz);
++		uint32_t from = sm->view.ch.rx_hz, step = sm->view.vfo_step_hz;
++#if CONFIG_BCAST_FM
++		if (sm->view.bcast && step != 0 && from >= sc->lo_hz && from <= sc->hi_hz)
++			from -= (from - sc->lo_hz) % step;
++#endif
++		uint32_t hz = scan_next_hz(sc, from, step);
+ 		if (hz == 0 || !board_in_band(hz, false)) {
+ 			scan_stop(sm, false, now_ms);
+ 			return false;
+@@ -4624,6 +4634,12 @@ static void scan_start(radio_sm_t *sm, uint8_t kind, uint32_t lo_hz, uint32_t hi
+ 		}
+ 		if (lo_hz == 0 && hi_hz == 0) {
+ 			// The band the VFO is in
++#if CONFIG_BCAST_FM
++			if (sm->view.bcast) {
++				lo_hz = board.bcast->lo_khz * 1000u;
++				hi_hz = board.bcast->hi_khz * 1000u;
++			} else
++#endif
+ 			for (uint8_t i = 0; i < board_band_count(); i++) {
+ 				if (sm->view.ch.rx_hz >= board.bands[i].lo_hz && sm->view.ch.rx_hz <= board.bands[i].hi_hz) {
+ 					lo_hz = board.bands[i].lo_hz;
+@@ -4631,6 +4647,19 @@ static void scan_start(radio_sm_t *sm, uint8_t kind, uint32_t lo_hz, uint32_t hi
+ 				}
+ 			}
+ 		}
++#if CONFIG_BCAST_FM
++		if (sm->view.bcast && radio_bcast_band(lo_hz) && radio_bcast_band(hi_hz)) {
++#if CONFIG_AM_RX
++			if (lo_hz < RADIO_AM_LO_HZ && radio_am_tx_refused(hi_hz))
++				hi_hz = RADIO_AM_LO_HZ - 1u;
++#endif
++			// Anchor the wrap and the first advance to the same grid as the broadcast channels.
++			uint32_t step = radio_bcast_step_hz(sm->set.bcast_step);
++			uint32_t offset = sm->set.bcast_step == RADIO_BCAST_STEP_100 ? 0u : RADIO_BCAST_STEP_HZ;
++			lo_hz += (offset + step - lo_hz % step) % step;
++			hi_hz -= (hi_hz % step + step - offset) % step;
++		}
++#endif
+ 		// Both ends in one band, and room for two stops
+ 		bool same_band = false;
+ 		for (uint8_t i = 0; i < board_band_count(); i++) {
+@@ -4897,6 +4926,14 @@ static void scan_service(radio_sm_t *sm, const radio_status_t *st, uint32_t now_
+ 	bool air = air_mode(sm->view.ch.mode);
+ 	bool carrier = carrier_heard(sm, st->noise);
+ 	bool active, sync = false;
++#if CONFIG_BCAST_FM
++	if (sm->view.bcast && sc->kind == SCAN_VFO) {
++		if (!sm->view.bcast_fault && sm->view.bcast_khz == 0 &&
++		    now_ms - sc->tuned_ms < RADIO_BCAST_SCAN_TUNE_MS)
++			return;
++		active = carrier;
++	} else
++#endif
+ #if CONFIG_DMR
+ 	if (dmr) {
+ 		active = sm->view.dmr.state == RDMR_RX;
+diff --git a/docs/spec/airband-and-broadcast.md b/docs/spec/airband-and-broadcast.md
+index 0c7c985..382849c 100644
+--- a/docs/spec/airband-and-broadcast.md
++++ b/docs/spec/airband-and-broadcast.md
+@@ -143,6 +143,10 @@ Settings › Talk & listen › FM broadcast step, `radio_settings_t.bcast_step`,
+ 
+ Either way any frequency can be typed in: 90.2 is tuned and heard as entered.
+ 
++A broadcast VFO band scan follows the configured grid, including the wrap at the band edge. It waits up to 200 ms
++for the tuner to report that it has reached each frequency. The scan compares that frequency's RSSI against the
++squelch threshold on the first valid reading. Where the radio also receives the air band, the scan stays below it.
++
+ ### 4.5 Board glue
+ 
+ The HR_C7000 boards share one composition, `platform/hrc7000/bcast_hrc.c` (`hrc_bcast_init`): the RDA5807M driver on
+diff --git a/docs/spec/hardware-dm32.md b/docs/spec/hardware-dm32.md
+index e5cb59b..b801ccd 100644
+--- a/docs/spec/hardware-dm32.md
++++ b/docs/spec/hardware-dm32.md
+@@ -1592,6 +1592,12 @@ calibration (modem-hrc7000.md 10.4).
+ 
+ ## Receive past the rated bands
+ 
+-16-65, 174-400 and 480-1120 MHz: receive only in FM, while **Tools > RX past bands** is On ([radio-features.md](radio-features.md) 6.2). The option is Off on a first start and after a factory reset; the saved choice survives a restart. Through 740 MHz this follows the FD6818 band table (8.3). The 740-1120 MHz extension is experimental: it reuses the top band-select words, whose row also ends at 1120 MHz in the related FD6818SH driver, but no sensitivity, synthesizer lock or real reception has been measured on a DM-32UV.
++16-65, 174-400 and 480-1120 MHz are receive-only ranges while **Tools > RX past bands** is On
++([radio-features.md](radio-features.md) 6.2). The option is Off on first start and after a factory reset. The saved
++choice survives a restart. The 222-225 MHz band falls inside 174-400 MHz. Enter `222500` in the VFO for 222.500 MHz.
++Receiver sensitivity in this band has yet to be measured. Through 740 MHz the ranges follow the FD6818 band table
++(8.3). The 740-1120 MHz extension is experimental and reuses the top band-select words, whose row also ends at
++1120 MHz in the related FD6818SH driver. Sensitivity, synthesizer lock and reception above 740 MHz have yet to be
++measured on a DM-32UV.
+ 
+ The VFO accepts nine digits above 1 GHz (`112000000` = 1120.00000 MHz); existing entries of up to eight digits keep their 3+5 MHz/decimal meaning. Channel records hold a GHz frequency too, the top nibble of the frequency word a 0xA/0xB marker over seven BCD digits rather than eight (`open-firmware-cps.md` 7.3.3): a build without it reads the record as malformed and skips the channel instead of tuning another frequency. Every mode receives there; PTT remains denied throughout every receive-only extension.
+diff --git a/docs/user/07-channels-zones-vfo.md b/docs/user/07-channels-zones-vfo.md
+index 997bd89..49b9f61 100644
+--- a/docs/user/07-channels-zones-vfo.md
++++ b/docs/user/07-channels-zones-vfo.md
+@@ -453,8 +453,9 @@ frequency, its TX frequency follows RX, and its mode shows as "AM (air band)" or
+ isn't RX Only or is DMR.
+ 
+ In the air band the squelch works as on any FM channel. A broadcast station plays whatever the squelch level, so a
+-fading station isn't cut, and the screen shows it is receiving. The LED stays off: a station isn't a call. The squelch only stops a scan on a station:
+-while a scan runs, the broadcast band is quiet between stations.
++fading station isn't cut, and the screen shows it is receiving. The green LED stays off. With the VFO tuned to the
++broadcast band, **Tools > Scan** searches for stations using the broadcast step. The receiver stays quiet between
++stations and uses the squelch threshold to stop at a station.
+ 
+ In the broadcast band the knob and **Up** / **Down** step 200 kHz, landing on the odd tenths (88.1, 88.3 ... 107.9)
+ where stations are in the Americas. For 100 kHz steps set **Settings > Talk & listen > FM broadcast step** to 100 kHz.
+diff --git a/tests/host/radioListenBandsTest.c b/tests/host/radioListenBandsTest.c
+index d205f71..c2e8799 100644
+--- a/tests/host/radioListenBandsTest.c
++++ b/tests/host/radioListenBandsTest.c
+@@ -39,6 +39,7 @@ static struct {
+ static struct {
+ 	bool on, audio, dead;
+ 	uint32_t khz, sig_khz;
++	uint32_t settle_ms, tuned_ms;
+ 	uint8_t rssi, volume;
+ 	int power_calls, tune_calls;
+ } bc;
+@@ -59,6 +60,7 @@ static bool b_tune(uint32_t khz)
+ {
+ 	bc.tune_calls++;
+ 	bc.khz = khz;
++	bc.tuned_ms = now;
+ 	return bc.on;
+ }
+ static bool b_seek(bool up) { (void)up; return false; }
+@@ -70,6 +72,7 @@ static bool b_status(bcast_status_t *st)
+ 	}
+ 	memset(st, 0, sizeof(*st));
+ 	st->khz = bc.khz;
++	st->tuning = now - bc.tuned_ms < bc.settle_ms;
+ 	st->rssi = bc.sig_khz != 0 && bc.sig_khz == bc.khz ? bc.rssi : 5;
+ 	return true;
+ }
+@@ -711,6 +714,51 @@ static void test_bcast_vfo(void)
+ 	CHECK(sm.view.am && sm.view.ch.mode == RADIO_MODE_FM);
+ }
+ 
++#if CONFIG_SCAN
++static void test_bcast_scan(void)
++{
++	start();
++	req(RREQ_VFO_SET, 107900000);
++	bc.sig_khz = 65100;
++	bc.rssi = 70;
++	bc.settle_ms = 2u * RADIO_POLL_MS;
++	req(RREQ_SCAN, RSCAN_TOGGLE);
++	CHECK(sm.view.scan == SCAN_VFO && sm.view.bcast && bc.khz == 65100);
++	run(RADIO_POLL_MS);
++	CHECK(sm.view.scan_phase == SCAN_PH_LISTEN && bc.khz == 65100 && !bc.audio);
++	run(RADIO_POLL_MS);
++	CHECK(sm.view.scan_phase == SCAN_PH_HOLD && sm.view.state == RS_RX && bc.audio && bc.khz == 65100);
++	req(RREQ_SCAN, RSCAN_STOP);
++
++	// A manually entered off-grid frequency should not shift the scan's channel grid.
++	bc.settle_ms = 0;
++	req(RREQ_VFO_SET, 90250000);
++	req(RREQ_SCAN, RSCAN_TOGGLE);
++	CHECK(sm.view.scan == SCAN_VFO && bc.khz == 90300);
++	req(RREQ_SCAN, RSCAN_CANCEL);
++	CHECK(sm.view.ch.rx_hz == 90250000);
++
++	// At 100 kHz spacing, the scan wraps before leaving the broadcast receiver for air-band AM.
++	radio_settings_t s = sm.set;
++	s.bcast_step = RADIO_BCAST_STEP_100;
++	radio_sm_set_settings(&sm, &s, now);
++	int am_calls = hw.am_calls;
++	req(RREQ_VFO_SET, 107900000);
++	req(RREQ_SCAN, RSCAN_TOGGLE);
++	CHECK(sm.view.scan == SCAN_VFO && sm.view.bcast && bc.khz == 65000);
++	CHECK(hw.am_calls == am_calls && hw.tx_calls == 0);
++	req(RREQ_SCAN, RSCAN_STOP);
++
++	// A tuner that fails to settle should not leave the scan stuck on one frequency.
++	bc.settle_ms = 1000;
++	req(RREQ_VFO_SET, 90150000);
++	req(RREQ_SCAN, RSCAN_TOGGLE);
++	CHECK(bc.khz == 90200);
++	run(250);
++	CHECK(sm.view.scan == SCAN_VFO && bc.khz == 90300);
++}
++#endif
++
+ int main(void)
+ {
+ 	test_helpers();
+@@ -724,6 +772,9 @@ int main(void)
+ 	test_bcast_dead();
+ 	test_bcast_step();
+ 	test_bcast_vfo();
++#if CONFIG_SCAN
++	test_bcast_scan();
++#endif
+ 	printf("# radioListenBandsTest: %d checks, %s\n", checks, failures ? "FAILED" : "PASSED");
+ 	return failures != 0;
+ }
+diff --git a/tests/hil/test_listen_bands.py b/tests/hil/test_listen_bands.py
+index f581253..561b010 100644
+--- a/tests/hil/test_listen_bands.py
++++ b/tests/hil/test_listen_bands.py
+@@ -45,3 +45,25 @@ def test_broadcast_receiver(radio):
+         assert v.get("bcast_fault") == "0", "the broadcast receiver didn't answer"
+     v = radio.core()
+     assert v.get("bcast") == "0", "the broadcast receiver stayed on after the VFO left the band"
++
++
++@pytest.mark.feature("bcast_fm")
++def test_broadcast_vfo_scan_grid(radio):
++    need_vfo(radio, "BCAST_FM")
++    if radio.link.view(["features"]).get("scan.built") != "1":
++        skip("not_built", "built without CONFIG_SCAN")
++    with radio.vfo_session():
++        v = tune(radio, BCAST_HZ)
++        step = int(v["vfo_step_hz"])
++        assert step in (100000, 200000), v
++        last = BCAST_HZ + step
++        tune(radio, last)
++        # The requested range starts between stations. Wrapping must land on the first station on the grid.
++        radio.link.scan_vfo(BCAST_HZ - step - step // 4, last + step // 4)
++        try:
++            v = radio.wait_for(lambda view: view.get("scan") == "vfo" and view.get("rx_hz") != str(last),
++                               sections=("core", "features"), what="broadcast scan past its wrap")
++            assert v.get("bcast") == "1" and int(v["rx_hz"]) in (BCAST_HZ - step, BCAST_HZ), v
++        finally:
++            radio.link.scan("cancel")
++            radio.wait_for(lambda view: view.get("scan") == "off", sections=("features",), what="scan off")

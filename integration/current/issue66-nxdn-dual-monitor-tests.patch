@@ -1,0 +1,127 @@
+diff --git a/tests/host/radioCoreTest.c b/tests/host/radioCoreTest.c
+index 6b9f1ae..109ffbe 100644
+--- a/tests/host/radioCoreTest.c
++++ b/tests/host/radioCoreTest.c
+@@ -9073,12 +9073,99 @@ static void test_nxdn_dual(void)
+ 		}
+ 	}
+ 	CHECK(returned == 3 && sm.view.scan == SCAN_DUAL);
++
++	// Enable both sides in the mixed pair. Alternation must restore the receiving filters, too.
++	CHECK(ui_svc_dual(mixed, 0) && sm.view.dual_sel == 0);
++	req(RREQ_MONITOR, 1);
++	req(RREQ_MONITOR, 0);
++	CHECK(!sm.view.vfo && sm.view.dmr.hear_all_latch && sim.cc_filter == -1 && sim.locked_ts == 0);
++	returned = 0;
++	for (int i = 0; i < 100; i++) {
++		run(RADIO_POLL_MS);
++		CHECK(sm.view.dmr.hear_all_latch);
++		if (sm.view.vfo) {
++			radio_nxdn_settings_t cfg;
++			CHECK(radio_nxdn_in_force(&cfg) && cfg.rx_ran == NXDN_RAN_ANY && cfg.rx_gid == 0);
++			returned |= 1;
++		} else {
++			CHECK(sim.started && sim.cc_filter == -1 && sim.locked_ts == 0);
++			returned |= 2;
++		}
++	}
++	CHECK(returned == 3 && sm.view.scan == SCAN_DUAL);
++	for (int i = 0; i < 100 && sm.view.vfo; i++)
++		run(RADIO_POLL_MS);
++	CHECK(!sm.view.vfo);
++	hear_call(true, 3100, 9997777, 7, 1, false);
++	CHECK(sm.view.scan_phase == SCAN_PH_HOLD && sm.view.dmr.state == RDMR_RX && sm.view.dmr.call.dst == 3100);
++	run(600 + RADIO_DUAL_DELAY_MS);
+ 	CHECK(ui_svc_dual(NULL, 0) && sm.view.scan == SCAN_OFF);
+ 	setup_codeplug_nxdn();
+ 	far_hz = 0;
+ 	nfar_stop();
+ 	nxdn_defaults();
+ }
++static void test_nxdn_dual_vfo_monitor(void)
++{
++	setup_codeplug_nxdn();
++	add(3, "NXDN memory", 446100000, RADIO_MODE_DMR, false, 2);
++	chans[3].kind = CODEPLUG_KIND_NXDN;
++	chans[3].system = 0xFF;
++	stored_nxdn[3] = (nxdn_conv_cfg_t){ .conv = { .rate9600 = true, .rx_ran = 7, .tx_ran = 7,
++						      .squelch = NXDN_SQUELCH_SELECTIVE },
++					    .unit_id = 4321, .target = 20 };
++	start();
++	req(RREQ_VFO, 1);
++	req(RREQ_VFO_SET, 446200000);
++	req(RREQ_MODE, RADIO_MODE_NXDN);
++	radio_nxdn_settings_t params = nxdn_default_set;
++	params.rx_ran = 7;
++	params.rx_gid = 20;
++	radio_req_nxdn_settings(&params);
++	const ui_dual_ref_t pair[2] = { { false, 0, 2 }, { true, 0, sm.vfo_idx } };
++	CHECK(ui_svc_dual(pair, 0) && sm.view.scan == SCAN_DUAL);
++	req(RREQ_MONITOR, 1);
++	req(RREQ_MONITOR, 0);
++	CHECK(sm.dual_at == 0 && sm.view.dmr.hear_all_latch && !sm.view.vfo);
++	for (int i = 0; i < 100 && sm.dual_at != 1; i++)
++		run(RADIO_POLL_MS);
++	CHECK(sm.dual_at == 1 && sm.view.vfo && !sm.view.dmr.hear_all_latch);
++	CHECK(radio_nxdn_in_force(&params) && params.rate9600 && params.rx_ran == 7 && params.rx_gid == 20);
++
++	CHECK(ui_svc_dual(pair, 1) && sm.view.dual_sel == 1);
++	req(RREQ_MONITOR, 1);
++	for (int i = 0; i < 100 && sm.dual_at != 0; i++)
++		run(RADIO_POLL_MS);
++	CHECK(sm.dual_at == 0 && !sm.view.vfo && sm.view.dmr.hear_all_latch);
++	req(RREQ_MONITOR, 0);
++	CHECK(sm.dual_at == 1 && sm.view.vfo && sm.view.dmr.hear_all_latch);
++	int visits[2] = { 0, 0 };
++	for (int i = 0; i < 100; i++) {
++		run(RADIO_POLL_MS);
++		CHECK(sm.view.dmr.hear_all_latch && radio_nxdn_in_force(&params) && params.rate9600 &&
++		      params.rx_ran == NXDN_RAN_ANY && params.rx_gid == 0);
++		visits[sm.dual_at]++;
++	}
++	CHECK(visits[0] > 0 && visits[1] > 0);
++
++	// Both slots hear a real decoded call outside the configured RAN and group, not only a changed view.
++	for (uint8_t i = 0; i < 2; i++) {
++		far_hz = i == 0 ? 446100000 : 446200000;
++		nfar_begin(true, 9, 2004, false, 23);
++		CHECK(nxdn_engine_tx_prepare(&nfar) && nxdn_engine_tx_go(&nfar));
++		nfar_tx = true;
++		for (int poll = 0; poll < 160 && !(sm.dual_at == i && sm.view.scan_phase == SCAN_PH_HOLD); poll++)
++			run(RADIO_POLL_MS);
++		CHECK(sm.dual_at == i && sm.view.scan_phase == SCAN_PH_HOLD && (sm.view.nxdn.flags & RADIO_NXDN_PLAYED) &&
++		      sm.view.nxdn.ran == 9 && sm.view.nxdn.dst == 23);
++		nxdn_engine_tx_stop(&nfar);
++		run(600 + RADIO_DUAL_DELAY_MS + 600);
++	}
++	far_hz = 0;
++	nfar_stop();
++	CHECK(ui_svc_dual(NULL, 0) && sm.view.scan == SCAN_OFF);
++	nxdn_defaults();
++}
+ #endif
+ #endif
+ 
+@@ -9491,6 +9578,7 @@ static void test_nxdn(void)
+ 	test_nxdn_scan();
+ #if CONFIG_DUAL_WATCH
+ 	test_nxdn_dual();
++	test_nxdn_dual_vfo_monitor();
+ #endif
+ #endif
+ 	setup_codeplug();
+diff --git a/tests/host/uiFlowTest.c b/tests/host/uiFlowTest.c
+index 11cf97d..3f8a916 100644
+--- a/tests/host/uiFlowTest.c
++++ b/tests/host/uiFlowTest.c
+@@ -261,6 +261,10 @@ static const flow_t flows[] = {
+ 	{ "11 dual watch: again with the last B", "quick 7 ctx 3 5 ok back back", "quick 7", "dual=1 sel=A", 2, false },
+ 	{ "11 dual watch: B in another zone", "", "quick 7 ctx 1 zone+", "dual=1 sel=B bzone=1 screen=home", 5, false },
+ 	{ "11 dual watch: B on the VFO", "", "quick 7 ctx 1 vfokey", "dual=1 bvfo=1 sel=B", 5, false },
++#if CONFIG_NXDN
++	{ "11 dual watch: the NXDN VFO keeps its mode label", "nxdn vfokey dlmode:nxdn vfokey quick 7 ctx 1 vfokey",
++	  "wait:1000", "dual=1 bvfo=1 sel=B shows=VFO_NXDN hides=VFO_FM", 0, false },
++#endif
+ 	{ "11 dual watch: talk on B from #", "quick 7 ctx 3 5 ok", "ctx 1", "dual=1 sel=B uipos=5", 2, false },
+ 	{ "11 dual watch: the A/B key", "quick 7 ctx 3 5 ok", "abkey", "dual=1 sel=B", 1, false },
+ 	{ "11 dual watch: PTT keeps it on", "quick 7 ctx 3 5 ok ctx 1", "pttdown wait:1000 pttup wait:1000", "dual=1 sel=B pos=5", 2, false },

@@ -1,0 +1,131 @@
+diff --git a/site/static/js/codeplug/csv.js b/site/static/js/codeplug/csv.js
+index cd322d0..98832ab 100644
+--- a/site/static/js/codeplug/csv.js
++++ b/site/static/js/codeplug/csv.js
+@@ -10,6 +10,7 @@ import { parseFreq, parseTone, mhz } from "./fields.js";
+ import { LIMITS, POWER_NAMES, CALL_TYPES, SQUELCH_OPEN, validDtmf } from "./records.js";
+ import { newChannel, newContact, remove, assignNumbers } from "./model.js";
+ import { setKind } from "./channelmodes.js";
++import { CALLSIGN_LEN, DGID_MAX, DT_DATA_FR, DT_VD1, DT_VD2, DT_VW } from "./mode_ysf.js";
+ 
+ // --- RFC 4180 ---
+ 
+@@ -168,29 +169,36 @@ const powerText = (n) => POWER_NAMES[n] || String(n);
+ const MODES = { fm: "FM", dmr: "DMR" };
+ const TYPES = Object.fromEntries(CALL_TYPES.map((k) => [k, k[0].toUpperCase() + k.slice(1)]));
+ 
+-// A channel mode in CSV: FM and DMR are plain records; conventional NXDN is the channel-mode layer's kind 4.
++// Conventional digital channels carry their mode tag and parameters separately from the base record.
+ // "NXDN" alone means the 9600 bit/s mode, as the editor's new NXDN channel does.
+-const NXDN_KIND = 4;
++const NXDN_KIND = 4, YSF_KIND = 6;
++const YSF_FORMATS = { [DT_VD1]: "V/D-1", [DT_DATA_FR]: "Data FR", [DT_VD2]: "DN", [DT_VW]: "VW" };
+ const asChannelMode = (s) => {
+ 	const v = s.trim().toLowerCase().replace(/[_-]/g, " ").replace(/\s+/g, " ");
+ 	if (!v) return { kind: 0, mode: "fm" };
++	if (v === "ysf" || v === "c4fm" || v === "fusion") return { kind: YSF_KIND };
+ 	for (const [mode, text] of Object.entries(MODES)) if (text.toLowerCase() === v) return { kind: 0, mode };
+ 	if (["nxdn", "nxdn96", "nxdn 96", "nxdn9600", "nxdn 9600"].includes(v)) return { kind: NXDN_KIND, rate9600: true };
+ 	if (["nxdn48", "nxdn 48", "nxdn4800", "nxdn 4800"].includes(v)) return { kind: NXDN_KIND, rate9600: false };
+-	throw new Bad("bad_value", { value: s.trim(), allowed: "FM, DMR, NXDN 4800, NXDN 9600" });
++	throw new Bad("bad_value", { value: s.trim(), allowed: "FM, DMR, NXDN 4800, NXDN 9600, YSF" });
++};
++const channelModeText = (r) => {
++	if (r.kind === YSF_KIND) return "YSF";
++	if (r.kind === NXDN_KIND) return r.params?.rate9600 === false ? "NXDN 4800" : "NXDN 9600";
++	return MODES[r.mode];
+ };
+-const channelModeText = (r) => r.kind === NXDN_KIND ? (r.params?.rate9600 === false ? "NXDN 4800" : "NXDN 9600") : MODES[r.mode];
+ const setChannelMode = (r, s, m) => {
+ 	const v = asChannelMode(s);
+ 	if (v.kind) {
+ 		setKind(m, r, v.kind);
+-		r.params = { ...r.params, rate9600: v.rate9600 };
++		if (v.kind === NXDN_KIND) r.params = { ...r.params, rate9600: v.rate9600 };
+ 	} else setKind(m, r, 0, v.mode);
+ };
+-const rxOnlyText = (r) => yesNo(r.kind === NXDN_KIND ? !r.tagTx : r.rxOnly);
++const usesTagTx = (r) => r.kind === NXDN_KIND || r.kind === YSF_KIND;
++const rxOnlyText = (r) => yesNo(usesTagTx(r) ? !r.tagTx : r.rxOnly);
+ const setRxOnly = (r, s) => {
+ 	const v = asBool(s);
+-	if (r.kind === NXDN_KIND) r.tagTx = !v;
++	if (usesTagTx(r)) r.tagTx = !v;
+ 	else r.rxOnly = v;
+ };
+ const asRan = (s) => {
+@@ -200,15 +208,23 @@ const asRan = (s) => {
+ 	if (!Number.isInteger(n) || n < 0 || n > 63) throw new Bad("range", { min: 0, max: 63 });
+ 	return n;
+ };
+-const nxdnField = (key, put, get) => ({
+-	get: (r) => (r.kind === NXDN_KIND && r.params ? get(r.params) : ""),
++const modeField = (kind, label, key, put, get) => ({
++	get: (r) => (r.kind === kind && r.params ? get(r.params) : ""),
+ 	set: (r, s) => {
+ 		const v = put(s);
+ 		if (v === null) return;
+-		if (r.kind !== NXDN_KIND || !r.params) throw new Bad("bad_value", { value: s.trim(), allowed: "an NXDN channel" });
++		if (r.kind !== kind || !r.params) throw new Bad("bad_value", { value: s.trim(), allowed: label });
+ 		r.params = { ...r.params, [key]: v };
+ 	},
+ });
++const nxdnField = (key, put, get) => modeField(NXDN_KIND, "an NXDN channel", key, put, get);
++const ysfField = (key, parse, get) => modeField(YSF_KIND, "a YSF channel", key, (s) => s.trim() ? parse(s) : null, get);
++const asYsfDest = (s) => {
++	const v = s.trim();
++	if (v.length > CALLSIGN_LEN || /[^ -~]/.test(v))
++		throw new Bad("bad_value", { value: v, allowed: "a YSF destination of up to 10 ASCII characters" });
++	return v;
++};
+ const asNxdnSquelch = (s) => {
+ 	const v = s.trim().toLowerCase();
+ 	if (!v) return null;
+@@ -389,6 +405,11 @@ export const TABLES = {
+ 				...nxdnField("rxRan", asRan, (p) => String(p.rxRan ?? 0)) },
+ 			{ header: "TX RAN", aliases: ["NXDN TX RAN"], key: "nxdnTxRan",
+ 				...nxdnField("txRan", asRan, (p) => String(p.txRan ?? 1)) },
++			{ header: "YSF Data Type", key: "ysfDt", aliases: [], ...ysfField("dt", asWord(YSF_FORMATS, DT_VD1), (p) => YSF_FORMATS[p.dt]) },
++			{ header: "YSF Narrow", key: "ysfNarrow", aliases: [], ...ysfField("narrow", asBool, (p) => yesNo(p.narrow)) },
++			{ header: "YSF RX DG-ID", key: "ysfRxDgid", aliases: [], ...ysfField("rxDgid", asInt(0, DGID_MAX, 0), (p) => String(p.rxDgid)) },
++			{ header: "YSF TX DG-ID", key: "ysfTxDgid", aliases: [], ...ysfField("txDgid", asInt(0, DGID_MAX, 0), (p) => String(p.txDgid)) },
++			{ header: "YSF Destination", key: "ysfDest", aliases: [], ...ysfField("dest", asYsfDest, (p) => p.dest) },
+ 			{ header: "RX Only", aliases: [], key: "rxOnly", get: rxOnlyText, set: setRxOnly },
+ 			c("All Skip", "allSkip", asBool, (r) => yesNo(r.allSkip), ["Scan Skip"]),
+ 			c("Zone Skip", "zoneSkip", asBool, (r) => yesNo(r.zoneSkip)),
+@@ -497,6 +518,9 @@ export function importTable(m, text, table = detect(text)) {
+ 	const spec = TABLES[table];
+ 	const rows = parse(text);
+ 	const { found, unknown } = mapHeader(spec, rows[0] || []);
++	// The mode determines how the rest of a channel row is read, regardless of CSV column order.
++	const modeIndex = table === "channels" ? found.findIndex(({ col }) => col.key === "mode") : -1;
++	if (modeIndex > 0) found.unshift(...found.splice(modeIndex, 1));
+ 	const problems = [];
+ 	const keys = new Set(found.map((f) => f.col.key));
+ 	const hasNumber = keys.has("number");
+diff --git a/site/tests/csv.test.mjs b/site/tests/csv.test.mjs
+index f5ca19e..f042a9e 100644
+--- a/site/tests/csv.test.mjs
++++ b/site/tests/csv.test.mjs
+@@ -75,6 +75,21 @@ test("CSV carries the per-channel always-open squelch sentinel", () => {
+ 	assert.equal(row[parse(exportTable(m, "channels"))[0].indexOf("Squelch")], "22");
+ });
+ 
++test("YSF channels keep their channel mode, voice fields and transmit permission in CSV and on disk", () => {
++	const source = empty();
++	const csv = "YSF Destination,RX Only,YSF TX DG-ID,Name,Mode,RX Frequency,YSF Data Type,YSF Narrow,YSF RX DG-ID\n"
++		+ "CQCQCQ,Yes,45,Fusion,YSF,446.125,VW,No,17\n"
++		+ "ALL,No,3,Fusion DN,C4FM,146.58,DN,Yes,3\n";
++	assert.deepEqual(importTable(source, csv, "channels").problems, []);
++	const imported = empty();
++	assert.deepEqual(importTable(imported, exportTable(source, "channels"), "channels").problems, []);
++	const channels = decode(encode(imported)).channels;
++	assert.deepEqual(channels.map(({ kind, tagTx, params }) => ({ kind, tagTx, params })), [
++		{ kind: 6, tagTx: false, params: { dt: 3, narrow: false, rxDgid: 17, txDgid: 45, dest: "CQCQCQ" } },
++		{ kind: 6, tagTx: true, params: { dt: 2, narrow: true, rxDgid: 3, txDgid: 3, dest: "ALL" } },
++	]);
++});
++
+ test("CSV carries a conventional NXDN channel instead of dropping it to FM", () => {
+ 	const m = empty();
+ 	const text = [

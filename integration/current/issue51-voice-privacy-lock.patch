@@ -1,0 +1,635 @@
+diff --git a/core/dmr/call/dmr_call.c b/core/dmr/call/dmr_call.c
+index 0b7ab31..45faf0f 100644
+--- a/core/dmr/call/dmr_call.c
++++ b/core/dmr/call/dmr_call.c
+@@ -617,6 +617,7 @@ static void rx_end(uint32_t now)
+ 	s.call_end_seen = true;
+ 	s.rx = RXC_NONE;
+ 	s.view.rx_decrypt = false;
++	s.view.rx_privacy_blocked = false;
+ 	s.have_index = false;
+ 	le_reset();
+ #if DMR_AES_ON
+@@ -669,6 +670,7 @@ static void rx_lc(const uint8_t lc[DMR_LC_BYTES], const dmr_burst_t *b, bool lat
+ 	if (new_talker) {
+ 		dmr_ta_reset(&s.ta);
+ 		s.view.rx_decrypt = false;
++		s.view.rx_privacy_blocked = false;
+ 		s.view.caller.gps_valid = false;
+ 	}
+ 
+@@ -818,10 +820,11 @@ static void rx_le_sb(uint16_t info, uint32_t now)
+ }
+ #endif
+ 
+-static void rx_decrypt(bool active)
++static void rx_privacy(bool decrypted, bool blocked)
+ {
+-	if (s.view.rx_decrypt != active) {
+-		s.view.rx_decrypt = active;
++	if (s.view.rx_decrypt != decrypted || s.view.rx_privacy_blocked != blocked) {
++		s.view.rx_decrypt = decrypted;
++		s.view.rx_privacy_blocked = blocked;
+ 		s.dirty = true;
+ 	}
+ }
+@@ -865,6 +868,7 @@ static void rx_play(const dmr_burst_t *b, uint32_t now, uint32_t slot)
+ 	// Late entry: the fragments of this superframe decode to the NEXT superframe's MI, so this burst itself (of
+ 	// the superframe just ended) still can't be decrypted: it is concealed and the stream starts with the next one
+ 	if (i == 5 && rx_le_try(now)) {
++		rx_privacy(false, true);
+ 		stats.rx_enc_dropped++;
+ 		TR_WHAT('e');
+ 		sink_lost(DMR_AMBE_FRAMES_PER_BURST);
+@@ -875,7 +879,7 @@ static void rx_play(const dmr_burst_t *b, uint32_t now, uint32_t slot)
+ 	// No key, or a PI header: an MI-based scheme the static key hook can't undo (docs/spec/gotchas.md 6.4), unless it
+ 	// is AES-256 with our key (dmrAes.h)
+ 	if (enc && !aes && (!s.cfg.privacy || s.view.caller.pi_header)) {
+-		rx_decrypt(false);
++		rx_privacy(false, true);
+ 		stats.rx_enc_dropped++;
+ 		TR_WHAT('e');
+ 		sink_lost(DMR_AMBE_FRAMES_PER_BURST);	// no key: never play the scrambled voice
+@@ -888,7 +892,7 @@ static void rx_play(const dmr_burst_t *b, uint32_t now, uint32_t slot)
+ #if DMR_AES_ON
+ 	// (no stream: the PI header named another key ID or algorithm, or too much of the call was lost)
+ 	if (aes && !dmrAesBurst(&s.aes, v, i, slot, dmr_ambe_silence)) {
+-		rx_decrypt(false);
++		rx_privacy(false, true);
+ 		stats.rx_enc_dropped++;
+ 		TR_WHAT('e');
+ 		sink_lost(DMR_AMBE_FRAMES_PER_BURST);
+@@ -897,7 +901,7 @@ static void rx_play(const dmr_burst_t *b, uint32_t now, uint32_t slot)
+ #endif
+ 	if (enc && !aes)
+ 		s.cfg.privacy(v, i, false, s.cfg.privacy_ctx);
+-	rx_decrypt(aes && s.sink && s.sink->frame);
++	rx_privacy(enc && s.sink && s.sink->frame, false);
+ 	stats.rx_voice_bursts++;
+ 	TR_WHAT('p');
+ 	if (s.sink && s.sink->frame)
+@@ -1169,13 +1173,13 @@ static void rx_pi_header(const dmr_burst_t *b, uint32_t now)
+ 
+ 		if (dmrVoiceCipherPiParse(b->payload, s.cfg.cipher_alg, &kid, &mi) && kid == s.cfg.cipher_kid) {
+ 			if (!s.aes.ready || mi != s.aes_pi_mi) {
+-				rx_decrypt(false);
++				rx_privacy(false, false);
+ 				dmrVoiceCipherStart(&s.aes, s.cfg.cipher_alg, s.cfg.cipher_key, mi);
+ 			}
+ 			s.aes_pi_mi = mi;
+ 			s.aes_le = false;	// the stream is PI-seeded now, not late-entered
+ 		} else {
+-			rx_decrypt(false);
++			rx_privacy(false, true);
+ 			dmrAesStop(&s.aes);
+ 			s.aes_pi_mi = 0;
+ 			s.aes_le = false;
+diff --git a/core/dmr/call/dmr_call.h b/core/dmr/call/dmr_call.h
+index 2ba1376..f5063f5 100644
+--- a/core/dmr/call/dmr_call.h
++++ b/core/dmr/call/dmr_call.h
+@@ -217,7 +217,8 @@ typedef struct {
+ 	uint8_t rx_ts;			// its timeslot, 0 = unknown (simplex without TDMA direct mode sync)
+ 	bool rmo;
+ 	bool repeater_up;		// RMO: outbound heard recently
+-	bool rx_decrypt;		// the current cipher supplied a decrypted burst to the sink
++	bool rx_decrypt;		// the privacy path supplied a decrypted burst to the sink
++	bool rx_privacy_blocked;	// protected voice was withheld without a usable key or cipher stream
+ 	int16_t rssi_dbm;		// last burst of the current / last call, 0 = unknown
+ 	dmr_caller_t caller;		// RX: the current call; TX: us -> target
+ 	uint32_t call_start_ms;
+diff --git a/core/radio/radio.h b/core/radio/radio.h
+index f830f99..02763ee 100644
+--- a/core/radio/radio.h
++++ b/core/radio/radio.h
+@@ -175,7 +175,8 @@ typedef struct {
+ 	bool target_manual;	// a talk target chosen for now (contact, typed ID, call back), until the channel changes
+ 	bool privacy;		// a voice privacy type is selected
+ 	uint8_t tx_privacy;	// RDMR_PRIVACY_*: the channel's voice path has a usable key
+-	bool rx_decrypt;	// this call's cipher produced voice for the codec
++	bool rx_decrypt;	// this call's privacy path produced voice for the codec
++	bool rx_privacy_blocked;	// encrypted voice withheld without a usable key or cipher stream
+ 	bool alias_tx;		// our talker alias goes out on this channel
+ 	bool gps_tx_channel;	// the channel's codeplug setting asks for our position in its calls (CONFIG_DMR_GPS)
+ 	bool hear_all;		// every talkgroup on our slot: MONITOR held, or the hear all latch
+diff --git a/core/radio/radio_sm.c b/core/radio/radio_sm.c
+index 7814b51..3157843 100644
+--- a/core/radio/radio_sm.c
++++ b/core/radio/radio_sm.c
+@@ -2124,6 +2124,7 @@ static void dmr_publish(radio_sm_t *sm, uint32_t now_ms)
+ 	}
+ 	d->codec = sm->codec;
+ 	d->rx_decrypt = cv->rx_decrypt;
++	d->rx_privacy_blocked = cv->rx_privacy_blocked;
+ 	d->cc = cv->cc;
+ 	d->ts = cv->ts;
+ 	d->rx_cc = cv->rx_cc;
+diff --git a/core/ui/ui_dual.c b/core/ui/ui_dual.c
+index 69f53c1..378cd63 100644
+--- a/core/ui/ui_dual.c
++++ b/core/ui/ui_dual.c
+@@ -47,7 +47,7 @@ static uint32_t off_ms;		// the UI stopped the watch (the radio view may still s
+ // quick settings show it (its changes for now included) while the receiver is on the other one
+ typedef struct {
+ 	bool valid;
+-	bool vfo, temporary, am, vox_on;
++	bool vfo, temporary, am, vox_on, tx_voice_lock;
+ 	uint16_t zone_index, zone_pos, zone_size, channel_number, tot_s;
+ 	char zone_name[CODEPLUG_NAME_LEN + 1];
+ 	channel_t ch;
+@@ -189,12 +189,15 @@ static void pane_fill(uint8_t i)
+ 	const snap_t *s = &snap[i];
+ 	// Calls and signal stay: only what the pane is changes
+ 	bool rx = p->rx, heard = p->heard;
++	bool rx_lock = p->rx_voice_lock, blocked = p->rx_privacy_blocked;
+ 	int16_t rssi = p->rssi_dbm;
+ 	static char caller[sizeof p->caller];
+ 	strcpy(caller, p->caller);
+ 	memset(p, 0, sizeof *p);
+ 	p->rx = rx;
+ 	p->heard = heard;
++	p->rx_voice_lock = rx_lock;
++	p->rx_privacy_blocked = blocked;
+ 	p->rssi_dbm = rssi;
+ 	strcpy(p->caller, caller);
+ 	memset(&ch, 0, sizeof ch);
+@@ -214,6 +217,7 @@ static void pane_fill(uint8_t i)
+ 		ch = s->ch;	// as the radio has it: changes for now included
+ 	p->mode = shown_mode(&ch);
+ 	p->rx_hz = ch.rx_hz;
++	p->tx_voice_lock = s->valid && s->tx_voice_lock;
+ 	if (p->mode == RADIO_MODE_P25 || p->mode == RADIO_MODE_NXDN || p->mode == RADIO_MODE_YSF || p->mode == RADIO_MODE_M17)
+ 		return;	// no tone or slot: the engine's own squelch (the channel's settings say which)
+ 	sbuf_t b;
+@@ -259,6 +263,7 @@ static void snap_take(uint8_t i, const radio_view_t *v)
+ {
+ 	snap_t *s = &snap[i];
+ 	bool was = s->valid;
++	bool lock = s->tx_voice_lock;
+ 	uint8_t power = s->power;
+ 	static channel_t ch;
+ 	ch = s->ch;
+@@ -281,6 +286,8 @@ static void snap_take(uint8_t i, const radio_view_t *v)
+ 	s->power = v->power;
+ 	s->temp = v->temp;
+ 	s->squelch = v->squelch;
++	if (v->state != RS_TX)
++		s->tx_voice_lock = ui_voice_lock_for_tx(v);
+ #if CONFIG_DMR
+ 	s->active = v->dmr.active;
+ 	s->rmo = v->dmr.rmo;
+@@ -307,7 +314,7 @@ static void snap_take(uint8_t i, const radio_view_t *v)
+ 	if (target != s->target_id || ts != s->ts)
+ 		refill[i] = true;
+ #endif
+-	if (!was || power != s->power || memcmp(&ch, &s->ch, sizeof ch) != 0)
++	if (!was || power != s->power || lock != s->tx_voice_lock || memcmp(&ch, &s->ch, sizeof ch) != 0)
+ 		refill[i] = true;
+ }
+ 
+@@ -946,6 +953,7 @@ static bool find_again(ui_dual_t *d)
+ {
+ 	cp_serial = codeplug_serial();
+ 	for (uint8_t i = 0; i < 2; i++) {
++		snap[i].tx_voice_lock = d->pane[i].tx_voice_lock = false;
+ 		if (ref[i].vfo)
+ 			continue;
+ 		ui_dual_ref_t r;
+@@ -1091,9 +1099,10 @@ __attribute__((noinline)) bool ui_dual_tick(const radio_view_t *v, uint32_t now)
+ 	static ui_dual_rx_t r[2];	// static: not on the UI task's stack
+ 	memset(r, 0, sizeof r);
+ 	bool own = d->both && ui_svc_dual_rx(0, &r[0]) && ui_svc_dual_rx(1, &r[1]);
++	uint8_t rx_tuned = v->state == RS_RX ? tuned_pane(v) : UI_DUAL_NONE;
+ 	if (!own) {
+ 		memset(r, 0, sizeof r);
+-		uint8_t t = v->state == RS_RX ? tuned_pane(v) : UI_DUAL_NONE;
++		uint8_t t = rx_tuned;
+ #if CONFIG_DMR
+ 		// Sync and idle repeater traffic have no voice call identity and must not fill call history.
+ 		if (v->ch.mode == RADIO_MODE_DMR &&
+@@ -1133,9 +1142,33 @@ __attribute__((noinline)) bool ui_dual_tick(const radio_view_t *v, uint32_t now)
+ 				heard = i;
+ 		}
+ 		bool busy = !own && !x->active && (v->dual_busy & (1u << i)) != 0;
+-		if (p->rx != x->active || p->heard != x->heard || p->rssi_dbm != x->rssi_dbm || p->busy != busy)
++		bool rx_lock = false, blocked = false;
++		if (x->active && i == rx_tuned) {
++#if CONFIG_DMR
++			if (v->ch.mode == RADIO_MODE_DMR) {
++				rx_lock = v->dmr.codec && v->dmr.rx_decrypt;
++				blocked = v->dmr.rx_privacy_blocked;
++			}
++#endif
++#if CONFIG_P25
++			if (v->ch.mode == RADIO_MODE_P25 && (v->p25.flags & RADIO_P25_ENC)) {
++				rx_lock = (v->p25.flags & RADIO_P25_PLAYED) != 0;
++				blocked = !rx_lock;
++			}
++#endif
++#if CONFIG_NXDN
++			if (v->ch.mode == RADIO_MODE_NXDN && (v->nxdn.flags & RADIO_NXDN_ENC)) {
++				rx_lock = (v->nxdn.flags & RADIO_NXDN_PLAYED) != 0;
++				blocked = !rx_lock;
++			}
++#endif
++		}
++		if (p->rx != x->active || p->heard != x->heard || p->rssi_dbm != x->rssi_dbm || p->busy != busy ||
++		    p->rx_voice_lock != rx_lock || p->rx_privacy_blocked != blocked)
+ 			dirty = true;
+ 		p->busy = busy;
++		p->rx_voice_lock = rx_lock;
++		p->rx_privacy_blocked = blocked;
+ 		p->rx = x->active;
+ 		p->heard = x->heard;
+ 		p->rssi_dbm = x->rssi_dbm;
+diff --git a/core/ui/ui_screens.c b/core/ui/ui_screens.c
+index eba8322..2a3fe4a 100644
+--- a/core/ui/ui_screens.c
++++ b/core/ui/ui_screens.c
+@@ -470,16 +470,17 @@ static int draw_voice_lock(const font_t *f, int x, int y, color_t color)
+ 	return x + voice_lock_width(f);
+ }
+ 
+-static bool voice_lock_for_tx(const radio_view_t *v)
++bool ui_voice_lock_for_tx(const radio_view_t *v)
+ {
+-	if (v->ch.rx_only || v->aprs_tx)
++	if (v->ch.rx_only || v->aprs_tx || v->tx_auto || v->hotspot)
+ 		return false;
+ 
+ 	switch (v->ch.mode) {
+ #if CONFIG_DMR
+ 	case RADIO_MODE_DMR:
+-		return v->dmr.active && v->dmr.codec && v->dmr.tx_privacy == RDMR_PRIVACY_CIPHER &&
+-		       (v->state != RS_TX || v->dmr.state == RDMR_TX || v->dmr.state == RDMR_TX_ENDING);
++		return v->dmr.active && v->dmr.codec && (v->state == RS_TX ?
++		       v->dmr.call.encrypted && (v->dmr.state == RDMR_TX || v->dmr.state == RDMR_TX_ENDING) :
++		       v->dmr.tx_privacy != RDMR_PRIVACY_NONE);
+ #endif
+ #if CONFIG_P25
+ 	case RADIO_MODE_P25:
+@@ -657,7 +658,7 @@ static int draw_top_as(const radio_view_t *v, radio_state_t st, const ui_state_t
+ #if CONFIG_DUAL_WATCH
+ 	    && !s->dual.on
+ #endif
+-	    && voice_lock_for_tx(v) && lx + f->w + voice_lock_width(f) <= rx)
++	    && ui_voice_lock_for_tx(v) && lx + f->w + voice_lock_width(f) <= rx)
+ 		lx = draw_voice_lock(f, lx + f->w / 2, ty, swarn);
+ #if CONFIG_DUAL_WATCH
+ 	if (s->dual.on && !v->aprs_tx && strip_fits(f, lx, rx, TR(TOP_CHIP_DUAL, "DUAL")))
+@@ -2177,12 +2178,11 @@ static void draw_dmr_call(const radio_view_t *v, const ui_state_t *s)
+ 	// Receiving: the caller large, then ID, alias, talkgroup, signal
+ 	sb_init(&b, buf, sizeof buf);
+ 	sb_caller(&b, &d->call);
+-	const font_t *big = gfx_text_width(L->large, buf) <= w ? L->large : L->medium;
+-	char fit[40];
+-	gfx_text_fit(big, buf, w, fit, sizeof fit);
+-	gfx_text(big, kawaii() ? (w - gfx_text_width(big, fit)) / 2 : 0, y, fit,
+-		d->call.emergency ? ui_col.warn : (d->state == RDMR_RX ? ui_col.fg : ui_col.dim));
+-	y += big->h;
++	bool lock = d->state == RDMR_RX && d->codec && d->rx_decrypt;
++	int name_width = w - (lock ? voice_lock_width(L->large) : 0);
++	const font_t *big = gfx_text_width(L->large, buf) <= name_width ? L->large : L->medium;
++	y = call_line_marked(big, y, buf,
++		d->call.emergency ? ui_col.warn : (d->state == RDMR_RX ? ui_col.fg : ui_col.dim), lock);
+ 	sb_init(&b, buf, sizeof buf);
+ 	if (d->call.src_name[0] != '\0') {
+ 		sb_u32(&b, d->call.src, 1);
+@@ -2200,8 +2200,7 @@ static void draw_dmr_call(const radio_view_t *v, const ui_state_t *s)
+ 		sb_str(&b, " ENC");	// privacy marker (played only with the key, never after a PI header)
+ 	if (d->call.emergency)
+ 		sb_str(&b, TR(CALL_CHIP_EMERGENCY, " EMERGENCY"));
+-	y = call_line_marked(L->small, y, buf, d->call.emergency ? ui_col.warn : ui_col.dim,
+-		d->state == RDMR_RX && d->codec && d->rx_decrypt);
++	y = call_line(L->small, y, buf, d->call.emergency ? ui_col.warn : ui_col.dim);
+ 	if (d->alias[0] != '\0' && s->alias_show) {
+ 		// The talker alias in quotes, on two lines when it needs them and they fit above the signal line
+ 		char lines[2][64];
+@@ -2226,10 +2225,9 @@ static void draw_dmr_call(const radio_view_t *v, const ui_state_t *s)
+ 		y = call_line(L->small, y, buf, ui_col.fg);
+ 	}
+ 	// Then why it isn't heard, or where the call goes ("TG 91 World")
+-	const char *why = d->state == RDMR_RX_OTHER ? (d->call.encrypted ?
+-		TR(CALL_WHY_ENCRYPTED, "Encrypted: not played") :
+-		TR(CALL_WHY_OTHER_TG, "Other TG: not played")) : !d->codec ? TR(WHY_NO_CODEC, "No codec: voice off") :
+-			NULL;
++	const char *why = d->rx_privacy_blocked || (d->state == RDMR_RX_OTHER && d->call.encrypted) ?
++		TR(CALL_WHY_ENCRYPTED, "Encrypted: not played") : d->state == RDMR_RX_OTHER ?
++		TR(CALL_WHY_OTHER_TG, "Other TG: not played") : !d->codec ? TR(WHY_NO_CODEC, "No codec: voice off") : NULL;
+ 	if (why != NULL) {
+ 		y = call_line(L->small, y, why, ui_col.warn);
+ 	} else {
+@@ -2690,7 +2688,7 @@ static void draw_tx(const radio_view_t *v, const ui_state_t *s)
+ 			sb_str(&b, TR(CALL_BODY_TO_GROUP, " Group"));
+ 		if (d->rmo)
+ 			sb_str(&b, " RPT");
+-		if (voice_lock_for_tx(v))
++		if (ui_voice_lock_for_tx(v))
+ 			sb_str(&b, " ENC");
+ 		break;
+ #endif
+@@ -2733,7 +2731,7 @@ static void draw_tx(const radio_view_t *v, const ui_state_t *s)
+ 	default: break;
+ 	}
+ 	if (buf[0])
+-		call_line_marked(sm, y, buf, ui_col.fg, voice_lock_for_tx(v));
++		call_line_marked(sm, y, buf, ui_col.fg, ui_voice_lock_for_tx(v));
+ 	y += sm->h + gap;
+ 
+ 	sb_init(&b, buf, sizeof buf);
+@@ -2889,6 +2887,8 @@ static const font_t *dual_name_font(const ui_state_t *s, int i, const font_t *nf
+ 			continue;
+ 		const font_t *mf = dual_num_font(f);
+ 		int need = gfx_text_width(f, buf) + (p->vfo ? 0 : gfx_text_width(mf, num) + mf->w / 2);
++		if (p->tx_voice_lock)
++			need += voice_lock_width(f);
+ 		if (need <= room || f == L->small)
+ 			return f;
+ 	}
+@@ -2939,6 +2939,7 @@ static void dual_pane(const radio_view_t *v, const ui_state_t *s, int i, int y,
+ 	const font_t *nf = ft->name, *sm = L->small;
+ 	int w = gfx_width();
+ 	bool tx = v->state == RS_TX && d->sel == i, rx = !tx && p->rx, sel = d->sel == i;
++	bool tx_lock = tx ? ui_voice_lock_for_tx(v) : p->tx_voice_lock;
+ 	bool entry = s->entry && sel && p->vfo;
+ 	bool quiet = !rx && d->pane[!i].rx;	// the other pane has a call: this one steps back
+ 	color_t fg = quiet ? ui_col.dim : ui_col.fg;
+@@ -3002,7 +3003,7 @@ static void dual_pane(const radio_view_t *v, const ui_state_t *s, int i, int y,
+ 	bool pill3 = false;
+ 	if ((tx || sel) && ft->detail != NULL) {
+ 		dual_name(s, i, buf, sizeof buf);
+-		int need = gfx_text_width(f, buf);
++		int need = gfx_text_width(f, buf) + (tx_lock ? voice_lock_width(f) : 0);
+ 		if (!p->vfo) {
+ 			sb_init(&b, fit, sizeof fit);
+ 			sb_u32(&b, p->number, 1);
+@@ -3038,6 +3039,8 @@ static void dual_pane(const radio_view_t *v, const ui_state_t *s, int i, int y,
+ 		sb_init(&b, buf, sizeof buf);
+ 		sb_freq(&b, v->ch.tx_hz);
+ 	}
++	if (tx_lock)
++		x = draw_voice_lock(f, x, base - f->ascent, ui_col.priv);
+ 	gfx_text_fit(f, buf, rx_end - x, fit, sizeof fit);
+ 	x = gfx_text(f, x, base - f->ascent, fit, entry ? ui_col.warn : tx && p->vfo ? ui_col.tx : rx ? ui_col.rx : fg);
+ 	if (p->vfo && x + sm->w / 2 + gfx_text_width(sm, "MHz") <= rx_end) {
+@@ -3070,8 +3073,15 @@ static void dual_pane(const radio_view_t *v, const ui_state_t *s, int i, int y,
+ 	sb_init(&b, buf, sizeof buf);
+ 	color_t c2 = fg;
+ 	if (rx) {
+-		sb_str(&b, p->caller[0] ? p->caller : TR(STATE_RECEIVING, "Receiving"));
+-		c2 = ui_col.rx;
++		if (p->rx_privacy_blocked) {
++			sb_str(&b, TEXT_ALT_OPEN);
++			sb_str(&b, TR(CALL_WHY_ENCRYPTED, "Encrypted: not played"));
++			sb_str(&b, TEXT_ALT_NEXT "ENC !" TEXT_ALT_CLOSE);
++			c2 = ui_col.warn;
++		} else {
++			sb_str(&b, p->caller[0] ? p->caller : TR(STATE_RECEIVING, "Receiving"));
++			c2 = ui_col.rx;
++		}
+ 	} else if (p->mode == RADIO_MODE_DMR) {
+ 		sb_str(&b, p->target[0] ? p->target : "DMR");
+ 		if (ft->detail == NULL && !p->vfo)
+@@ -3117,8 +3127,9 @@ static void dual_pane(const radio_view_t *v, const ui_state_t *s, int i, int y,
+ 		if (nx < w)
+ 			r2 = nx - sm->w;
+ 	}
+-	gfx_text_fit(tf, buf, r2 - x0, fit, sizeof fit);
+-	gfx_text(tf, x0, y2, fit, c2);
++	int x2 = rx && p->rx_voice_lock ? draw_voice_lock(tf, x0, y2, ui_col.priv) : x0;
++	gfx_text_fit(tf, buf, r2 - x2, fit, sizeof fit);
++	gfx_text(tf, x2, y2, fit, c2);
+ 
+ 	// Row 3: the frequency and the chips, the zone at the right (B may be in another zone than A)
+ 	if (ft->detail != NULL) {
+@@ -3163,15 +3174,18 @@ static void dual_large(const radio_view_t *v, const ui_state_t *s)
+ 		} else
+ 			sb_str(&b, p->name);
+ 		const font_t *f = large_font(buf, room, form, sizeof form);
+-		if (gfx_text_width(f, form) + (d->sel == i ? f->w / 3 + 2 : 0) > w) {
++		bool tx = v->state == RS_TX && d->sel == i, rx = !tx && p->rx;
++		bool tx_lock = tx ? ui_voice_lock_for_tx(v) : p->tx_voice_lock;
++		if (gfx_text_width(f, form) + (d->sel == i ? f->w / 3 + 2 : 0) +
++		    (tx_lock ? voice_lock_width(f) : 0) > w) {
+ 			const font_t *smaller[] = { L->large, L->medium, L->small };
+ 			for (unsigned k = 0; k < sizeof smaller / sizeof smaller[0]; k++) {
+ 				f = smaller[k];
+-				if (f->h <= room && gfx_text_width(f, form) + (d->sel == i ? f->w / 3 + 2 : 0) <= w)
++				if (f->h <= room && gfx_text_width(f, form) + (d->sel == i ? f->w / 3 + 2 : 0) +
++				    (tx_lock ? voice_lock_width(f) : 0) <= w)
+ 					break;
+ 			}
+ 		}
+-		bool tx = v->state == RS_TX && d->sel == i, rx = !tx && p->rx;
+ 		color_t c = s->entry && d->sel == i && p->vfo ? ui_col.warn :
+ 			    tx ? ui_col.tx : rx ? ui_col.rx : d->sel == i ? ui_col.fg : ui_col.dim;
+ 		// The arrow in the room a selection bar would take: f->w / 3 wide, half the letter high, a 2 px gap; the
+@@ -3179,6 +3193,8 @@ static void dual_large(const radio_view_t *v, const ui_state_t *s)
+ 		int aw = d->sel == i ? f->w / 3 + 2 : 0, ah = (f->h / 2) | 1;
+ 		if (aw)
+ 			dual_arrow(0, y + (f->h - ah) / 2, ah, aw - 2, c);
++		if (tx_lock)
++			aw = draw_voice_lock(f, aw, y, ui_col.priv);
+ 		gfx_text_fit(f, form, w - aw, fit, sizeof fit);
+ 		if (rx || tx) {	// receiving or transmitting: the letter in a filled box, as the tag on Home (the strip has the word)
+ 			char letter[2] = { fit[0], 0 };
+diff --git a/core/ui/ui_screens.h b/core/ui/ui_screens.h
+index a539af4..e5370b6 100644
+--- a/core/ui/ui_screens.h
++++ b/core/ui/ui_screens.h
+@@ -46,6 +46,9 @@ typedef struct {
+ 	char text[UI_BANNER_TEXT];
+ } ui_banner_t;
+ 
++// A loaded privacy key for the visible channel, or the protection of an active voice transmission.
++bool ui_voice_lock_for_tx(const radio_view_t *v);
++
+ #if CONFIG_DUAL_WATCH
+ // Dual watch (docs/ux/dual-watch.md): the two channels Home shows, A and B, each a channel of any zone or the VFO. Read
+ // from the codeplug when they are picked, so the panes stay still while the radio alternates between them
+@@ -61,6 +64,9 @@ typedef struct {
+ 	char detail[24];	// the rest, short: "TS1 CC1" (DMR), "T100.0 25k" (FM)
+ 	bool rx;		// a call or signal coming in on it now (on two receivers, both can)
+ 	bool heard;		// its audio is playing (with two calls at once, one of them)
++	bool tx_voice_lock;	// last tuned view showed a usable transmit privacy key
++	bool rx_voice_lock;	// current call supplied protected voice to the codec
++	bool rx_privacy_blocked;	// protected voice of the current call is withheld
+ 	bool busy;		// one receiver: a look in the wait after a call on the other pane found a signal here (not
+ 				// played; the watch comes here when the wait ends)
+ 	int16_t rssi_dbm;
+diff --git a/docs/spec/dmr-voice.md b/docs/spec/dmr-voice.md
+index 9294a6b..f3c1d82 100644
+--- a/docs/spec/dmr-voice.md
++++ b/docs/spec/dmr-voice.md
+@@ -214,9 +214,10 @@ is XORed onto the 49 AMBE+2 parameter bits of each frame by superframe position:
+ encoder's bits as they are), on RX before the voice sink (after the FEC decode, `core/dmr/ambe/ambeFec.c`). With a key
+ loaded our calls carry FID 0x10 and the privacy service option (0x40), and received calls with the privacy service
+ option (or PI) are descrambled. Without a key such bursts are never played; they count as `rx_enc_dropped`.
+-The Home padlock requires a loaded AES-256 or Enhanced Privacy cipher key. It remains visible during voice PTT.
+-The receive padlock appears after the cipher passes a decrypted burst to the voice decoder. Basic privacy keeps the
+-`Priv` chip on Home.
++The Home padlock marks Basic Privacy, Enhanced Privacy or AES-256 with a usable transmit key. The transmit screen
++shows it during encrypted voice PTT. On receive it marks a caller whose protected burst was passed to the voice decoder
++through the configured privacy path. This is a playback indicator and does not authenticate the key. When the cipher
++withholds protected voice, the call says "Encrypted: not played".
+ 
+ The key is set over the debug link (RADIO op 19, `radio_req_dmr_privacy`). The radio core saves it in settings slot 1
+ and loads the active slot at boot (`settings-store.md` 3.1); the open-firmware codeplug has no key storage, so qdmr can't
+diff --git a/docs/user/09-dmr.md b/docs/user/09-dmr.md
+index 93e9fd8..5c8e61d 100644
+--- a/docs/user/09-dmr.md
++++ b/docs/user/09-dmr.md
+@@ -289,9 +289,9 @@ radio on air yet.
+   key ID is yours and its key is in the codeplug. Others are never played.
+ - With AES-256 and its key missing from the codeplug, **PTT** is refused: the radio never sends in the clear instead.
+ - **\***, **6** turns privacy on for your calls ("Privacy on for now"). **Back** on Home turns it off again.
+-- Home and the transmit screen show a padlock when AES-256 or Enhanced Privacy is in use and its key is loaded.
+-  A received call gets a padlock once the radio starts decoding its protected voice. Home shows **Priv** for basic
+-  privacy.
++- Home and the transmit screen show a padlock for Basic Privacy, Enhanced Privacy or AES-256 with a usable transmit key.
++  The caller's name gets a padlock when the radio starts decoding protected voice. When the cipher withholds audio, the
++  call says **Encrypted: not played**.
+ 
+ To set the key on the radio, open **Settings > Privacy** (**OK**, **7**, **4**).
+ 
+diff --git a/tests/host/dmrCallTest.c b/tests/host/dmrCallTest.c
+index 854b860..75b2b87 100644
+--- a/tests/host/dmrCallTest.c
++++ b/tests/host/dmrCallTest.c
+@@ -2929,7 +2929,7 @@ static void test_basic_privacy(void)
+ 			sim_rx(&b);
+ 			run_ms(60);
+ 		}
+-		CHECK(V()->caller.encrypted);
++		CHECK(V()->caller.encrypted && V()->rx_decrypt == (pass == 0) && V()->rx_privacy_blocked == (pass != 0));
+ 		if (pass == 0)
+ 			CHECK(sink_log.frames == 18 && sink_log.losts == 0 && memcmp(sink_log.first, plain, 9) == 0);
+ 		else
+@@ -2966,6 +2966,7 @@ static void test_basic_privacy(void)
+ 		run_ms(60);
+ 	}
+ 	CHECK(!V()->caller.encrypted && sink_log.frames == 24 && !memcmp(sink_log.last, plain + 18, 9));
++	CHECK(!V()->rx_decrypt && !V()->rx_privacy_blocked);
+ 
+ 	// The repeater omits the privacy indication altogether: use the operator's BP key only on the configured slot/CC.
+ 	c.basic_ras = true;
+@@ -3141,6 +3142,7 @@ static void test_cipher(uint8_t alg)
+ 		}
+ 		CHECK(V()->caller.encrypted && V()->caller.pi_header == (pass != 4));
+ 		CHECK(V()->rx_decrypt == (pass == 0 || ras));
++		CHECK(V()->rx_privacy_blocked == (pass != 0 && !ras));
+ 		if (pass == 0)
+ 			CHECK(sink_log.frames == nv * 3 && sink_log.losts == 0 && memcmp(sink_log.first, first, 9) == 0 &&
+ 			      memcmp(sink_log.last, last, 9) == 0);
+diff --git a/tests/host/radioCoreTest.c b/tests/host/radioCoreTest.c
+index 6b9f1ae..e231112 100644
+--- a/tests/host/radioCoreTest.c
++++ b/tests/host/radioCoreTest.c
+@@ -1787,6 +1787,8 @@ static void test_dmr_channel_privacy(void)
+ 		unsigned first = sim.air_count;
+ 		req(RREQ_PTT, 1);
+ 		run(660);
++		if (tests[i].tx)
++			CHECK(sm.view.dmr.state == RDMR_TX && sm.view.dmr.call.encrypted == tests[i].privacy);
+ 		req(RREQ_PTT, 0);
+ 		run(580);
+ 		CHECK((sim.air_count > first) == tests[i].tx);
+diff --git a/tests/host/sim/ui_sim.c b/tests/host/sim/ui_sim.c
+index 49a3f84..a1d75d5 100644
+--- a/tests/host/sim/ui_sim.c
++++ b/tests/host/sim/ui_sim.c
+@@ -1637,6 +1637,7 @@ static void ptt(bool down)
+ 				view.dmr.reply_active = true;
+ 			}
+ 			view.dmr.state = RDMR_TX;
++			view.dmr.call.encrypted = view.dmr.tx_privacy != RDMR_PRIVACY_NONE;
+ 			sim_rec.tx_id = view.dmr.target_id;
+ 			sim_rec.tx_private = view.dmr.target_private;
+ 		} else {
+@@ -1661,6 +1662,7 @@ static void rx_start(uint32_t src, uint32_t dst, bool group, const char *alias)
+ 	view.rssi_dbm = -71;
+ 	view.dmr.state = RDMR_RX;
+ 	view.dmr.rssi_dbm = -71;
++	view.dmr.rx_decrypt = view.dmr.rx_privacy_blocked = false;
+ 	memset(&view.dmr.call, 0, sizeof view.dmr.call);
+ 	view.dmr.call.src = src;
+ 	view.dmr.call.dst = group ? dst : view.dmr.own_id;
+@@ -1691,6 +1693,7 @@ static void rx_end(void)
+ 	view.dmr.last_ms = now_ms;
+ 	view.state = RS_IDLE;
+ 	view.dmr.state = RDMR_IDLE;
++	view.dmr.rx_decrypt = view.dmr.rx_privacy_blocked = false;
+ 	view.dmr.alias[0] = 0;
+ 	view.last_rx_ms = now_ms;
+ 	// The reply window: PTT answers on their talkgroup (or them, privately)
+@@ -2869,6 +2872,12 @@ static bool check(const char *kv, char *err, size_t len)
+ 	else if (strcmp(key, "scanning") == 0) snprintf(got, sizeof got, "%u", view.scan != 0 && view.scan != 3);
+ #if CONFIG_DUAL_WATCH
+ 	else if (strcmp(key, "dual") == 0) snprintf(got, sizeof got, "%u", ui_st.dual.on && view.scan == 3);
++	else if (strcmp(key, "dualtxlock") == 0) snprintf(got, sizeof got, "%u%u",
++		ui_st.dual.pane[0].tx_voice_lock, ui_st.dual.pane[1].tx_voice_lock);
++	else if (strcmp(key, "dualrxlock") == 0) snprintf(got, sizeof got, "%u%u",
++		ui_st.dual.pane[0].rx_voice_lock, ui_st.dual.pane[1].rx_voice_lock);
++	else if (strcmp(key, "dualrxblocked") == 0) snprintf(got, sizeof got, "%u%u",
++		ui_st.dual.pane[0].rx_privacy_blocked, ui_st.dual.pane[1].rx_privacy_blocked);
+ 	else if (strcmp(key, "azone") == 0) snprintf(got, sizeof got, "%u", sim_dual[0].zone);
+ 	else if (strcmp(key, "apos") == 0) snprintf(got, sizeof got, "%u", sim_dual[0].pos + 1u);
+ 	else if (strcmp(key, "bzone") == 0) snprintf(got, sizeof got, "%u", sim_dual[1].zone);
+@@ -3164,6 +3173,9 @@ static bool run_token(char *t, char *err, size_t len)
+ 			if (*p == '_')
+ 				*p = ' ';
+ 		rx_start(src, dst, kind != 'p', alias);
++		view.dmr.call.encrypted = kind == 'a' || kind == 'e';
++		view.dmr.rx_decrypt = kind == 'a';
++		view.dmr.rx_privacy_blocked = kind == 'e';
+ 		if (t[0] == 'c') {
+ 			advance(2000);
+ 			rx_end();
+@@ -3360,7 +3372,7 @@ static bool run_token(char *t, char *err, size_t len)
+ 			return false;
+ 		}
+ 		view.p25.flags = (uint8_t)((view.p25.flags & RADIO_P25_TALK_UNIT) | RADIO_P25_ON | RADIO_P25_RX |
+-			(kind == 'u' ? RADIO_P25_UNIT : 0) | (kind == 'e' ? RADIO_P25_ENC : 0) |
++			(kind == 'u' ? RADIO_P25_UNIT : 0) | (kind == 'a' || kind == 'e' ? RADIO_P25_ENC : 0) |
+ 			(kind == 'e' || kind == 'o' ? 0 : RADIO_P25_PLAYED));
+ 		view.p25.src = src;
+ 		view.p25.dst = dst;
+diff --git a/tests/host/uiFlowTest.c b/tests/host/uiFlowTest.c
+index 11cf97d..823a0cd 100644
+--- a/tests/host/uiFlowTest.c
++++ b/tests/host/uiFlowTest.c
+@@ -97,6 +97,7 @@ static const flow_t flows[] = {
+ 	{ "P25 home: a unit call", "dlmode:p25", "p25rx:3101234,3105555,u", "shows=Private_to_3105555", 0, false },
+ 	{ "P25 home: encrypted", "dlmode:p25", "p25rx:3101234,7,e", "shows=Encrypted:_not_played hides=ID_3101234", 0,
+ 	  false },
++	{ "P25 home: lock with decrypted voice", "dlmode:p25", "p25rx:3101234,7,a", "markbefore=AES hides=Encrypted:", 0, false },
+ 	{ "P25 home: another talk group", "dlmode:p25", "p25rx:3101234,7,o", "shows=Other_TG:_not_played", 0, false },
+ 	{ "P25 home: the call ends", "dlmode:p25 p25rx:3101234,7", "p25rxend", "screen=home hides=ID_3101234", 0, false },
+ 	// Dual watch with A on P25: the pane names the mode, no tone or bandwidth for it
+@@ -237,7 +238,12 @@ static const flow_t flows[] = {
+ 	{ "Voice lock on Home with a cipher key", "cipher:ready", "", "markafter=DMR", 0, false },
+ 	{ "No voice lock with a missing cipher key", "cipher:missing", "", "nomarkafter=DMR hides=Priv", 0, false },
+ 	{ "Voice lock and ENC during a DMR over", "cipher:ready", "pttdown", "shows=ENC markbefore=TS1", 1, false },
+-	{ "Basic privacy keeps its own text", "", "quick 6 back", "shows=Priv nomarkbefore=TS1", 3, false },
++	{ "Basic privacy shows its lock on Home", "", "quick 6 back", "shows=Priv markafter=DMR", 3, false },
++	{ "Basic privacy shows the TX lock", "quick 6 back", "pttdown", "shows=ENC markbefore=TS1", 1, false },
++	{ "Digi voice sent in the clear has no TX lock", "", "pttdown", "hides=ENC nomarkbefore=TS1", 1, false },
++	{ "DMR decrypted RX marks the caller", "", "rx:9991234,201,a", "markbefore=Joe hides=Encrypted:", 0, false },
++	{ "DMR encrypted RX without a usable cipher warns", "cipher:ready", "rx:9991234,201,e", "nomarkbefore=Joe shows=Encrypted:", 0, false },
++	{ "DMR clear RX ignores the transmit key", "cipher:ready", "rx:9991234,201,g", "nomarkbefore=Joe hides=Encrypted:", 0, false },
+ 	{ "11 scan start (Tools > Scan)", "", "ok 6 1", "scanning=1", 3, false },
+ 	{ "11 extended RX appears in Tools", "extended-bands ok 6 up", "",
+ 	  "screen=tools shows=RX_past_bands shows=On", 3, false },
+@@ -257,6 +263,12 @@ static const flow_t flows[] = {
+ 	{ "11 scan stop", "ok 6 1", "back", "scanning=0", 1, false },
+ 	// Dual watch (docs/ux/dual-watch.md): on in a few presses, PTT on the selected channel, the other one press away
+ 	{ "11 dual watch: start, B the next channel", "", "quick 7", "dual=1 sel=A pos=3 bpos=4 screen=home", 2, false },
++	{ "Dual watch: retain A transmit privacy while tuned to B", "quick 7 ctx 3 5 ok tune:a cipher:ready",
++	  "tune:b cipher:missing", "dual=1 sel=A dualtxlock=10", 0, false },
++	{ "Dual watch: mark the decrypted caller on A", "quick 7 tune:a", "rx:9991234,201,a",
++	  "dualrxlock=10 hides=Encrypted:", 0, false },
++	{ "Dual watch: warn encrypted receive without a key", "quick 7 tune:a cipher:ready", "rx:9991234,201,e",
++	  "dualrxlock=00 dualrxblocked=10 hides=Joe", 0, false },
+ 	{ "11 dual watch: start, then B by number", "", "quick 7 ctx 3 5 ok", "dual=1 sel=A pos=3 bpos=5 screen=home", 6, false },
+ 	{ "11 dual watch: again with the last B", "quick 7 ctx 3 5 ok back back", "quick 7", "dual=1 sel=A", 2, false },
+ 	{ "11 dual watch: B in another zone", "", "quick 7 ctx 1 zone+", "dual=1 sel=B bzone=1 screen=home", 5, false },

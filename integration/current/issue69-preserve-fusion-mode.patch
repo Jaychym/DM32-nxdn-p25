@@ -1,0 +1,96 @@
+diff --git a/site/static/js/codeplug/csv.js b/site/static/js/codeplug/csv.js
+index a0e0442..54f65a7 100644
+--- a/site/static/js/codeplug/csv.js
++++ b/site/static/js/codeplug/csv.js
+@@ -176,8 +176,7 @@ const YSF_DEVIATIONS = { wide: "Wide", narrow: "Narrow" };
+ const YSF_FORMATS = { [DT_VD1]: "V/D-1", [DT_DATA_FR]: "Data FR", [DT_VD2]: "DN", [DT_VW]: "VW" };
+ const asChannelMode = (s) => {
+ 	const v = s.trim().toLowerCase().replace(/[_-]/g, " ").replace(/\s+/g, " ");
+-	if (!v) return { kind: 0, mode: "fm" };
+-	if (v === "ysf" || v === "c4fm" || v === "fusion") return { kind: YSF_KIND };
++	if (["ysf", "c4fm", "fusion", "system fusion", "yaesu system fusion"].includes(v)) return { kind: YSF_KIND };
+ 	for (const [mode, text] of Object.entries(MODES)) if (text.toLowerCase() === v) return { kind: 0, mode };
+ 	if (["nxdn", "nxdn96", "nxdn 96", "nxdn9600", "nxdn 9600"].includes(v)) return { kind: NXDN_KIND, rate9600: true };
+ 	if (["nxdn48", "nxdn 48", "nxdn4800", "nxdn 4800"].includes(v)) return { kind: NXDN_KIND, rate9600: false };
+@@ -189,6 +188,7 @@ const channelModeText = (r) => {
+ 	return MODES[r.mode];
+ };
+ const setChannelMode = (r, s, m) => {
++	if (!s.trim()) return;
+ 	const v = asChannelMode(s);
+ 	if (v.kind) {
+ 		setKind(m, r, v.kind);
+@@ -198,6 +198,7 @@ const setChannelMode = (r, s, m) => {
+ const usesTagTx = (r) => r.kind === NXDN_KIND || r.kind === YSF_KIND;
+ const rxOnlyText = (r) => yesNo(usesTagTx(r) ? !r.tagTx : r.rxOnly);
+ const setRxOnly = (r, s) => {
++	if (r.kind === YSF_KIND && !s.trim()) return;
+ 	const v = asBool(s);
+ 	if (usesTagTx(r)) r.tagTx = !v;
+ 	else r.rxOnly = v;
+@@ -521,13 +522,14 @@ export function importTable(m, text, table = detect(text)) {
+ 	const spec = TABLES[table];
+ 	const rows = parse(text);
+ 	const { found, unknown } = mapHeader(spec, rows[0] || []);
++	const keys = new Set(found.map((f) => f.col.key));
++	if (table === "channels" && !spec.required.every((key) => keys.has(key))) throw new Bad("not_a_table");
+ 	// Read a channel's mode first, then its RX DG-ID before a blank TX DG-ID can inherit it.
+ 	if (table === "channels") {
+ 		const priority = { mode: 0, ysfRxDgid: 1 };
+ 		found.sort((a, b) => (priority[a.col.key] ?? 2) - (priority[b.col.key] ?? 2));
+ 	}
+ 	const problems = [];
+-	const keys = new Set(found.map((f) => f.col.key));
+ 	const hasNumber = keys.has("number");
+ 	const old = m[table];
+ 	const taken = new Set();
+@@ -556,8 +558,8 @@ export function importTable(m, text, table = detect(text)) {
+ 				col.set(work, row[index] ?? "", m, (e) => problems.push({ row: i + 1, column: col.header, code: e.code, params: e.params }));
+ 			} catch (e) {
+ 				if (!(e instanceof Bad)) throw e;
+-				// a new record without a usable required value (name, frequency, ID) would only be a default; skip it
+-				const lost = fresh && spec.required.includes(col.key);
++				// A new channel with an invalid explicit mode must not be saved as default FM.
++				const lost = fresh && (spec.required.includes(col.key) || (table === "channels" && col.key === "mode"));
+ 				problems.push({ row: i + 1, column: col.header, code: e.code, params: e.params, skipped: lost });
+ 				skip ||= lost;
+ 			}
+diff --git a/site/tests/csv.test.mjs b/site/tests/csv.test.mjs
+index 6667aec..10976a8 100644
+--- a/site/tests/csv.test.mjs
++++ b/site/tests/csv.test.mjs
+@@ -90,6 +90,34 @@ test("YSF channels keep their channel mode, voice fields and transmit permission
+ 	]);
+ });
+ 
++test("A partial CSV preserves an existing YSF mode and transmit permission", () => {
++	const m = empty();
++	importTable(m, "Name,Mode,RX Frequency,RX Only,YSF DT,RX DG-ID\nRelay,Yaesu System Fusion,446.125,Yes,DN,17\n");
++	for (const partial of ["Name,RX Frequency\nRelay,446.25\n", "Name,RX Frequency,Mode,RX Only\nRelay,446.30,,\n"]) {
++		assert.deepEqual(importTable(m, partial).problems, []);
++		const [c] = decode(encode(m)).channels;
++		assert.equal(c.kind, 6);
++		assert.equal(c.tagTx, false);
++		assert.equal(c.params.dt, 2);
++		assert.equal(c.params.rxDgid, 17);
++	}
++	const records = m.channels;
++	for (const table of [undefined, "channels"]) {
++		assert.throws(() => importTable(m, "Relay,446.30,YSF\n", table), { code: "not_a_table" });
++		assert.equal(m.channels, records);
++	}
++});
++
++test("An invalid explicit channel mode cannot create a default FM channel", () => {
++	const m = empty();
++	const result = importTable(m, "Name,RX Frequency,Mode\nRelay,446.125,YSF-unknown\n");
++	assert.equal(result.added, 0);
++	assert.equal(result.problems[0].skipped, true);
++	assert.equal(m.channels.length, 0);
++	assert.equal(importTable(m, "Name,RX Frequency,Mode\nRelay,446.125,FM\n").added, 1);
++	assert.equal(m.channels[0].mode, "fm");
++});
++
+ test("CSV carries a conventional NXDN channel instead of dropping it to FM", () => {
+ 	const m = empty();
+ 	const text = [

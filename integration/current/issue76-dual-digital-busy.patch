@@ -1,0 +1,178 @@
+diff --git a/core/radio/radio_sm.c b/core/radio/radio_sm.c
+index 7814b51..d7b630d 100644
+--- a/core/radio/radio_sm.c
++++ b/core/radio/radio_sm.c
+@@ -4841,6 +4841,38 @@ static void dual_request(radio_sm_t *sm, const radio_req_t *req, uint32_t now_ms
+ }
+ #endif
+ 
++#if CONFIG_DMR || CONFIG_AIR
++// A DMR, P25, NXDN or YSF carrier by its signal strength at the squelch level (the default level when the squelch is open):
++// the board's digital mode, whose noise reading may not follow the signal (gotchas 17.3)
++static bool dmr_strength_heard(const radio_sm_t *sm, int16_t rssi_dbm)
++{
++	uint8_t sq = sm->view.squelch != 0 ? sm->view.squelch : RADIO_SQUELCH_DEFAULT;
++	if (sq > RADIO_SQUELCH_MAX) {
++		sq = RADIO_SQUELCH_MAX;
++	}
++	int16_t above = (int16_t)((sq - 1) * RADIO_SQL_DB_PER_STEP), floor_dbm;
++	if (scan_floor(&sm->scan, &floor_dbm) && rssi_dbm <= floor_dbm + RADIO_DMR_SQL_L1_FLOOR_DB + above) {
++		return false;
++	}
++	return rssi_dbm > RADIO_DMR_SQL_L1_DBM + above;
++}
++#endif
++
++// The signal strength also counts on digital modes, whose noise reading can stay high on a burst. Only use it
++// after the settle: a reading right after a retune can belong to the previous frequency (gotchas 17.3–17.4).
++static bool scan_carrier_heard(const radio_sm_t *sm, const radio_status_t *st, uint32_t now_ms)
++{
++#if CONFIG_DMR || CONFIG_AIR
++	if (((CONFIG_DMR && sm->view.ch.mode == RADIO_MODE_DMR) || air_mode(sm->view.ch.mode)) &&
++	    now_ms - sm->scan.tuned_ms >= sm->scan.cfg.settle_ms && dmr_strength_heard(sm, st->rssi_dbm)) {
++		return true;
++	}
++#else
++	(void)now_ms;
++#endif
++	return carrier_heard(sm, st->noise);
++}
++
+ #if CONFIG_DUAL_WATCH
+ // Dual watch on one receiver, in the wait after a signal (SCAN_PH_RESUME): the receiver stays for the reply, but after
+ // each dwell there it looks at the other channel for one. A signal there is shown (view.dual_busy), not played or
+@@ -4853,7 +4885,7 @@ static bool dual_wait_service(radio_sm_t *sm, const radio_status_t *st, uint32_t
+ 	sc->cfg.delay_ms = sm->set.dual_delay_ms;	// a new setting applies at once
+ 	if (sm->dual_peek) {
+ 		uint32_t since = now_ms - sc->tuned_ms;
+-		if (since >= sc->cfg.settle_ms && carrier_heard(sm, st->noise)) {
++		if (since >= sc->cfg.settle_ms && scan_carrier_heard(sm, st, now_ms)) {
+ 			sm->dual_peek_heard = true;
+ 		}
+ 		if (since < dwell) {
+@@ -4893,23 +4925,6 @@ static bool dual_wait_service(radio_sm_t *sm, const radio_status_t *st, uint32_t
+ }
+ #endif
+ 
+-#if CONFIG_DMR || CONFIG_AIR
+-// A DMR, P25, NXDN or YSF carrier by its signal strength at the squelch level (the default level when the squelch is open):
+-// the board's digital mode, whose noise reading may not follow the signal (gotchas 17.3)
+-static bool dmr_strength_heard(const radio_sm_t *sm, int16_t rssi_dbm)
+-{
+-	uint8_t sq = sm->view.squelch != 0 ? sm->view.squelch : RADIO_SQUELCH_DEFAULT;
+-	if (sq > RADIO_SQUELCH_MAX) {
+-		sq = RADIO_SQUELCH_MAX;
+-	}
+-	int16_t above = (int16_t)((sq - 1) * RADIO_SQL_DB_PER_STEP), floor_dbm;
+-	if (scan_floor(&sm->scan, &floor_dbm) && rssi_dbm <= floor_dbm + RADIO_DMR_SQL_L1_FLOOR_DB + above) {
+-		return false;
+-	}
+-	return rssi_dbm > RADIO_DMR_SQL_L1_DBM + above;
+-}
+-#endif
+-
+ // Every poll while scanning: pause on the monitor, what the receiver hears, move on
+ static void scan_service(radio_sm_t *sm, const radio_status_t *st, uint32_t now_ms)
+ {
+@@ -4927,7 +4942,7 @@ static void scan_service(radio_sm_t *sm, const radio_status_t *st, uint32_t now_
+ 	scan_pause(sc, sm->view.monitor, now_ms);
+ 	bool dmr = sm->view.ch.mode == RADIO_MODE_DMR;
+ 	bool air = air_mode(sm->view.ch.mode);
+-	bool carrier = carrier_heard(sm, st->noise);
++	bool carrier = scan_carrier_heard(sm, st, now_ms);
+ 	bool active, sync = false;
+ #if CONFIG_BCAST_FM
+ 	if (sm->view.bcast && sc->kind == SCAN_VFO) {
+@@ -4940,12 +4955,8 @@ static void scan_service(radio_sm_t *sm, const radio_status_t *st, uint32_t now_
+ #if CONFIG_DMR
+ 	if (dmr) {
+ 		active = sm->view.dmr.state == RDMR_RX;
+-		// Some receivers' noise reading stays put on a DMR signal while its strength rises: either one is a
+-		// carrier, the strength once the settle has passed (a reading just after the retune is the last stop's)
+-		// The strength scale also sits above the floor read on the stops before: some receivers' strength
+-		// reading isn't calibrated, and reads far up the scale on an empty channel (gotchas 17.4)
++		// Keep the floor from normal dwells so a strong signal on repeated peeks does not raise it.
+ 		scan_level(sc, now_ms, st->rssi_dbm);
+-		carrier = carrier || (now_ms - sc->tuned_ms >= sc->cfg.settle_ms && dmr_strength_heard(sm, st->rssi_dbm));
+ 		// Sync: bursts with the channel's color code since this stop's settle, a call or a late entry still
+ 		// waiting for its LC. A call known not to be for us (another group, a private call) holds nothing
+ 		uint32_t heard_ms;
+@@ -4967,7 +4978,6 @@ static void scan_service(radio_sm_t *sm, const radio_status_t *st, uint32_t now_
+ 		// plays. A call decided against (another talk group, encrypted) holds nothing
+ 		uint8_t h = air_heard(sm);
+ 		scan_level(sc, now_ms, st->rssi_dbm);
+-		carrier = carrier || (now_ms - sc->tuned_ms >= sc->cfg.settle_ms && dmr_strength_heard(sm, st->rssi_dbm));
+ 		active = h == AIR_HEARD_PLAYED;
+ 		sync = h == AIR_HEARD_PENDING;
+ 		if (h == AIR_HEARD_OTHER) {
+diff --git a/docs/spec/radio-features.md b/docs/spec/radio-features.md
+index 0c92ac3..5138001 100644
+--- a/docs/spec/radio-features.md
++++ b/docs/spec/radio-features.md
+@@ -124,7 +124,7 @@ VFO during the watch copies into a VFO the other channel isn't on: the one last
+ | The same pair again | Only the selection changes: no retune, the stop goes on (cheap; the UI asks again on every change) |
+ | A new pair | The receiver stays where it is when that channel is still one of the two (a call it holds too), else it tunes the selected one |
+ | A signal | Holds the receiver as in a scan, then the wait (`dual_delay_ms`, below). Resume mode stop counts as carrier: a signal never ends the watch |
+-| The wait after a signal | The receiver stays on that channel for the reply, and after each dwell there looks at the other channel for one dwell (squelch shut). A signal found there sets its bit in the view's `dual_busy` (the pane shows Busy) and is not played or held: the receiver goes back and the wait goes on. A look starts only if a look and a dwell back fit in what is left of the wait. When the wait ends the watch alternates again, so a busy channel is held then. A look that hears nothing clears the bit, as does the watch's own hop to that channel and a stop. A hold (a signal, the DMR reply window) has no looks |
++| The wait after a signal | The receiver stays on that channel for the reply, and after each dwell there looks at the other channel for one dwell (squelch shut). A digital signal counts by noise or signal strength, just as during a normal scan visit. A signal found there sets its bit in the view's `dual_busy` (the pane shows Busy) and is not played or held: the receiver goes back and the wait goes on. A look starts only if a look and a dwell back fit in what is left of the wait. When the wait ends the watch alternates again, so a busy channel is held then. A look that hears nothing clears the bit, as does the watch's own hop to that channel and a stop. A hold (a signal, the DMR reply window) has no looks |
+ | DMR reply window | Holds the selected channel while it runs (PTT talks there). On the other channel it doesn't |
+ | PTT | Tunes the selected channel first if the receiver is on the other, and transmits there. The watch goes on: after the transmission (DMR: after its tail) the selected channel waits (`dual_delay_ms`, with looks at the other), and a reply holds it |
+ | Monitor down | Tunes the selected channel first if the receiver is on the other, then acts as without the watch (FM: squelch open; DMR: digital monitor on the release). The watch pauses there while the key is held |
+diff --git a/docs/user/12-scan.md b/docs/user/12-scan.md
+index 2eed16c..b8d3142 100644
+--- a/docs/user/12-scan.md
++++ b/docs/user/12-scan.md
+@@ -122,9 +122,10 @@ By default a call on the other channel never moves **PTT**. You choose.
+ ### The wait after a call
+ 
+ The radio has one receiver, so it switches between A and B. When a call ends, it stays on that channel for 1 s so it
+-hears the reply. While it waits, it takes short looks at the other channel. A call there shows **Busy** but doesn't
+-interrupt: when the wait ends, the radio goes to it. Change the wait with **Settings > Talk > Dual watch delay**
+-(0.5 s to 5 s). Shorter finds the other channel sooner; longer keeps more of a reply that starts late.
++hears the reply. While it waits, it checks the other channel briefly. A signal found there shows **Busy**, including
++on digital channels where the radio detects activity by signal strength. The radio goes there when the wait ends.
++Change the wait with **Settings > Talk > Dual watch delay** (0.5 s to 5 s). A shorter wait finds the other channel
++sooner, and a longer one leaves more time for a reply.
+ 
+ ### Talk back
+ 
+diff --git a/tests/host/radioFeaturesTest.c b/tests/host/radioFeaturesTest.c
+index e14adc1..e83d385 100644
+--- a/tests/host/radioFeaturesTest.c
++++ b/tests/host/radioFeaturesTest.c
+@@ -2288,6 +2288,27 @@ static void test_dual_wait(void)
+ 
+ // What the debug link sends during the watch (radio-features.md 2.1): a position, a zone or a frequency acts on the
+ // selected channel; a scan stop ends the watch and says so (view.dual_stops), so the UI doesn't start it again
++static void test_dual_digital_busy(void)
++{
++	start();
++	const radio_dual_ref_t home = { false, 0, 0 }, dmr = { false, 0, 5 };
++	dual(home, dmr, 0);
++	signal_on(0, 146520000, 30, no_tone);
++	run(300);
++	CHECK(on_ref(home) && sm.view.scan_phase == SCAN_PH_HOLD);
++	hw.sig[0].hz = 0;
++	CHECK(wait_on(dmr, 500) && sm.dual_peek);
++	// This receiver's noise reading does not drop on a DMR signal. Only the strength rises on each burst.
++	signal_on(1, 438500000, 120, no_tone);
++	hw.sig[1].tdma = true;
++	CHECK(wait_on(home, 300) && sm.view.scan_phase == SCAN_PH_RESUME);
++	CHECK(sm.view.dual_busy == 2);
++	hw.sig[1].hz = 0;
++	CHECK(wait_on(dmr, 300) && sm.dual_peek);
++	CHECK(wait_on(home, 300) && sm.view.dual_busy == 0);
++	dual_stop();
++}
++
+ static void test_dual_requests(void)
+ {
+ 	start();
+@@ -3973,6 +3994,7 @@ int main(void)
+ 	test_dual_watch();
+ #if CONFIG_DUAL_WATCH
+ 	test_dual_wait();
++	test_dual_digital_busy();
+ 	test_dual_requests();
+ 	test_dual_rx2();
+ #endif
