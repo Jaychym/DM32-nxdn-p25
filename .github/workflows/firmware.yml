@@ -135,9 +135,9 @@ jobs:
               raise SystemExit("release manifest does not match the M17/MDC1200 build configuration")
           if "AIR_RAW" in enabled or "AIR_RAW" not in disabled:
               raise SystemExit("release manifest unexpectedly enables AIR_RAW")
-          if "BCAST_FM" in enabled or "BCAST_FM" not in disabled:
-              raise SystemExit("release manifest unexpectedly enables broadcast FM")
-          print("Manifest features verified: M17=y MDC1200=y AIR_RAW=n BCAST_FM=n")
+          if "BCAST_FM" not in enabled or "BCAST_FM" in disabled:
+              raise SystemExit("release manifest is missing broadcast FM")
+          print("Manifest features verified: M17=y MDC1200=y AIR_RAW=n BCAST_FM=y")
           PY
           ls -l dist
           cat dist/SHA256SUMS
