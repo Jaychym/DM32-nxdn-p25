@@ -131,6 +131,8 @@ PATCHES = (
 	'issue61-des-combined-dropdown.patch',
 	'issue53-clear-voice.patch',
 	'issue53-zh-glyphs.patch',
+	'issue76-dual-preserve-decoded-voice.patch',
+	'issue29-p25-rx-wrap.patch',
 )
 
 

@@ -1,0 +1,119 @@
+diff --git a/core/p25/p25Voice.c b/core/p25/p25Voice.c
+index b30be1b..504e55c 100644
+--- a/core/p25/p25Voice.c
++++ b/core/p25/p25Voice.c
+@@ -57,7 +57,8 @@ static void rx_start(const p25_call_t *c, void *ctx)
+ {
+ 	(void)c;
+ 	(void)ctx;
+-	STORE(rx_seq, (uint8_t)(rx_seq + 1));
++	uint8_t next = (uint8_t)(rx_seq + 1u);
++	STORE(rx_seq, next == 0 ? 1u : next);	// zero means no call yet to p25VoicePoll
+ }
+ 
+ static void rx_update(const p25_call_t *c, void *ctx)
+diff --git a/docs/spec/p25.md b/docs/spec/p25.md
+index 0387801..d5aef44 100644
+--- a/docs/spec/p25.md
++++ b/docs/spec/p25.md
+@@ -114,6 +114,9 @@ The decoder (the full-rate decoder on the MBE synthesis core, `core/mbe`; built
+ A radio transmits or receives, so the encoder uses the decoder's prediction state and scratch memory; after a
+ transmission the decoder starts over. The encoder keeps 516 bytes of its own (the estimator's history).
+ 
++Receive call numbers reserve zero for the initial state. The PCM stream can start again after a pause, including
++when the call number wraps. The call sequence distinguishes frames still queued from an earlier call.
++
+ ### 5.1 The encoder (`core/mbe/mbe_est.c`, `core/mbe/imbe_enc.c`)
+ 
+ One 20 ms block of speech to a frame's 88 bits, in integers, in two parts.
+diff --git a/docs/user/20-troubleshooting.md b/docs/user/20-troubleshooting.md
+index 4b13887..fd94ead 100644
+--- a/docs/user/20-troubleshooting.md
++++ b/docs/user/20-troubleshooting.md
+@@ -52,6 +52,26 @@ also from the installer's [manual install kit](02-installing.md#install-from-the
+ | qdmr, rfoundry or a hotspot host doesn't find the radio's serial port | USB is in network mode. Switch back in **Tools > USB network**, or turn off **Settings > Connections > USB network at start** and restart. The debug link and MMDVM also answer on UDP port 3334 ([USB network](15-usb-network.md#serial-tools-in-network-mode)) |
+ | In network mode the computer gets no address | The radio goes back to serial when the computer doesn't set the adapter up within 10 s. Check that the computer shows a new network adapter, then switch again |
+ 
++## P25 and NXDN through a hotspot
++
++- **P25 shows a caller without audio.** Match the hotspot's NAC and reflector talkgroup. On a channel with selective
++  squelch, press **Monitor** during a clear call to try receiving its group. The `p25.played` field shows whether
++  the firmware selected the call for playback. If selected, compare the `p25.voice_bad`, `p25v.frames`, and
++  `p25v.peak` readings before and after speech. This distinguishes filtering, damaged voice frames and a
++  problem after decoding. [WPSD P25](https://manual.wpsd.radio/modes/p25/)
++- **The hotspot drops the P25 reflector at the end of an over.** Keep the MMDVMHost log from the RF start through
++  the end, including BER, and the gateway log around the disconnect. A conventional group call ends with a basic
++  P25 terminator that has no destination field. The RF and gateway records help locate where a different
++  destination appeared. Try the WPSD P25 Manager's **10 - Parrot** with a group contact for TG 10.
++- **The hotspot shows no NXDN RF call.** Match the modem's NXDN rate and the channel's TX RAN. Set the radio's
++  assigned NXDN unit ID in the CPS, separately from its DMR ID. Match the reflector group to the channel and
++  check the MMDVMHost RF log. [WPSD NXDN](https://manual.wpsd.radio/modes/nxdn/)
++
++For weak or intermittent decode, compare the modem's known RX/TX offsets and a measured carrier offset before
++changing [Freq trim](17-settings.md#advanced-last-row). Include the radio and modem firmware versions, receive and transmit
++frequencies, mode and rate, NAC or RAN, talkgroup, and whether DMR worked through the same modem. With the programming
++cable, `tools/rfoundry_debug.py view --section p25` or `--section nxdn` reads the firmware counters.
++
+ ## Settings are not kept
+ 
+ If settings go back to their defaults after a restart, and qdmr writes fail, the radio has found another firmware's
+diff --git a/tests/host/p25Test.c b/tests/host/p25Test.c
+index 02f2f39..5601d7a 100644
+--- a/tests/host/p25Test.c
++++ b/tests/host/p25Test.c
+@@ -483,6 +483,14 @@ static void testCallLayer(void)
+ 	air_noise(300);
+ 	CHECK(tx_units == 5 && tx_at[1] - tx_at[0] == P25_HDU_SYMS && tx_at[2] - tx_at[1] == P25_LDU_SYMS && tx_at[4] - tx_at[3] == P25_LDU_SYMS, "units on air: %u", tx_units);
+ 	CHECK(air_n == 100 + P25_HDU_SYMS + 3 * P25_LDU_SYMS + P25_TDU_SYMS + 300, "symbols on air: %u", air_n);
++	// A conventional group call ends in a single basic terminator, with 28 null information bits after the NID.
++	uint8_t term[P25_TDU_SYMS / 4] = { 0 }, duid = 0xFF;
++	uint16_t nac = 0;
++	for (uint16_t i = 0; i < P25_TDU_SYMS; i++)
++		air_sym_put(term, i, air[tx_at[4] + i]);
++	CHECK(p25_nid_get(term, &nac, &duid) == 0 && nac == 0x293 && duid == P25_DUID_TDU,
++	      "the final unit is a basic TDU on the selected NAC");
++	CHECK(p25_bits_get(term, 112, 28) == 0, "the TDU has null bits after its NID");
+ 	memset(&cs, 0, sizeof(cs));
+ 	p25_call_rx_init(&c, 0x293, &cs_sink, &c);
+ 	air_framer_init(&fr, &p25_air_mode, &c.rx, fbuf, NULL, P25_UNIT_SYMS_MAX);
+diff --git a/tests/host/p25VoiceTest.c b/tests/host/p25VoiceTest.c
+index 2bfcbe8..20f85b6 100644
+--- a/tests/host/p25VoiceTest.c
++++ b/tests/host/p25VoiceTest.c
+@@ -359,11 +359,36 @@ static void testTransmit(void)
+ 	CHECK(!running, "a transmission started the stream with P25 off");
+ }
+ 
++static void testCallSequenceWrap(void)
++{
++	bool heard = false;
++
++	begin();
++	for (unsigned i = 0; i < UINT8_MAX; i++) {
++		hk->rx_start(NULL, NULL);
++		p25VoicePoll();
++		hk->rx_end(NULL);
++		block();
++	}
++	// A pause for TX stops the PCM stream but keeps the running engine's call count.
++	p25VoicePause();
++	CHECK(!running, "the PCM stream paused");
++	hk->rx_start(NULL, NULL);
++	ldu(0);
++	hk->rx_end(NULL);
++	p25VoicePoll();
++	CHECK(running, "the call at sequence wrap starts PCM again");
++	for (int i = 0; running && i < P25_VOICE_LEAD + P25_VOICE_FRAMES; i++)
++		heard |= block();
++	CHECK(heard, "the call at sequence wrap reaches the PCM output");
++}
++
+ int main(void)
+ {
+ 	p25VoiceInit(&audio);
+ 	hk = p25VoiceHooks();
+ 	testPlayback();
++	testCallSequenceWrap();
+ 	testBadAndOverflow();
+ 	testShortCallAndNewCall();
+ 	testMixerAndTx();
