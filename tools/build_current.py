@@ -146,6 +146,7 @@ PATCHES = (
 	'issue80-display-cps.patch',
 	'low-band-nfm.patch',
 	'air-fm-capture-handoff.patch',
+	'hrc7000-air-copy-recovery.patch',
 )
 
 
