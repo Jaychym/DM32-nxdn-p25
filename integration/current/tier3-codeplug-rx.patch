@@ -1,0 +1,581 @@
+diff --git a/core/codeplug/codeplug.c b/core/codeplug/codeplug.c
+index f5d230a..ac8a5b5 100644
+--- a/core/codeplug/codeplug.c
++++ b/core/codeplug/codeplug.c
+@@ -56,6 +56,8 @@ static uint32_t fl_base = DEFAULT_FLASH_BASE;
+ #define CH_DMR_ID	0x27u
+ #define CH_SFR_B	0x2Au	// SFR byte B (ours); bit 6 the FM tone burst, read without the SFR flag
+ #define SFRB_TONE_BURST	0x40u
++#define SFRB_CRC_MASK	0x30u
++#define SFRB_CRC_RECHECK 0x20u	// legacy 0xFF and 0xBF both leave rechecking off
+ #define CH_RX_GROUP	0x2Bu
+ #define CH_CC		0x2Cu
+ #define CH_CONTACT	0x2Eu
+@@ -701,6 +703,7 @@ bool codeplug_openfw_decode(const uint8_t *r, channel_t *out)
+ 	out->no_beep = (r[CH_LFLAG1] & LFLAG1_NO_BEEP) != 0;
+ 	out->no_eco = (r[CH_LFLAG1] & LFLAG1_NO_ECO) != 0;
+ 	out->roam = (r[CH_LFLAG1] & LFLAG1_ROAM) != 0;
++	out->accept_bad_crc = (r[CH_SFR_B] & SFRB_CRC_MASK) == SFRB_CRC_RECHECK;
+ 	out->tone_burst = r[CH_SFR_B] != 0xFFu && (r[CH_SFR_B] & SFRB_TONE_BURST) != 0;	// 0xFF: a writer that fills unknown bytes
+ 	if (r[CH_LFLAG1] & LFLAG1_SFR) {
+ 		out->sfr_flag1 = LFLAG1_SFR;
+@@ -759,11 +762,11 @@ void codeplug_openfw_encode(const channel_t *ch, uint8_t *r)
+ 	r[CH_LFLAG1] = (uint8_t)((r[CH_LFLAG1] & ~(LFLAG1_ID | LFLAG1_NO_BEEP | LFLAG1_NO_ECO | LFLAG1_DMO)) |
+ 				 (ch->dmr_id != 0 ? LFLAG1_ID : 0) | (ch->no_beep ? LFLAG1_NO_BEEP : 0) |
+ 				 (ch->no_eco ? LFLAG1_NO_ECO : 0) | (ch->dmo ? LFLAG1_DMO : 0));
+-	// The rest of SFR byte B is kept as read (the SFR fields are read only here). Never 0xFF, which reads as "not
+-	// set": with the burst on over a byte a writer filled, the unused bits 5-4 are cleared
+ 	r[CH_SFR_B] = (uint8_t)((r[CH_SFR_B] & ~SFRB_TONE_BURST) | (ch->tone_burst ? SFRB_TONE_BURST : 0));
+-	if (r[CH_SFR_B] == 0xFFu) {
+-		r[CH_SFR_B] = 0xCFu;
++	if (ch->accept_bad_crc) {
++		r[CH_SFR_B] = (uint8_t)((r[CH_SFR_B] & ~SFRB_CRC_MASK) | SFRB_CRC_RECHECK);
++	} else if ((r[CH_SFR_B] & SFRB_CRC_MASK) == SFRB_CRC_RECHECK || r[CH_SFR_B] == 0xFFu) {
++		r[CH_SFR_B] &= (uint8_t)~SFRB_CRC_MASK;
+ 	}
+ 	uint32_t tot = (ch->tot_s + 14u) / 15u;
+ 	r[CH_TOT] = (uint8_t)(tot > 255u ? 255u : tot);
+diff --git a/core/codeplug/codeplug.h b/core/codeplug/codeplug.h
+index 17aa6ab..79b8148 100644
+--- a/core/codeplug/codeplug.h
++++ b/core/codeplug/codeplug.h
+@@ -43,6 +43,7 @@ typedef struct {
+ 	bool no_beep;		// no DMR talk permit / call end beeps on this channel
+ 	bool no_eco;		// no receiver battery saving on this channel
+ 	bool roam;		// a roaming site (the open-firmware Roaming flag; docs/spec/dmr-roaming.md 5.2), read only
++	bool accept_bad_crc;
+ 	bool tone_burst;	// FM: the 1750 Hz access burst at each PTT key-up (repeaters that need it)
+ 	// SFR (docs/spec/sfr.md 4): flag 1 bit 1 and the two SFR bytes as stored, for sfrChannelDecode(); read only
+ 	// (the encoder keeps them as read), all 0 when the channel has none
+diff --git a/core/dmr/call/dmr_call.c b/core/dmr/call/dmr_call.c
+index f8b8c1f..e0f49ef 100644
+--- a/core/dmr/call/dmr_call.c
++++ b/core/dmr/call/dmr_call.c
+@@ -2212,6 +2212,7 @@ static void modem_config(dmr_config_t *mc)
+ 	mc->cc = (int8_t)s.cfg.cc;
+ 	mc->access = s.cfg.access;
+ 	mc->repeater = s.cfg.rmo;
++	mc->recheck_headers = s.cfg.recheck_headers;
+ 	mc->voice_no_lc = s.cfg.listen.any_cc;
+ }
+ 
+@@ -2230,7 +2231,7 @@ static void modem_apply(void)
+ 	// A slot change on the same channel (a trunked call on the control channel's carrier, the other slot of a
+ 	// repeater) keeps the modem's sync: a restart would search again and miss the call's start
+ 	if (!s.mc_ok || mc.own_id != s.mc.own_id || mc.cc != s.mc.cc || mc.access != s.mc.access ||
+-	    mc.repeater != s.mc.repeater || mc.voice_no_lc != s.mc.voice_no_lc) {
++	    mc.repeater != s.mc.repeater || mc.voice_no_lc != s.mc.voice_no_lc || mc.recheck_headers != s.mc.recheck_headers) {
+ 		s.modem->configure(&mc);
+ 		s.mc = mc;
+ 		s.mc_ok = true;
+@@ -2248,7 +2249,8 @@ void dmr_call_configure(const dmr_call_config_t *cfg)
+ 			 cfg->both_slots != s.cfg.both_slots;
+ 	// Digital monitor on or off widens or narrows what the modem passes, on the same channel: the call being heard
+ 	// and the reply window stay (a call heard as not ours plays at once, rx_recheck)
+-	bool filter_change = cfg->listen.any_cc != s.cfg.listen.any_cc || cfg->listen.both_ts != s.cfg.listen.both_ts;
++	bool filter_change = cfg->recheck_headers != s.cfg.recheck_headers ||
++			     cfg->listen.any_cc != s.cfg.listen.any_cc || cfg->listen.both_ts != s.cfg.listen.both_ts;
+ 	bool target_change = !same_target(cfg->talk_target, s.cfg.talk_target);
+ 
+ 	bool privacy_change = cfg->cipher_alg != s.cfg.cipher_alg || cfg->cipher_kid != s.cfg.cipher_kid ||
+diff --git a/core/dmr/call/dmr_call.h b/core/dmr/call/dmr_call.h
+index f5063f5..e2fbcc2 100644
+--- a/core/dmr/call/dmr_call.h
++++ b/core/dmr/call/dmr_call.h
+@@ -139,6 +139,7 @@ typedef struct {
+ 	bool (*permit_busy)(void);	// NULL = the minimum alone
+ 	// Receive both slots through a repeater (rmo): a trunked control channel (CONFIG_DMR_TRUNK). The stack still
+ 	// takes calls on ts only; the other slot reaches the RX tap (dmr_call_set_rx_tap)
++	bool recheck_headers;
+ 	bool both_slots;
+ } dmr_call_config_t;
+ 
+diff --git a/core/dmr/trunk/t3_pdu.c b/core/dmr/trunk/t3_pdu.c
+index 901f610..c3a1272 100644
+--- a/core/dmr/trunk/t3_pdu.c
++++ b/core/dmr/trunk/t3_pdu.c
+@@ -60,6 +60,25 @@ bool t3_crc_ok(const uint8_t pdu[T3_CSBK_BYTES], uint16_t mask)
+ 	return pdu[10] == (uint8_t)(crc >> 8) && pdu[11] == (uint8_t)crc;
+ }
+ 
++void t3_crc_recover(uint8_t pdu[T3_CSBK_BYTES], uint16_t mask)
++{
++	uint16_t received = (uint16_t)((pdu[10] << 8) | pdu[11]);
++	uint16_t syndrome = dmr_crc_ccitt(pdu, 10) ^ mask ^ received;
++	if (syndrome == 0)
++		return;
++
++	// The last CRC bit contributes 1. Moving toward the first payload bit multiplies its
++	// contribution by x modulo the CCITT polynomial. The 96 single-bit syndromes are distinct.
++	uint16_t contribution = 1;
++	for (unsigned bit = 0; bit < T3_CSBK_BYTES * 8u; bit++) {
++		if (syndrome == contribution) {
++			pdu[T3_CSBK_BYTES - 1u - bit / 8u] ^= (uint8_t)(1u << (bit % 8u));
++			return;
++		}
++		contribution = (uint16_t)((contribution << 1) ^ ((contribution & 0x8000u) ? 0x1021u : 0u));
++	}
++}
++
+ t3_ack_class_t t3_ack_class(uint8_t reason)
+ {
+ 	switch (reason >> 4) {
+diff --git a/core/dmr/trunk/t3_pdu.h b/core/dmr/trunk/t3_pdu.h
+index e883afa..dfaf1c4 100644
+--- a/core/dmr/trunk/t3_pdu.h
++++ b/core/dmr/trunk/t3_pdu.h
+@@ -302,6 +302,8 @@ typedef struct {
+ 
+ // CRC-CCITT of octets 0-9 with a mask into octets 10-11, and its check
+ void t3_crc_append(uint8_t pdu[T3_CSBK_BYTES], uint16_t mask);
++// Correct a single flipped bit of a flagged 96-bit downlink block when its CRC syndrome identifies that bit.
++void t3_crc_recover(uint8_t pdu[T3_CSBK_BYTES], uint16_t mask);
+ bool t3_crc_ok(const uint8_t pdu[T3_CSBK_BYTES], uint16_t mask);
+ 
+ // Parse a single-block CSBK or an MBC header (octets 0-9; the CRC is not checked here). False for an opcode this
+diff --git a/core/radio/radio_sm.c b/core/radio/radio_sm.c
+index 013daa0..3584f69 100644
+--- a/core/radio/radio_sm.c
++++ b/core/radio/radio_sm.c
+@@ -1837,6 +1837,10 @@ static void dmr_configure(radio_sm_t *sm)
+ 	if (sm->t3_on) {
+ 		cfg.own_id = t3s.cfg.own_id;	// the system's ID: calls to it, and the source of ours
+ 		cfg.both_slots = sm->t3_both;
++		cfg.recheck_headers = sm->t3_recheck && (t3s.cfg.opts & T3_OPT_LISTEN_ONLY);
++		// Digital monitor follows every grant (t3_monitor), not every burst: the call plays on its own slot and the
++		// system's color code, while the other slot carries another call
++		cfg.listen.any_cc = cfg.listen.both_ts = false;
+ 		if (t3m.state == T3_FOLLOW) {
+ 			const t3_call_t *c = &t3m.call;
+ 			cfg.listen.hear_all = true;
+@@ -3376,10 +3380,18 @@ static bool t3_tap(const dmr_burst_t *b, uint32_t now_ms, void *ctx)
+ #else
+ 		t3m.data_nack = T3_RC_MS_NOT_SUPPORTED;
+ #endif
+-		t3_ms_rx(&t3m, now_ms, slot, b->kind, b->cc, b->payload);
++		const uint8_t *data = b->payload;
++		uint8_t recovered[T3_CSBK_BYTES];
++		if (!b->crc_ok && sm->t3_recheck && (t3s.cfg.opts & T3_OPT_LISTEN_ONLY) &&
++		    (b->kind == DMR_BURST_CSBK || b->kind == DMR_BURST_MBC_HEADER)) {
++			memcpy(recovered, data, sizeof recovered);
++			t3_crc_recover(recovered, b->kind == DMR_BURST_CSBK ? T3_CRC_MASK_CSBK : T3_CRC_MASK_MBC_HDR);
++			data = recovered;
++		}
++		t3_ms_rx(&t3m, now_ms, slot, b->kind, b->cc, data);
+ 		if (b->kind != DMR_BURST_RATE_12_DATA) {
+ 			// A UDT header's opcode is in octet 9
+-			radio_t3v.last_rx_op = b->payload[b->kind == DMR_BURST_DATA_HEADER ? 9 : 0] & 0x3Fu;
++			radio_t3v.last_rx_op = data[b->kind == DMR_BURST_DATA_HEADER ? 9 : 0] & 0x3Fu;
+ 			radio_t3v.last_rx_slot = slot;
+ 			radio_t3v.last_rx_ms = now_ms != 0 ? now_ms : 1;
+ 		}
+@@ -3705,6 +3717,19 @@ static void t3_keep_kill(radio_sm_t *sm, uint32_t now_ms)
+ 	changed(sm);
+ }
+ 
++// Digital monitor on a trunked channel follows every talkgroup's grant (T3_OPT_MONITOR), as it hears every talkgroup
++// on a conventional one; off, the system's own setting again (t3_monitor_set, taken where t3s is loaded: t3s keeps
++// monitor's bit while the engine stops for the fallback and starts again). The engine reads the option at each grant:
++// a call already followed plays to its end
++static void t3_monitor(radio_sm_t *sm)
++{
++	if (sm->t3_monitor_set || hear_all_on(sm)) {
++		t3s.cfg.opts |= T3_OPT_MONITOR;
++	} else {
++		t3s.cfg.opts &= (uint16_t)~T3_OPT_MONITOR;
++	}
++}
++
+ // Start the engine on t3s
+ static void t3_begin(radio_sm_t *sm, uint32_t now_ms)
+ {
+@@ -3715,7 +3740,7 @@ static void t3_begin(radio_sm_t *sm, uint32_t now_ms)
+ 	if (t3s.cfg.own_id == 0) {
+ 		t3s.cfg.own_id = sm->own_id;
+ 	}
+-	if (t3s.cfg.nctrl == 0 || t3s.cfg.own_id == 0) {
++	if (t3s.cfg.nctrl == 0 || (t3s.cfg.own_id == 0 && !(t3s.cfg.opts & T3_OPT_LISTEN_ONLY))) {
+ 		radio_t3v.unavail = true;	// nothing to hunt on, or no ID: shown, not silently idle
+ 		t3_publish(sm);
+ 		return;
+@@ -3755,6 +3780,7 @@ static void t3_begin(radio_sm_t *sm, uint32_t now_ms)
+ 	sm->t3_hunt_ms = now_ms | 1u;	// hunting from now (the fallback's clock)
+ 	memset(sm->t3_at, 0, sizeof(sm->t3_at));
+ 	sm->t3_cc = t3s.cc;
++	t3_monitor(sm);
+ 	dmr_call_set_rx_tap(t3_tap, sm);
+ 	// A stun outlasts leaving the system and coming back (6.4.9): it is the network's, so another network's
+ 	// doesn't carry over
+@@ -3800,8 +3826,10 @@ void radio_sm_t3_brief(radio_sm_t *sm)
+ static void t3_start(radio_sm_t *sm, uint32_t now_ms)
+ {
+ 	t3_off(sm);
++	sm->t3_recheck = false;
+ 	t3s = *radio_t3_staged();
+ 	radio_t3_fix(&t3s);
++	sm->t3_monitor_set = (t3s.cfg.opts & T3_OPT_MONITOR) != 0;
+ 	t3_begin(sm, now_ms);
+ }
+ 
+@@ -3855,6 +3883,7 @@ static bool t3_channel(radio_sm_t *sm, uint16_t number, const channel_t *ch)
+ 	radio_t3v.fallback = 0;
+ 	radio_t3v.unavail = false;
+ 	sm->t3_tagged = true;
++	sm->t3_recheck = ch->accept_bad_crc;
+ 	if (sm->t3_on && t3s.sys == ch->system && sm->t3_ch_rx == ch->rx_only && sm->t3_kv == codeplug_kv_serial()) {
+ 		// Another channel of the system running: the same TSCC, the new channel's talkgroups
+ 		uint8_t ntg = t3s.cfg.ntg;
+@@ -3876,7 +3905,7 @@ static bool t3_channel(radio_sm_t *sm, uint16_t number, const channel_t *ch)
+ 		sm->t3_fb_number = 0;
+ 		return false;
+ 	}
+-	if (t3s.cfg.own_id == 0 && sm->own_id == 0) {
++	if (!ch->rx_only && !(t3s.cfg.opts & T3_OPT_LISTEN_ONLY) && t3s.cfg.own_id == 0 && sm->own_id == 0) {
+ 		radio_t3v.unavail = true;	// no ID to register with: the system's record nor the radio's
+ 		sm->t3_fb_number = 0;
+ 		return false;
+@@ -3887,6 +3916,12 @@ static bool t3_channel(radio_sm_t *sm, uint16_t number, const channel_t *ch)
+ 		// A receive-only channel never transmits (channel-modes.md 2.1): no registration from it either
+ 		t3s.cfg.opts |= T3_OPT_LISTEN_ONLY;
+ 	}
++	if (!(t3s.cfg.opts & T3_OPT_LISTEN_ONLY)) {
++		// The system code learned from the air (dmr-trunking-codeplug.md 1) only for listening: a radio that
++		// transmits registers on the system its codeplug names, never on whichever it heard first
++		t3s.cfg.opts &= (uint16_t)~T3_OPT_LEARN_SYSCODE;
++	}
++	sm->t3_monitor_set = (t3s.cfg.opts & T3_OPT_MONITOR) != 0;
+ 	radio_t3_talk(ch, &t3s);
+ 	sm->t3_fb_number = radio_t3_fallback(number, &t3s, &sm->t3_fb_ch);
+ 	sm->t3_pending = true;		// started by t3_tick, which has the clock
+@@ -4113,6 +4148,7 @@ static void t3_tick(radio_sm_t *sm, uint32_t now_ms)
+ 	if (!sm->t3_on) {
+ 		return;
+ 	}
++	t3_monitor(sm);
+ 	uint32_t tc = dmr_call_ticks(NULL);
+ 	uint32_t n = tc - sm->t3_ticks;
+ 	if (n > 8u) {
+diff --git a/core/radio/radio_sm.h b/core/radio/radio_sm.h
+index bdc82b1..6d422eb 100644
+--- a/core/radio/radio_sm.h
++++ b/core/radio/radio_sm.h
+@@ -507,7 +507,9 @@ typedef struct {
+ 	bool t3_on;
+ 	bool t3_pending;		// a trunked channel was selected: start its system (t3s) at the next t3_tick
+ 	bool t3_tagged;			// the channel is a trunked one (channel_t.kind)
++	bool t3_recheck;		// selected channel's CRC policy, retained across retunes
+ 	bool t3_ch_rx;			// and receive only (its tag): the system runs listen only from it
++	bool t3_monitor_set;		// the loaded system's own T3_OPT_MONITOR; digital monitor adds it while on (t3_monitor)
+ 	uint8_t t3_kv;			// codeplug_kv_serial() when t3s was loaded from the codeplug
+ 	uint8_t t3_fb;			// fallback (dmr-trunking.md 12): 0 off, 1 on the fallback channel, 2 probing
+ 	uint16_t t3_fb_number;		// the fallback channel, 0: none
+diff --git a/core/radio/radio_trunk_cp.c b/core/radio/radio_trunk_cp.c
+index b856e06..d8e34fe 100644
+--- a/core/radio/radio_trunk_cp.c
++++ b/core/radio/radio_trunk_cp.c
+@@ -12,10 +12,11 @@
+ #if CONFIG_DMR_TRUNK
+ _Static_assert(RADIO_T3_SYSTEMS == CODEPLUG_SYSTEMS_RUN, "an imported system lands where the radio runs it");
+ 
+-// The options a codeplug may set: the rest are the debug link's (monitor, learning the system code). Listen only is
+-// the system header's transmit flag, never an option bit
+-#define CP_OPTS		(T3_OPT_ALLCALL | T3_OPT_EMERGENCY_ANY | T3_OPT_PRIVATE | T3_OPT_REG_TG | T3_OPT_ALS | T3_OPT_KILL | \
+-			 T3_OPT_NO_ROAM | T3_OPT_STUN)
++// The options a codeplug may set. Listen only is the system header's transmit flag, never an option bit. Learning the
++// system code takes effect only while the system runs listen only (t3_channel): a radio never registers on a system
++// it only heard
++#define CP_OPTS		(T3_OPT_ALLCALL | T3_OPT_EMERGENCY_ANY | T3_OPT_MONITOR | T3_OPT_LEARN_SYSCODE | T3_OPT_PRIVATE | \
++			 T3_OPT_REG_TG | T3_OPT_ALS | T3_OPT_KILL | T3_OPT_NO_ROAM | T3_OPT_STUN)
+ #define OPT_IP_GW	0x1000u		// off-net IP through the system's IP gateway (the radio core's, not the engine's)
+ 
+ // The type's block (1): the fields up to the site count, then the sites
+diff --git a/drivers/modem/hrc7000/hrc7000_dmr.c b/drivers/modem/hrc7000/hrc7000_dmr.c
+index ae89b53..709dc78 100644
+--- a/drivers/modem/hrc7000/hrc7000_dmr.c
++++ b/drivers/modem/hrc7000/hrc7000_dmr.c
+@@ -813,7 +813,9 @@ static void rx_burst(hrc7000_dmr_t *e)
+ 		// Headers and CSBKs with a bad CRC are dropped (dmr-modem.md 2.2), except while we send: the chip's verdict
+ 		// is wrong at times then, and the caller checks them itself or rebuilds them from the call's LC (gotchas 14.1;
+ 		// an SFR lost every terminator heard while keyed to an RS flag)
+-		if (header && e->tx_state == TXS_IDLE) {
++		bool recheck = e->cfg.recheck_headers && (s.kind == DMR_BURST_CSBK || s.kind == DMR_BURST_MBC_HEADER ||
++				s.kind == DMR_BURST_VOICE_LC_HEADER || s.kind == DMR_BURST_TERMINATOR_LC);
++		if (header && e->tx_state == TXS_IDLE && !recheck) {
+ 			return;
+ 		}
+ 	}
+diff --git a/hal/hal_dmr_modem.h b/hal/hal_dmr_modem.h
+index dd530c1..f2faa14 100644
+--- a/hal/hal_dmr_modem.h
++++ b/hal/hal_dmr_modem.h
+@@ -103,6 +103,7 @@ typedef struct {
+ 	int8_t cc;		// channel's TX code and initial RX filter; -1 = follow RX (no channel configured)
+ 	dmr_access_t access;
+ 	bool repeater;		// RMO framing (BS sync expected) vs DMO
++	bool recheck_headers;	// send flagged Tier III CSBK and voice LC to their software decoders
+ 	bool voice_no_lc;	// digital monitor: voice whose LC never checks out (a RAS repeater's) is wanted too
+ } dmr_config_t;
+ 
+diff --git a/tests/host/codeplugEditTest.c b/tests/host/codeplugEditTest.c
+index 126a8a4..f247d8a 100644
+--- a/tests/host/codeplugEditTest.c
++++ b/tests/host/codeplugEditTest.c
+@@ -156,7 +156,13 @@ static void test_encode(void)
+ 	r[0x2A] = 0xFF;
+ 	CHECK(codeplug_openfw_decode(r, &d) && !d.tone_burst);
+ 	codeplug_openfw_encode(&d, r);
+-	CHECK(r[0x2A] == 0xBF);
++	CHECK(r[0x2A] == 0xBF && !d.accept_bad_crc);
++	d.accept_bad_crc = true;
++	codeplug_openfw_encode(&d, r);
++	CHECK(r[0x2A] == 0xAF && codeplug_openfw_decode(r, &d) && d.accept_bad_crc);
++	d.accept_bad_crc = false;
++	codeplug_openfw_encode(&d, r);
++	CHECK(r[0x2A] == 0x8F && codeplug_openfw_decode(r, &d) && !d.accept_bad_crc);
+ 	r[0x2A] = 0xFF;
+ 	d.tone_burst = true;
+ 	codeplug_openfw_encode(&d, r);
+diff --git a/tests/host/hrc7000DmrTest.c b/tests/host/hrc7000DmrTest.c
+index cd30685..e4289e7 100644
+--- a/tests/host/hrc7000DmrTest.c
++++ b/tests/host/hrc7000DmrTest.c
+@@ -217,6 +217,12 @@ static void test_rx(void)
+ 	// commits no event, so the array's interrupt list isn't cleared and the ISR's loop sees it up to 4 times)
+ 	deframe(rti(0, DMR_BURST_CSBK, 3, 0, 0, 0) | (1u << 26));
+ 	CHECK(count_kind(DMR_EV_BURST_RX, NULL) == 0 && eng.st.rx_crc_err >= 1);
++	eng.cfg.recheck_headers = true;
++	deframe(rti(0, DMR_BURST_CSBK, 3, 0, 0, 0) | (1u << 26));
++	CHECK(count_kind(DMR_EV_BURST_RX, &b) == 1 && !b.crc_ok && b.kind == DMR_BURST_CSBK);
++	deframe(rti(0, DMR_BURST_PI_HEADER, 3, 0, 0, 0) | (1u << 26));
++	CHECK(count_kind(DMR_EV_BURST_RX, NULL) == 0);
++	eng.cfg.recheck_headers = false;
+ 	uint32_t crc_errs = eng.st.rx_crc_err;
+ 	deframe(rti(3, 0, 3, 0, 1, 0) | (1u << 28));
+ 	CHECK(count_kind(DMR_EV_BURST_RX, &b) == 1 && !b.crc_ok && eng.st.rx_crc_err == crc_errs + 1);
+diff --git a/tests/host/radioCoreTest.c b/tests/host/radioCoreTest.c
+index c1bf745..184a5c4 100644
+--- a/tests/host/radioCoreTest.c
++++ b/tests/host/radioCoreTest.c
+@@ -9868,6 +9868,8 @@ static void t3_quiet(void)
+ 	}
+ }
+ 
++static bool t3_noisy_control;
++
+ static void t3_csbk_rx(const t3_csbk_t *p, int8_t ts)
+ {
+ 	t3_quiet();
+@@ -9881,11 +9883,20 @@ static void t3_csbk_rx(const t3_csbk_t *p, int8_t ts)
+ 	b.in_step = true;
+ 	b.len = T3_CSBK_BYTES;
+ 	CHECK(t3_csbk_build(p, T3_CRC_MASK_CSBK, b.payload));
++	if (t3_noisy_control) {
++		b.payload[3] ^= 0x08;
++		b.crc_ok = false;
++	}
+ 	sim_rx(&b);
+ }
+ 
++static uint16_t t3_site_code;	// the TSCC's system code when not 0 (another network's), else t3_code()
++
+ static uint16_t t3_code(void)
+ {
++	if (t3_site_code != 0) {
++		return t3_site_code;
++	}
+ 	t3_syscode_t c = { T3_MODEL_SMALL, 5, 1, T3_PAR_A };
+ 	return t3_syscode_join(&c);
+ }
+@@ -10702,6 +10713,11 @@ static void test_t3_no_id(void)
+ 	req(RREQ_ZONE, 2);
+ 	t3_site_run(600);
+ 	CHECK(radio_t3v.sys == 1 && radio_t3v.unavail && !radio_t3v.on && sm.view.ch.rx_only && sim.air_count == air);
++	t3_cp_done();
++	t3_cp_zone(T3_OPT_PRIVATE | T3_OPT_LISTEN_ONLY | T3_OPT_LEARN_SYSCODE, 0, 0, NULL);
++	req(RREQ_ZONE, 2);
++	t3_site_run(600);
++	CHECK(radio_t3v.state == T3_CAMPED && !radio_t3v.unavail && sim.air_count == air);
+ 	own_dmr_id = 9996543;
+ 	t3_cp_done();
+ }
+@@ -10796,6 +10812,109 @@ static void test_t3_channels(void)
+ 	t3_cp_done();
+ }
+ 
++// A grant on the TSCC for talkgroup tg, on the carrier's TS2
++static void t3_grant_tg(uint32_t tg)
++{
++	t3_csbk_t g = { .lb = true, .op = T3_OP_TV_GRANT };
++	g.u.grant.lpcn = 1;
++	g.u.grant.slot = 2;
++	g.u.grant.dst = tg;
++	g.u.grant.src = 1000001u;
++	t3_csbk_rx(&g, 1);
++	run(300);
++}
++
++// Digital monitor on a trunked channel follows every talkgroup's grant (dmr-trunking.md 6), as the system's own
++// "follow every talkgroup" does; off again, only the channel's talkgroups. The call plays on its own slot and color
++// code: monitor's any color code and both slots stay conventional DMR's
++static void test_t3_follow_all(void)
++{
++	t3_cp_zone(T3_OPT_PRIVATE, 0, 0, NULL);
++	req(RREQ_ZONE, 2);
++	t3_site_run(600);
++	CHECK(radio_t3v.state == T3_CAMPED);
++	t3_grant_tg(777);		// not the channel's talkgroup
++	CHECK(radio_t3v.state == T3_CAMPED && radio_t3v.followed == 0);
++
++	req(RREQ_DMR_HEAR_ALL, 1);
++	run(20);
++	CHECK(sm.view.dmr.hear_all_latch);
++	t3_grant_tg(777);
++	CHECK(radio_t3v.state == T3_FOLLOW && radio_t3v.followed == 1 && sm.view.ch.timeslot == 2);
++	CHECK(sim.cc_filter == 2);	// the system's color code, not monitor's any
++	t3_site_run(3000);		// the call ends: back on the TSCC
++	CHECK(radio_t3v.state == T3_CAMPED);
++
++	req(RREQ_DMR_HEAR_ALL, 0);
++	run(20);
++	t3_grant_tg(777);
++	CHECK(radio_t3v.state == T3_CAMPED && radio_t3v.followed == 1);
++
++	// Monitor on, the system lost to the fallback channel and found again: the engine restarts with the system's
++	// own setting, not the one monitor added. Monitor off then, a grant to another talkgroup isn't followed
++	t3_cp_done();
++	t3_cp_zone(T3_OPT_PRIVATE, 3, 6, "Other");
++	req(RREQ_ZONE, 2);
++	run(100);
++	req(RREQ_DMR_HEAR_ALL, 1);
++	run(3000);			// no TSCC heard: the fallback channel
++	CHECK(radio_t3v.fallback == 1);
++	run(RADIO_T3_PROBE_MS);		// a probe restarts the engine
++	t3_site_run(600);
++	CHECK(radio_t3v.fallback == 0 && radio_t3v.state == T3_CAMPED);
++	req(RREQ_DMR_HEAR_ALL, 0);
++	run(20);
++	CHECK(!sm.view.dmr.hear_all_latch);
++	t3_grant_tg(777);
++	CHECK(radio_t3v.state == T3_CAMPED && radio_t3v.followed == 0);
++
++	// The system's own option: every grant, monitor off
++	t3_cp_done();
++	t3_cp_zone(T3_OPT_PRIVATE | T3_OPT_MONITOR, 0, 0, NULL);
++	req(RREQ_ZONE, 2);
++	t3_site_run(600);
++	t3_grant_tg(778);
++	CHECK(radio_t3v.state == T3_FOLLOW && radio_t3v.followed == 1);
++	t3_site_run(3000);
++	t3_cp_done();
++}
++
++// "Learn the system code" (dmr-trunking-codeplug.md 1): a listen-only system takes the first TSCC heard as its own,
++// whatever its NET says. A system that transmits never does: another network's TSCC stays foreign
++static void test_t3_learn_syscode(void)
++{
++	t3_syscode_t other = { T3_MODEL_LARGE, 12, 4, T3_PAR_AB };
++	t3_site_code = t3_syscode_join(&other);
++
++	t3_cp_zone(T3_OPT_PRIVATE, 0, 0, NULL);	// NET 5 in the codeplug, NET 12 on the air
++	req(RREQ_ZONE, 2);
++	t3_site_run(1500);
++	CHECK(radio_t3v.state == T3_HUNT && radio_t3v.foreign > 0);
++	t3_cp_done();
++
++	// A system without a transmit side: listen only, so it learns
++	t3_cp_zone(T3_OPT_PRIVATE | T3_OPT_LEARN_SYSCODE | T3_OPT_LISTEN_ONLY, 0, 0, NULL);
++	chans[7].accept_bad_crc = true;
++	t3_noisy_control = true;
++	req(RREQ_ZONE, 2);
++	t3_site_run(600);
++	CHECK(radio_t3v.state == T3_CAMPED && radio_t3v.foreign == 0 && radio_t3v.syscode == t3_site_code);
++	CHECK(sim.cfg.recheck_headers);
++	t3_noisy_control = false;
++	req(RREQ_ZONE_POS, 1);
++	t3_site_run(120);
++	CHECK(radio_t3v.state == T3_CAMPED && !sim.cfg.recheck_headers);
++	t3_cp_done();
++
++	// The same system with a transmit side and channels allowed to transmit: the option is dropped
++	t3_cp_zone(T3_OPT_PRIVATE | T3_OPT_LEARN_SYSCODE, 0, 0, NULL);
++	req(RREQ_ZONE, 2);
++	t3_site_run(1500);
++	CHECK(radio_t3v.state == T3_HUNT && radio_t3v.foreign > 0);
++	t3_cp_done();
++	t3_site_code = 0;
++}
++
+ // A trunked channel transmits only when its tag allows it and its system is one the radio runs with a transmit side
+ // (channel-modes.md 3 and 4): a receive-only channel and a system without the transmit flag camp and listen, send
+ // nothing on the control channel and refuse PTT; a channel that names no system, or one with no record, is unavailable
+@@ -11860,6 +11979,8 @@ int main(int argc, char **argv)
+ 	test_t3_never_keys();
+ 	test_t3_no_id();
+ 	test_t3_fallback();
++	test_t3_follow_all();
++	test_t3_learn_syscode();
+ #endif
+ 	test_dmr_stalled();
+ 	test_dmr_list_talk_target();
+diff --git a/tests/host/t3CodeplugTest.c b/tests/host/t3CodeplugTest.c
+index 65974c2..17ee850 100644
+--- a/tests/host/t3CodeplugTest.c
++++ b/tests/host/t3CodeplugTest.c
+@@ -153,9 +153,10 @@ static void test_load(void)
+ 	char name[CODEPLUG_NAME_LEN + 1];
+ 
+ 	fresh();
+-	// T3_OPT_MONITOR (0x0008) is the debug link's and 0x0001 is reserved (listen only is the header's flag): a
+-	// codeplug's options set neither
+-	sys_rec(v, "Metro", TX, T3_OPT_PRIVATE | T3_OPT_NO_ROAM | T3_OPT_STUN | T3_OPT_MONITOR | 0x0001, 9, 0x1234);
++	// 0x0001 is reserved (listen only is the header's flag) and 0x0800 too: a codeplug's options set neither. Follow
++	// every talkgroup (0x0008) and learning the system code (0x0010) are a codeplug's
++	sys_rec(v, "Metro", TX, T3_OPT_PRIVATE | T3_OPT_NO_ROAM | T3_OPT_STUN | T3_OPT_MONITOR | T3_OPT_LEARN_SYSCODE |
++		0x0001 | 0x0800, 9, 0x1234);
+ 	CHECK(codeplug_kv_set(SYS(0), v, sizeof v));
+ 	// Written out of entry order, with another system's channel among them
+ 	chan(ENTRY(5), 0, true, 1, 450012500, 455012500);
+@@ -166,7 +167,8 @@ static void test_load(void)
+ 	CHECK(radio_t3_name(0, name) && strcmp(name, "Metro") == 0);
+ 	CHECK(radio_t3_load(0, &s));
+ 	CHECK(s.cfg.auth.model == 1 && s.cfg.auth.net == 5 && s.cfg.auth.category == T3_PAR_A && s.cc == 2);
+-	CHECK(s.cfg.opts == (T3_OPT_PRIVATE | T3_OPT_NO_ROAM | T3_OPT_STUN) && s.sys == 0 && !s.ip_gw);
++	CHECK(s.cfg.opts == (T3_OPT_PRIVATE | T3_OPT_NO_ROAM | T3_OPT_STUN | T3_OPT_MONITOR | T3_OPT_LEARN_SYSCODE) &&
++	      s.sys == 0 && !s.ip_gw);
+ 	CHECK(s.fb_hold_s == 45 && s.fb_chan == 9 && s.fb_check == 0x1234 && !s.cfg.auth_key_set);
+ 	CHECK(s.cfg.own_id == 0 && s.cfg.leave_dbm == -95 && s.cfg.ps_rq == 3);
+ 	CHECK(s.cfg.auth.nsites == 2 && s.cfg.auth.sites == s.cfg.sites && s.cfg.sites[0] == 1 && s.cfg.sites[1] == 2);
+diff --git a/tests/host/t3PduTest.c b/tests/host/t3PduTest.c
+index d1493f0..3fc1f80 100644
+--- a/tests/host/t3PduTest.c
++++ b/tests/host/t3PduTest.c
+@@ -456,9 +456,29 @@ static void auth(void)
+ 	CHECK(r == 0xE9C81Eu, "response %06x with PSN", (unsigned)r);
+ }
+ 
++static void crc_recovery(void)
++{
++	const uint16_t masks[] = { T3_CRC_MASK_CSBK, T3_CRC_MASK_MBC_HDR };
++	for (unsigned m = 0; m < 2; m++) {
++		t3_csbk_t aloha = { .lb = true, .op = T3_OP_C_ALOHA };
++		uint8_t original[T3_CSBK_BYTES], copy[T3_CSBK_BYTES];
++		CHECK(t3_csbk_build(&aloha, masks[m], original), "build control burst");
++		for (unsigned bit = 0; bit < sizeof(copy) * 8; bit++) {
++			memcpy(copy, original, sizeof copy);
++			copy[bit / 8] ^= (uint8_t)(1u << (bit % 8));
++			t3_crc_recover(copy, masks[m]);
++			CHECK(!memcmp(copy, original, sizeof copy), "recover bit %u, mask %04x", bit, masks[m]);
++		}
++		copy[3] ^= 0x41;
++		t3_crc_recover(copy, masks[m]);
++		CHECK(!t3_crc_ok(copy, masks[m]), "two flipped bits rejected");
++	}
++}
++
+ int main(int argc, char **argv)
+ {
+ 	vectors(argc > 1 ? argv[1] : "data/t3_vectors.jsonl");
++	crc_recovery();
+ 	rules();
+ 	udt();
+ 	auth();
