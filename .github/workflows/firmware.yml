@@ -93,7 +93,13 @@ jobs:
           "$capture/nxdn-mmdvm" "$capture/nxdn48.bin"
 
       - name: Check channel modes, privacy and boot images in the CPS
-        run: node --test build/current/site/tests/modes.test.mjs build/current/site/tests/channel-aes.test.mjs build/current/site/tests/bootimage.test.mjs
+        run: |
+          set -eu
+          export RFOUNDRY_SITE_FIXTURES="$RUNNER_TEMP/cps-fixtures"
+          mkdir -p "$RFOUNDRY_SITE_FIXTURES"
+          make -C build/current/tests/host cpsSim
+          build/current/tests/host/cpsSim --populate --dump "$RFOUNDRY_SITE_FIXTURES/codeplug_sim.bin" </dev/null
+          node --test build/current/site/tests/{modes,csv,channel-aes,bootimage}.test.mjs
 
       - name: Check the P25 and NXDN bench tools
         run: |

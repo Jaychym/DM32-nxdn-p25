@@ -86,10 +86,77 @@ diff --git a/site/i18n/zh.json b/site/i18n/zh.json
 + "editor.problem.dstar_route_pair": "请同时填写 RPT1 和 RPT2，或将两者都留空。",
 + "editor.problem.dstar_rpt_format": "请输入呼号和模块字母，例如 N0CALL B。"
  }
+diff --git a/site/static/js/codeplug/csv.js b/site/static/js/codeplug/csv.js
+--- a/site/static/js/codeplug/csv.js
++++ b/site/static/js/codeplug/csv.js
+@@ -12,6 +12,7 @@
+ import { setKind } from "./channelmodes.js";
+ import { CALLSIGN_LEN, DGID_MAX, DT_DATA_FR, DT_VD1, DT_VD2, DT_VW } from "./mode_ysf.js";
+ import { SCRAMBLER_KIND } from "./mode_nxdn.js";
++import { dstarKind, dstarCallValid } from "./mode_dstar.js";
+ 
+ // --- RFC 4180 ---
+ 
+@@ -179,15 +180,17 @@
+ const asChannelMode = (s) => {
+ 	const v = s.trim().toLowerCase().replace(/[_-]/g, " ").replace(/\s+/g, " ");
+ 	if (["ysf", "c4fm", "fusion", "system fusion", "yaesu system fusion"].includes(v)) return { kind: YSF_KIND };
++	if (v === "d star" || v === "dstar") return { kind: dstarKind.id };
+ 	for (const [mode, text] of Object.entries(MODES)) if (text.toLowerCase() === v) return { kind: 0, mode };
+ 	if (["nxdn", "nxdn96", "nxdn 96", "nxdn9600", "nxdn 9600"].includes(v)) return { kind: NXDN_KIND, rate9600: true };
+ 	if (["nxdn48", "nxdn 48", "nxdn4800", "nxdn 4800"].includes(v)) return { kind: NXDN_KIND, rate9600: false };
+ 	if (["nxdn scrambler", "nxdn 9600 scrambler", "nxdn s"].includes(v)) return { kind: SCRAMBLER_KIND, rate9600: true };
+ 	if (v === "nxdn 4800 scrambler") return { kind: SCRAMBLER_KIND, rate9600: false };
+-	throw new Bad("bad_value", { value: s.trim(), allowed: "FM, DMR, NXDN 4800, NXDN 9600, NXDN Scrambler, YSF" });
++	throw new Bad("bad_value", { value: s.trim(), allowed: "FM, DMR, NXDN 4800, NXDN 9600, NXDN Scrambler, YSF, D-STAR" });
+ };
+ const channelModeText = (r) => {
+ 	if (r.kind === YSF_KIND) return "YSF";
++	if (r.kind === dstarKind.id) return "D-STAR";
+ 	if (isNxdn(r.kind)) return `NXDN ${r.params?.rate9600 === false ? "4800" : "9600"}${r.kind === SCRAMBLER_KIND ? " Scrambler" : ""}`;
+ 	return MODES[r.mode];
+ };
+@@ -199,11 +202,11 @@
+ 		if (isNxdn(v.kind)) r.params = { ...r.params, rate9600: v.rate9600 };
+ 	} else setKind(m, r, 0, v.mode);
+ };
+-const usesTagTx = (r) => isNxdn(r.kind) || r.kind === YSF_KIND;
++const usesTagTx = (r) => isNxdn(r.kind) || r.kind === YSF_KIND || r.kind === dstarKind.id;
+ // Scrambler CSVs leave the base RX only even in editors that don't recognize the mode.
+ const rxOnlyText = (r) => yesNo(r.kind === SCRAMBLER_KIND || (usesTagTx(r) ? !r.tagTx : r.rxOnly));
+ const setRxOnly = (r, s) => {
+-	if ((r.kind === YSF_KIND || r.kind === SCRAMBLER_KIND) && !s.trim()) return;
++	if ((r.kind === YSF_KIND || r.kind === SCRAMBLER_KIND || r.kind === dstarKind.id) && !s.trim()) return;
+ 	const v = asBool(s);
+ 	if (usesTagTx(r)) r.tagTx = !v;
+ 	else r.rxOnly = v;
+@@ -230,6 +233,12 @@
+ const nxdnField = (key, put, get) => modeField(NXDN_KIND, "an NXDN channel", key, put, get);
+ const ysfField = (key, parse, get, blank = () => null) => modeField(YSF_KIND, "a YSF channel", key,
+ 	(s, params) => s.trim() ? parse(s) : params ? blank(params) : null, get);
++const dstarField = (key) => modeField(dstarKind.id, "a D-STAR channel", key, (s, params) => {
++	const value = s.trim();
++	if (!value && !params) return null;
++	if (!dstarCallValid(key, value)) throw new Bad("bad_value", { value, allowed: `D-STAR ${key.toUpperCase()}` });
++	return value;
++}, (p) => p[key]);
+ const asYsfDest = (s) => {
+ 	const v = s.trim();
+ 	if (v.length > CALLSIGN_LEN || /[^ -~]/.test(v))
+@@ -431,6 +440,9 @@
+ 			{ header: "RX DG-ID", key: "ysfRxDgid", aliases: ["Receive DG-ID", "YSF RX DG-ID"], ...ysfField("rxDgid", asInt(0, DGID_MAX, 0), (p) => String(p.rxDgid)) },
+ 			{ header: "TX DG-ID", key: "ysfTxDgid", aliases: ["Transmit DG-ID", "YSF TX DG-ID"], ...ysfField("txDgid", asInt(0, DGID_MAX, 0), (p) => String(p.txDgid), (p) => p.rxDgid) },
+ 			{ header: "Destination", key: "ysfDest", aliases: ["YSF Destination"], ...ysfField("dest", asYsfDest, (p) => p.dest) },
++			{ header: "D-STAR URCALL", key: "dstarUr", aliases: ["URCALL"], ...dstarField("ur") },
++			{ header: "D-STAR RPT1", key: "dstarRpt1", aliases: ["RPT1"], ...dstarField("rpt1") },
++			{ header: "D-STAR RPT2", key: "dstarRpt2", aliases: ["RPT2"], ...dstarField("rpt2") },
+ 			{ header: "RX Only", aliases: [], key: "rxOnly", get: rxOnlyText, set: setRxOnly },
+ 			c("All Skip", "allSkip", asBool, (r) => yesNo(r.allSkip), ["Scan Skip"]),
+ 			c("Zone Skip", "zoneSkip", asBool, (r) => yesNo(r.zoneSkip)),
 diff --git a/site/static/js/codeplug/mode_dstar.js b/site/static/js/codeplug/mode_dstar.js
 --- a/site/static/js/codeplug/mode_dstar.js
 +++ b/site/static/js/codeplug/mode_dstar.js
-@@ -2,7 +2,21 @@
+@@ -2,7 +2,27 @@
  // Copyright (c) 2026 lyra XE1POC
  import { grow } from "./modebytes.js";
  
@@ -109,10 +176,16 @@ diff --git a/site/static/js/codeplug/mode_dstar.js b/site/static/js/codeplug/mod
 +	return call.replace(/^([A-Z0-9]{1,6}) +([A-Z])$/, (_, base, module) => base.padEnd(7) + module);
 +}
 +
++export function dstarCallValid(key, raw) {
++	if (key === "ur") return /^[A-Za-z0-9/ ]{0,8}$/.test(raw ?? "");
++	const value = routeCall(key, raw);
++	return !value || (value.length === CALL_LEN && /^[A-Z0-9]+ *[A-Z]$/.test(value));
++}
++
  export const dstarKind = {
  	id: 9,
  	feature: "DSTAR",
-@@ -12,9 +26,29 @@
+@@ -12,9 +32,29 @@
  	defaultTx: true,
  	recordFields: [],
  	flags: {},
@@ -138,11 +211,11 @@ diff --git a/site/static/js/codeplug/mode_dstar.js b/site/static/js/codeplug/mod
 +		{ key: "rpt2", label: "RPT2", type: "text", help: "editor.dstar.rpt2_help" },
 +	],
 +	validate(c, p, problem) {
-+		if (!/^[A-Za-z0-9/ ]{0,8}$/.test(p.ur ?? "")) problem.err("ur", "dstar_ur_chars");
-+		const rpt1 = routeCall("rpt1", p.rpt1), rpt2 = routeCall("rpt2", p.rpt2);
++		if (!dstarCallValid("ur", p.ur)) problem.err("ur", "dstar_ur_chars");
++		const rpt1 = p.rpt1?.trim(), rpt2 = p.rpt2?.trim();
 +		if (Boolean(rpt1) !== Boolean(rpt2)) problem.err(rpt1 ? "rpt2" : "rpt1", "dstar_route_pair");
 +		for (const [key, value] of [["rpt1", rpt1], ["rpt2", rpt2]]) {
-+			if (value && (value.length !== CALL_LEN || !/^[A-Z0-9]+ *[A-Z]$/.test(value)))
++			if (!dstarCallValid(key, value))
 +				problem.err(key, "dstar_rpt_format");
 +		}
 +	},
@@ -150,7 +223,15 @@ diff --git a/site/static/js/codeplug/mode_dstar.js b/site/static/js/codeplug/mod
 diff --git a/site/tests/modes.test.mjs b/site/tests/modes.test.mjs
 --- a/site/tests/modes.test.mjs
 +++ b/site/tests/modes.test.mjs
-@@ -38,6 +38,23 @@
+@@ -15,6 +15,7 @@
+ import { MODE_KEY, decodeTag, encodeTag, newSystem, setKind, syncModes, decodeSystemRecord, identityKey, countSecrets } from "../static/js/codeplug/channelmodes.js";
+ import { KINDS, SYSTEM_TYPES, offeredKinds, offeredTypes, kindName } from "../static/js/codeplug/modes.js";
+ import { nameCheck } from "../static/js/codeplug/modebytes.js";
++import { exportTable, importTable } from "../static/js/codeplug/csv.js";
+ import { decodeConv, encodeConv, decodeUnit, decodeTsys, p25System, NAC_ANY } from "../static/js/codeplug/mode_p25.js";
+ 
+ const VECTORS = new URL("../../tests/vectors/channel-modes.txt", import.meta.url);
+@@ -38,6 +39,27 @@
  	assert.equal(saved.tagTx, true);
  	saved.tagTx = false;
  	assert.equal(round(first).channels.find((c) => c.name === "DV simplex").tagTx, false);
@@ -165,6 +246,10 @@ diff --git a/site/tests/modes.test.mjs b/site/tests/modes.test.mjs
 +	const first = round(m);
 +	const saved = first.channels.find((c) => c.name === "DV node");
 +	assert.deepEqual(saved.params, { ur: "       E", rpt1: "N0ABC  B", rpt2: "N0ABC  G" });
++	const csv = empty();
++	assert.deepEqual(importTable(csv, exportTable(first, "channels"), "channels").problems, []);
++	assert.deepEqual(round(csv).channels[0].params, saved.params);
++	assert.equal(csv.channels[0].tagTx, true);
 +	assert.ok(!validate(first).some((p) => p.code === "dstar_route_pair" || p.code === "dstar_rpt_format"));
 +	saved.params.rpt2 = "";
 +	assert.ok(validate(first).some((p) => p.code === "dstar_route_pair"));
