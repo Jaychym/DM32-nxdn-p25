@@ -91,6 +91,13 @@ de la radio**, que usa la configuración general de privacidad. P25 y NXDN permi
 
 Si necesitas el archivo original, Baofeng ofrece el [firmware oficial DM-32UV v1.01.048 (ZIP)](https://baofeng.s3.amazonaws.com/Baofeng_DM-32UV_Firmware_v1.01.048.zip), enlazado desde su [página de descargas](https://www.baofengradio.com/pages/download). El flasher reconoce ese ZIP en el selector de firmware original. No hay una descarga independiente de AMBE alojada en este proyecto. La [licencia pública de DVSI, sección 2.3](https://www.dvsinc.com/papers/DVSI%20End%20User%20Product%20Liceanse%20Agreement.pdf), exige consentimiento escrito para distribuir su software a terceros; no contamos con ese permiso.
 
+## D-STAR DV experimental
+
+Selecciona **D-STAR** en **Canales → Editar canal → Modo** y mantén **OK** para guardar.
+En el VFO también se puede elegir en **Menú rápido → Modo**. Para simplex, configura el
+indicativo en **Ajustes → Mi radio → Nombre de radio**. El firmware usa destino `CQCQCQ`
+y enrutamiento `DIRECT`. Consulta las [pruebas y el alcance](docs/dstar-experimental.md).
+
 ## Compilar
 
 Linux (o WSL) con el toolchain C-SKY (`tools/bootstrap_toolchain.sh` y `tools/bootstrap_newlib.sh`, ver [docs/build.md](docs/build.md)):

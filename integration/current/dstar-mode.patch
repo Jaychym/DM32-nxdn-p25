@@ -1,0 +1,418 @@
+diff --git a/Makefile b/Makefile
+index 7aa967e..aa076e8 100644
+--- a/Makefile
++++ b/Makefile
+@@ -123,6 +123,9 @@ endif
+ ifeq ($(CONFIG_M17),y)
+ CORE_DIRS += core/m17
+ endif
++ifeq ($(CONFIG_DSTAR),y)
++CORE_DIRS += core/dstar
++endif
+ ifeq ($(CONFIG_MBE),y)
+ CORE_DIRS += core/mbe
+ endif
+diff --git a/config/features.mk b/config/features.mk
+--- a/config/features.mk
++++ b/config/features.mk
+@@ -331,4 +331,6 @@
+ # not measured. Needs an air-framed mode (P25, NXDN or YSF), whose air interface it runs on
+ CONFIG_M17 ?= n
++# Experimental D-STAR DV (4800 baud GMSK; requires the software MBE voice core).
++CONFIG_DSTAR ?= n
+ # Derived, never set by hand (a command line or a board's config.mk that sets one stops the build): AIR the air
+ # interface, on with any air-framed mode (P25, NXDN, YSF); IMBE the full-rate voice decoder and MBE the MBE core, with P25
+@@ -360,5 +362,5 @@
+ FEATURES := USB_SERIAL_REQUEST FM SUBTONE TONE_SCAN DMR DMR_PRIVACY DMR_TALKER_ALIAS DMR_GPS DMR_SMS DMR_TMS DMR_ARS DMR_LRRP DMR_SIGNALING DMR_EMERGENCY DMR_ROAMING DMR_TRUNK DMR_TRUNK_TX DMR_TRUNK_SUPL DMR_TRUNK_GW VOICE_CAPTURE DMR_REPLAY DMR_IP_GATEWAY ZONE_SHARE DMR_UDP_COMPRESS NET_TCP NET_KISS NET_HTTP NET_HTTP_GZIP NET_WEBCTL NET_RIGCTL NET_APRSIS NET_USRP MDNS TFTP TFTP_IDDB IDDB_COMPACT DMR_CONTROL_STATION SNMP SFR SFR_DUALPATH_RX SFR_CWID TASK_STACKS \
+ 	USB HOSTLINK USB_NETWORK NET_PPP HOTSPOT HOTSPOT_SPLIT DEBUGLINK CPS_OPENFW CPS_FAST VFO VFO_FM VFO_DMR DIAG BACKLIGHT_TEST FONT_XL FONT_AA FONT_BIG LANG_ES LANG_IT LANG_FR LANG_ZH LANG_DEFAULT_ES LANG_DEFAULT_IT LANG_DEFAULT_FR LANG_DEFAULT_ZH UI_COLOR UI_SETTINGS STARTUP_PIN SCAN DUAL_WATCH BEEP DIGITAL_RX_TRIM FM_TX_TONES DTMF \
+-	RX_EXT RX_EXT_ON AIR_AES VOX REF_TRIM BATTERY_SAVE VIBRATE GPS AUDIO_PROBE STUB_ENTRY NAND_STORAGE CRASH_LOG CRASH_SCREEN CRASH_REPORT WATCHDOG FAULT_TRACE AM_RX BCAST_FM SPLASH_IMAGE APRS APRS_AFSK APRS_DMR APRS_RX APRS_IGATE GPS_SKY GPS_UTM KEY_ASSIGN CHANNEL_LIST CHANNEL_EDIT ZONE_EDIT CONTACT_EDIT VOLUME_BAR P25 P25_TRUNK P25_DES NXDN NXDN_SCRAMBLER YSF M17 AIR_RAW UI_KAWAII MDC1200
++	RX_EXT RX_EXT_ON AIR_AES VOX REF_TRIM BATTERY_SAVE VIBRATE GPS AUDIO_PROBE STUB_ENTRY NAND_STORAGE CRASH_LOG CRASH_SCREEN CRASH_REPORT WATCHDOG FAULT_TRACE AM_RX BCAST_FM SPLASH_IMAGE APRS APRS_AFSK APRS_DMR APRS_RX APRS_IGATE GPS_SKY GPS_UTM KEY_ASSIGN CHANNEL_LIST CHANNEL_EDIT ZONE_EDIT CONTACT_EDIT VOLUME_BAR P25 P25_TRUNK P25_DES NXDN NXDN_SCRAMBLER YSF M17 DSTAR AIR_RAW UI_KAWAII MDC1200
+ 
+ # The panel's width in pixels: the display class the board's board.toml names (hardware.gallery = "160x128", the width
+@@ -442,4 +444,5 @@
+ $(if $(and $(call feature_on,YSF),$(if $(call feature_on,DMR),,x)),$(error CONFIG_YSF=y needs CONFIG_DMR=y (its voice is the DMR vocoder's)))
+ $(if $(and $(call feature_on,M17),$(if $(call feature_on,AIR),,x)),$(error CONFIG_M17=y needs CONFIG_P25=y, CONFIG_NXDN=y or CONFIG_YSF=y (the air interface it runs on)))
++$(if $(and $(call feature_on,DSTAR),$(if $(call feature_on,IMBE),,x)),$(error CONFIG_DSTAR=y needs CONFIG_IMBE=y))
+ $(if $(and $(call feature_on,AIR_RAW),$(if $(call feature_on,DEBUGLINK),,x)),$(error CONFIG_AIR_RAW=y needs CONFIG_DEBUGLINK=y))
+ ifneq ($(call feature_on,DEBUGLINK),)
+diff --git a/core/air/air_session.c b/core/air/air_session.c
+index 38677fb..ee8105b 100644
+--- a/core/air/air_session.c
++++ b/core/air/air_session.c
+@@ -52,7 +52,10 @@ static void on_event(const air_event_t *ev, void *ctx)
+ 	case AIR_EV_RX:
+ 		s->stats.rx_chunks++;
+ 		s->stats.rx_syms += ev->chunk->nsyms;
+-		air_framer_rx(&s->fr, ev->chunk);
++		if (s->ops.rx_chunk)
++			s->ops.rx_chunk(ev->chunk, s->ctx);
++		else
++			air_framer_rx(&s->fr, ev->chunk);
+ 		break;
+ 	case AIR_EV_TX_STARTED:
+ 		s->stats.tx_chunks_started++;
+diff --git a/core/air/air_session.h b/core/air/air_session.h
+index d3f3732..97957c4 100644
+--- a/core/air/air_session.h
++++ b/core/air/air_session.h
+@@ -31,6 +31,8 @@ typedef struct {
+ 	void (*tx_fill)(void *ctx);
+ 	// The transmission has left the air (provider's task). May be NULL: the owner polls air_session_tx_state
+ 	void (*tx_done)(void *ctx);
++	// Optional packet deframer for variable-length binary streams. Runs in the provider task.
++	void (*rx_chunk)(const air_chunk_t *chunk, void *ctx);
+ } air_session_ops_t;
+ 
+ typedef struct {
+diff --git a/core/radio/radio.h b/core/radio/radio.h
+index d0337f8..853683e 100644
+--- a/core/radio/radio.h
++++ b/core/radio/radio.h
+@@ -13,6 +13,9 @@
+ #include "radio/radio_nxdn.h"
+ #include "radio/radio_ysf.h"
+ #include "radio/radio_m17.h"
++#if CONFIG_DSTAR
++#include "dstar/radio_dstar.h"
++#endif
+ 
+ typedef enum {
+ 	RS_IDLE,	// receiving, squelch closed
+@@ -500,6 +503,9 @@ typedef struct {
+ 	radio_ysf_view_t ysf;	// YSF conventional (docs/spec/ysf.md 8): the same
+ #endif
+ #if CONFIG_M17
++#if CONFIG_DSTAR
++	radio_dstar_view_t dstar;
++#endif
+ 	radio_m17_view_t m17;	// M17 (docs/spec/m17.md 6): the same
+ #endif
+ #if CONFIG_MDC1200
+diff --git a/core/radio/radio_sm.c b/core/radio/radio_sm.c
+index 77ff805..1d9c3af 100644
+--- a/core/radio/radio_sm.c
++++ b/core/radio/radio_sm.c
+@@ -140,6 +140,15 @@ static inline bool ysf_ok(void)
+ }
+ 
+ // M17 on this board: built, and the air interface receives or transmits it
++static inline bool dstar_ok(void)
++{
++#if CONFIG_DSTAR
++	return radio_dstar_fits();
++#else
++	return false;
++#endif
++}
++
+ static inline bool m17_ok(void)
+ {
+ #if CONFIG_M17
+@@ -153,7 +162,8 @@ static inline bool m17_ok(void)
+ static inline bool air_mode(uint8_t mode)
+ {
+ 	return (CONFIG_P25 && mode == RADIO_MODE_P25) || (CONFIG_NXDN && mode == RADIO_MODE_NXDN) ||
+-	       (CONFIG_YSF && mode == RADIO_MODE_YSF) || (CONFIG_M17 && mode == RADIO_MODE_M17);
++	       (CONFIG_YSF && mode == RADIO_MODE_YSF) || (CONFIG_M17 && mode == RADIO_MODE_M17) ||
++	       (CONFIG_DSTAR && mode == RADIO_MODE_DSTAR);
+ }
+ // What a scan stop hears of an air mode's call (air_heard)
+ enum { AIR_HEARD_NONE, AIR_HEARD_PENDING, AIR_HEARD_PLAYED, AIR_HEARD_OTHER };
+@@ -653,7 +663,7 @@ static bool parked(const channel_t *ch)
+ 		return !radio_am_capable();
+ 	}
+ 	return ch->kind != CODEPLUG_KIND_DMR_TRUNK && ch->mode != RADIO_MODE_P25 && ch->mode != RADIO_MODE_NXDN &&
+-	       ch->mode != RADIO_MODE_M17 &&
++	       ch->mode != RADIO_MODE_M17 && ch->mode != RADIO_MODE_DSTAR &&
+ 	       ch->mode != RADIO_MODE_YSF;
+ }
+ 
+@@ -708,6 +718,11 @@ static void outputs(radio_sm_t *sm)
+ 		green = true;
+ 	}
+ #endif
++#if CONFIG_DSTAR
++	if (sm->view.ch.mode == RADIO_MODE_DSTAR && !tx && sm->view.state == RS_RX && sm->view.dstar.played) {
++		green = true;
++	}
++#endif
+ #if CONFIG_M17
+ 	if (sm->view.ch.mode == RADIO_MODE_M17 && !tx && sm->view.state == RS_RX &&
+ 	    (sm->view.m17.flags & RADIO_M17_PLAYED) != 0) {
+@@ -1497,7 +1512,7 @@ static uint8_t tx_check(const radio_sm_t *sm)
+ 	}
+ 	if (ch->mode == RADIO_MODE_DMR ? !CONFIG_DMR : ch->mode == RADIO_MODE_P25 ? !CONFIG_P25 :
+ 	    ch->mode == RADIO_MODE_NXDN ? !CONFIG_NXDN : ch->mode == RADIO_MODE_YSF ? !CONFIG_YSF :
+-	    ch->mode == RADIO_MODE_M17 ? !CONFIG_M17 : !CONFIG_FM) {
++	    ch->mode == RADIO_MODE_M17 ? !CONFIG_M17 : ch->mode == RADIO_MODE_DSTAR ? !CONFIG_DSTAR : !CONFIG_FM) {
+ 		return TXDENY_MODE;
+ 	}
+ 	if (!trunk && !board_in_band(ch->tx_hz, true)) {
+@@ -6346,8 +6361,19 @@ static bool m17_now(const radio_sm_t *sm)
+ }
+ #endif
+ 
++#if CONFIG_DSTAR
++static bool dstar_now(const radio_sm_t *sm)
++{
++	return radio_dstar_running() || sm->view.ch.mode == RADIO_MODE_DSTAR;
++}
++#endif
++
+ static const radio_air_ops_t *air_ops(const radio_sm_t *sm)
+ {
++#if CONFIG_DSTAR
++	if (dstar_now(sm))
++		return &radio_dstar_air;
++#endif
+ #if CONFIG_M17
+ 	if (m17_now(sm)) {
+ 		return &radio_m17_air;
+@@ -6386,6 +6412,9 @@ static bool air_running(void)
+ #endif
+ #if CONFIG_M17
+ 	on = on || radio_m17_running();
++#endif
++#if CONFIG_DSTAR
++	on = on || radio_dstar_running();
+ #endif
+ 	return on;
+ }
+@@ -6393,6 +6422,10 @@ static bool air_running(void)
+ // The engine's view into the radio view. True when it changed
+ static bool air_poll(radio_sm_t *sm)
+ {
++#if CONFIG_DSTAR
++	if (dstar_now(sm))
++		return radio_dstar_poll(&sm->view.dstar);
++#endif
+ #if CONFIG_M17
+ 	if (m17_now(sm)) {
+ 		return radio_m17_poll(&sm->view.m17);
+@@ -6418,6 +6451,10 @@ static bool air_poll(radio_sm_t *sm)
+ // A call on the channel (our NAC, RAN or DG-ID): it shows as a reception, whether or not it plays
+ static bool air_rx(const radio_sm_t *sm)
+ {
++#if CONFIG_DSTAR
++	if (dstar_now(sm))
++		return sm->view.dstar.rx || sm->view.dstar.played;
++#endif
+ #if CONFIG_M17
+ 	if (m17_now(sm)) {
+ 		return (sm->view.m17.flags & RADIO_M17_RX) != 0;
+@@ -6447,6 +6484,13 @@ static bool air_rx(const radio_sm_t *sm)
+ static uint8_t air_heard(const radio_sm_t *sm)
+ {
+ 	bool rx = false, played = false, pending = false;
++#if CONFIG_DSTAR
++	if (dstar_now(sm)) {
++		played = sm->view.dstar.played;
++		rx = sm->view.dstar.rx || played;
++		pending = !played;
++	} else
++#endif
+ #if CONFIG_M17
+ 	if (m17_now(sm)) {
+ 		const radio_m17_view_t *v = &sm->view.m17;
+@@ -6490,6 +6534,13 @@ static void air_begin(radio_sm_t *sm)
+ 	bool hear_all = hear_all_on(sm);
+ 	sm->view.dmr.hear_all_latch = hear_all;
+ 	sm->view.dmr.hear_all = hear_all;
++#if CONFIG_DSTAR
++	if (sm->view.ch.mode == RADIO_MODE_DSTAR) {
++		radio_dstar_begin();
++		radio_dstar_poll(&sm->view.dstar);
++		return;
++	}
++#endif
+ #if CONFIG_M17
+ 	radio_m17_monitor(hear_all);
+ 	if (sm->view.ch.mode == RADIO_MODE_M17) {
+@@ -6537,6 +6588,10 @@ static void air_stop(radio_sm_t *sm)
+ #endif
+ #if CONFIG_M17
+ 	radio_m17_end();
++#endif
++#if CONFIG_DSTAR
++	radio_dstar_end();
++	memset(&sm->view.dstar, 0, sizeof(sm->view.dstar));
+ #endif
+ 	if (sm->air_keyed) {
+ 		sm->air_keyed = false;
+@@ -6648,6 +6703,10 @@ static void air_key(radio_sm_t *sm, uint32_t now_ms, uint32_t hz)
+ // The settings sent while it transmitted (RREQ_P25_SET, RREQ_NXDN_SET, RREQ_YSF_SET): the engine takes them now
+ static void air_apply(radio_sm_t *sm)
+ {
++#if CONFIG_DSTAR
++	if (dstar_now(sm))
++		return;
++#endif
+ #if CONFIG_M17
+ 	radio_m17_monitor(hear_all_on(sm));
+ 	if (m17_now(sm)) {
+@@ -7668,7 +7727,8 @@ static void restore_vfo(radio_sm_t *sm, const settings_t *st, uint8_t idx)
+ 		v.mode == RADIO_MODE_P25 && p25_ok() ? RADIO_MODE_P25 :
+ 		v.mode == RADIO_MODE_NXDN && nxdn_ok() ? RADIO_MODE_NXDN :
+ 		v.mode == RADIO_MODE_YSF && ysf_ok() ? RADIO_MODE_YSF :
+-		v.mode == RADIO_MODE_M17 && m17_ok() ? RADIO_MODE_M17 : VFO_MODE_DEFAULT;
++		v.mode == RADIO_MODE_M17 && m17_ok() ? RADIO_MODE_M17 :
++		v.mode == RADIO_MODE_DSTAR && dstar_ok() ? RADIO_MODE_DSTAR : VFO_MODE_DEFAULT;
+ 	if (sm->vfo_ch.mode != v.mode) {
+ 		sm->view.vfo_drop = (uint8_t)(v.mode + 1u);	// the debug link's vfo_drop: why the VFO came back changed
+ 	}
+@@ -8275,6 +8335,9 @@ void radio_sm_init(radio_sm_t *sm, uint32_t now_ms)
+ 	batt_init(&sm->batt);
+ #if CONFIG_BEEP
+ 	beep_init(pcm_audio());
++#endif
++#if CONFIG_DSTAR
++	radio_dstar_init(pcm_audio());
+ #endif
+ 	step_update(sm);
+ 	sm->view.source = codeplug_source();
+@@ -8967,7 +9030,8 @@ void radio_sm_request(radio_sm_t *sm, const radio_req_t *req, uint32_t now_ms)
+ 		// Not on a channel of a kind: its mode is the kind's (channel-modes.md 6)
+ 		if (busy || sm->view.ch.kind != CODEPLUG_KIND_NONE ||
+ 				(req->arg != RADIO_MODE_FM && req->arg != RADIO_MODE_DMR && req->arg != RADIO_MODE_P25 &&
+-				 req->arg != RADIO_MODE_NXDN && req->arg != RADIO_MODE_YSF && req->arg != RADIO_MODE_M17) ||
++				 req->arg != RADIO_MODE_NXDN && req->arg != RADIO_MODE_YSF && req->arg != RADIO_MODE_M17 &&
++				 req->arg != RADIO_MODE_DSTAR) ||
+ 				(req->arg == sm->view.ch.mode && req->arg2 == VFO_VARIANT_DEFAULT) ||
+ 				(req->arg == RADIO_MODE_FM && !(sm->view.vfo ? CONFIG_VFO_FM : CONFIG_FM)) ||
+ 				(req->arg == RADIO_MODE_DMR && (radio_listen_band(sm->view.ch.rx_hz) ||
+@@ -8975,7 +9039,8 @@ void radio_sm_request(radio_sm_t *sm, const radio_req_t *req, uint32_t now_ms)
+ 				(req->arg == RADIO_MODE_P25 && (!p25_ok() || radio_listen_band(sm->view.ch.rx_hz))) ||
+ 				(req->arg == RADIO_MODE_NXDN && (!nxdn_ok() || radio_listen_band(sm->view.ch.rx_hz))) ||
+ 				(req->arg == RADIO_MODE_YSF && (!ysf_ok() || radio_listen_band(sm->view.ch.rx_hz))) ||
+-				(req->arg == RADIO_MODE_M17 && (!m17_ok() || radio_listen_band(sm->view.ch.rx_hz)))) {
++				(req->arg == RADIO_MODE_M17 && (!m17_ok() || radio_listen_band(sm->view.ch.rx_hz))) ||
++				(req->arg == RADIO_MODE_DSTAR && (!sm->view.vfo || !dstar_ok() || radio_listen_band(sm->view.ch.rx_hz)))) {
+ 			break;
+ 		}
+ 		if (req->arg2 != VFO_VARIANT_DEFAULT) {
+diff --git a/core/ui/ui_app.c b/core/ui/ui_app.c
+index a0a3577..7ad2a4b 100644
+--- a/core/ui/ui_app.c
++++ b/core/ui/ui_app.c
+@@ -910,7 +910,8 @@ static void entry_commit(void)
+ static inline bool digital_monitor_mode(uint8_t mode)
+ {
+ 	return mode == RADIO_MODE_DMR || (CONFIG_P25 && mode == RADIO_MODE_P25) || (CONFIG_NXDN && mode == RADIO_MODE_NXDN) ||
+-	       (CONFIG_YSF && mode == RADIO_MODE_YSF) || (CONFIG_M17 && mode == RADIO_MODE_M17);
++	       (CONFIG_YSF && mode == RADIO_MODE_YSF) || (CONFIG_M17 && mode == RADIO_MODE_M17) ||
++	       (CONFIG_DSTAR && mode == RADIO_MODE_DSTAR);
+ }
+ 
+ #if CONFIG_DMR
+@@ -1609,6 +1610,9 @@ static void quick_activate(int tile)
+ 			{ RADIO_MODE_YSF, VFO_VARIANT_SECOND, UI_FEAT_YSF },
+ #if CONFIG_M17
+ 			{ RADIO_MODE_M17, 0, UI_FEAT_M17 },
++#endif
++#if CONFIG_DSTAR
++			{ RADIO_MODE_DSTAR, 0, UI_FEAT_DSTAR },
+ #endif
+ 		};
+ 		if (view->am || view->bcast) {
+diff --git a/core/ui/ui_screens.c b/core/ui/ui_screens.c
+index f486faf..29f8c71 100644
+--- a/core/ui/ui_screens.c
++++ b/core/ui/ui_screens.c
+@@ -1679,6 +1679,14 @@ static void draw_chips(const radio_view_t *v, const ui_state_t *s)
+ #endif
+ 		return;
+ 	}
++#if CONFIG_DSTAR
++	if (v->ch.mode == RADIO_MODE_DSTAR) {
++		x = gfx_text(f, x, y, ui_power_name(v->power, v->ch.tx_hz), pw_temp ? ui_col.warn : ui_col.fg) + f->w;
++		if (v->dstar.source[0] && x + gfx_text_width(f, v->dstar.source) <= w)
++			gfx_text(f, x, y, v->dstar.source, ui_col.fg);
++		return;
++	}
++#endif
+ #if CONFIG_M17
+ 	if (v->ch.mode == RADIO_MODE_M17) {
+ 		// The same for M17: the power and the CAN sent
+@@ -2769,6 +2777,11 @@ static void draw_tx(const radio_view_t *v, const ui_state_t *s)
+ 		sb_str(&b, v->ysf.talk);
+ 		break;
+ #endif
++#if CONFIG_DSTAR
++	case RADIO_MODE_DSTAR:
++		sb_str(&b, "CQCQCQ");
++		break;
++#endif
+ #if CONFIG_M17
+ 	case RADIO_MODE_M17:
+ 		sb_str(&b, v->m17.talk);
+diff --git a/core/ui/ui_svc.h b/core/ui/ui_svc.h
+index 8a7eb5f..f3499ee 100644
+--- a/core/ui/ui_svc.h
++++ b/core/ui/ui_svc.h
+@@ -64,6 +64,7 @@ extern radio_view_t ui_svc_view;
+ #define UI_FEAT_NXDN		(1u << 23)	// NXDN on this board (CONFIG_NXDN, radio_nxdn_fits): the same
+ #define UI_FEAT_YSF		(1u << 24)	// YSF on this board (CONFIG_YSF, radio_ysf_fits): the same
+ #define UI_FEAT_M17		(1u << 25)	// M17 on this board (CONFIG_M17, radio_m17_fits): the same
++#define UI_FEAT_DSTAR		(1u << 26)
+ #define UI_FEAT_LRRP		(1u << 28)	// DMR immediate position request
+ uint32_t ui_svc_features(void);
+ // The parts of it each package reports (ui_svc_features ORs them): dmr-voice / radio core, dmr-data, storage-cps,
+@@ -106,7 +107,7 @@ bool ui_svc_mode(uint8_t mode);			// radio_mode_t: the VFO's mode (a channel's g
+ static inline const char *ui_mode_name(uint8_t mode)
+ {
+ 	return mode == RADIO_MODE_DMR ? "DMR" : mode == RADIO_MODE_P25 ? "P25" : mode == RADIO_MODE_NXDN ? "NXDN" :
+-	       mode == RADIO_MODE_M17 ? "M17" : "FM";
++	       mode == RADIO_MODE_M17 ? "M17" : mode == RADIO_MODE_DSTAR ? "D-STAR" : "FM";
+ }
+ // Copy to VFO: the channel on view into the VFO, which opens (CONFIG_VFO). Returns a radio_vfo_copy_t: VFO_COPY_OK
+ // when the request went to the radio core, else why nothing changed
+diff --git a/core/ui/ui_svc_radio.c b/core/ui/ui_svc_radio.c
+index 5aeec7d..34f9b4d 100644
+--- a/core/ui/ui_svc_radio.c
++++ b/core/ui/ui_svc_radio.c
+@@ -307,7 +307,7 @@ bool ui_svc_mode(uint8_t mode)
+ {
+ 	if (mode != RADIO_MODE_FM && mode != RADIO_MODE_DMR && !(mode == RADIO_MODE_P25 && CONFIG_P25) &&
+ 	    !(mode == RADIO_MODE_NXDN && CONFIG_NXDN) && !(mode == RADIO_MODE_YSF && CONFIG_YSF) &&
+-	    !(mode == RADIO_MODE_M17 && CONFIG_M17)) {
++	    !(mode == RADIO_MODE_M17 && CONFIG_M17) && !(mode == RADIO_MODE_DSTAR && CONFIG_DSTAR)) {
+ 		return false;
+ 	}
+ 	radio_req_mode(mode);
+@@ -404,6 +404,9 @@ uint32_t ui_svc_feat_radio(void)
+ #endif
+ #if CONFIG_M17
+ 	       (radio_m17_fits() ? UI_FEAT_M17 : 0) |
++#endif
++#if CONFIG_DSTAR
++	       (radio_dstar_fits() ? UI_FEAT_DSTAR : 0) |
+ #endif
+ 	       0;
+ }
+diff --git a/core/ui/ui_svc_storage.c b/core/ui/ui_svc_storage.c
+index 0a58103..d8fd29a 100644
+--- a/core/ui/ui_svc_storage.c
++++ b/core/ui/ui_svc_storage.c
+@@ -1372,6 +1372,8 @@ static bool take_channel(void)
+ 
+ bool ui_svc_save_channel(void)
+ {
++	if (CONFIG_DSTAR && ui_svc_view.ch.mode == RADIO_MODE_DSTAR)
++		return false;
+ 	return take_channel() && cp_post(save_channel_job);
+ }
+ 
+diff --git a/hal/hal_radio.h b/hal/hal_radio.h
+index 12ba7f5..1af1c83 100644
+--- a/hal/hal_radio.h
++++ b/hal/hal_radio.h
+@@ -11,7 +11,8 @@
+ // RADIO_MODE_P25, RADIO_MODE_NXDN and RADIO_MODE_YSF are a channel's modes only (the radio core runs them with the
+ // board in RADIO_MODE_DMR, its modem chip's digital mode, docs/spec/p25.md 7, docs/spec/nxdn.md 6, docs/spec/ysf.md 8):
+ // set_mode never gets them
+-typedef enum { RADIO_MODE_FM, RADIO_MODE_DMR, RADIO_MODE_P25, RADIO_MODE_NXDN, RADIO_MODE_YSF, RADIO_MODE_M17 } radio_mode_t;
++typedef enum { RADIO_MODE_FM, RADIO_MODE_DMR, RADIO_MODE_P25, RADIO_MODE_NXDN, RADIO_MODE_YSF, RADIO_MODE_M17,
++	RADIO_MODE_DSTAR } radio_mode_t;
+ typedef enum { RADIO_BW_12K5, RADIO_BW_25K } radio_bw_t;
+ 
+ typedef enum { TONE_NONE, TONE_CTCSS, TONE_DCS, TONE_DCS_INV } tone_type_t;

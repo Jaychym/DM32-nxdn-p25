@@ -1,0 +1,588 @@
+diff --git a/boards/dm32/config.mk b/boards/dm32/config.mk
+--- a/boards/dm32/config.mk
++++ b/boards/dm32/config.mk
+@@ -7,6 +7,7 @@
+ # The programming cable's UART0 carries the host link and PPP (platform/hrc7000/config.mk).
+ # The 240x320 panel at full resolution in 16 colors (display_dm32.c, board.mk). The 16x32 font is the large class's
+ # channel name; text is anti-aliased, and lists and labels are one size up (9x18)
++CONFIG_DSTAR ?= y
+ CONFIG_FONT_XL ?= y
+ CONFIG_UI_KAWAII ?= y
+ CONFIG_DMR_REPLAY ?= $(CONFIG_DMR)
+diff --git a/core/codeplug/codeplug_modes.h b/core/codeplug/codeplug_modes.h
+--- a/core/codeplug/codeplug_modes.h
++++ b/core/codeplug/codeplug_modes.h
+@@ -49,6 +49,14 @@
+ #define CODEPLUG_RUNS_M17	0
+ #endif
+ 
++// D-STAR DV simplex uses the radio's air interface and audio path.
++#if CONFIG_DSTAR
++bool radio_dstar_fits(void);
++#define CODEPLUG_RUNS_DSTAR	radio_dstar_fits()
++#else
++#define CODEPLUG_RUNS_DSTAR	0
++#endif
++
+ // Channel kinds: the first byte of a channel tag
+ #define CODEPLUG_KINDS(X) \
+ 	X(1, DMR_TRUNK, "T3", CONFIG_DMR_TRUNK)	/* DMR Tier III trunked (radio/radio_trunk.h) */ \
+@@ -58,7 +66,8 @@
+ 	X(5, AM, "AM", CONFIG_AM_RX)	/* AM, receive only, on any frequency the receiver tunes; a board whose receiver can't parks it (radio_sm.c) */ \
+ 	X(6, YSF, "YSF", CODEPLUG_RUNS_YSF)	/* YSF conventional: the radio core runs it (core/radio/radio_ysf.c) */ \
+ 	X(7, M17, "M17", CODEPLUG_RUNS_M17)	/* M17 stream mode voice: the radio core runs it (core/radio/radio_m17.c) */ \
+-	X(8, NXDN_SCRAMBLER, "NXDN-S", CONFIG_NXDN_SCRAMBLER && CODEPLUG_RUNS_NXDN)	/* conventional NXDN, 15-bit voice scrambler */
++	X(8, NXDN_SCRAMBLER, "NXDN-S", CONFIG_NXDN_SCRAMBLER && CODEPLUG_RUNS_NXDN)	/* conventional NXDN, 15-bit voice scrambler */ \
++	X(9, DSTAR, "D-STAR", CODEPLUG_RUNS_DSTAR)	/* D-STAR DV simplex */
+ 
+ // System types: the first byte of a system record
+ #define CODEPLUG_SYSTEM_TYPES(X) \
+diff --git a/core/config.h b/core/config.h
+--- a/core/config.h
++++ b/core/config.h
+@@ -351,6 +351,9 @@
+ #ifndef CONFIG_M17
+ #define CONFIG_M17			0
+ #endif
++#ifndef CONFIG_DSTAR
++#define CONFIG_DSTAR			0
++#endif
+ #ifndef CONFIG_AIR
+ #define CONFIG_AIR			(CONFIG_P25 || CONFIG_NXDN || CONFIG_YSF)
+ #endif
+diff --git a/core/hostlink/build_info.c b/core/hostlink/build_info.c
+--- a/core/hostlink/build_info.c
++++ b/core/hostlink/build_info.c
+@@ -17,6 +17,9 @@
+ #if CONFIG_M17
+ #include "radio/radio_m17.h"
+ #endif
++#if CONFIG_DSTAR
++#include "dstar/radio_dstar.h"
++#endif
+ 
+ #ifndef RFOUNDRY_PRESET
+ #define RFOUNDRY_PRESET "unknown"
+@@ -245,6 +248,10 @@
+ 	if (radio_m17_fits())
+ 		strcat(modes, "M17,");
+ #endif
++#if CONFIG_DSTAR
++	if (radio_dstar_fits())
++		strcat(modes, "DSTAR,");
++#endif
+ 	return modes;
+ }
+ 
+diff --git a/core/radio/radio.h b/core/radio/radio.h
+--- a/core/radio/radio.h
++++ b/core/radio/radio.h
+@@ -505,10 +505,10 @@
+ #if CONFIG_YSF
+ 	radio_ysf_view_t ysf;	// YSF conventional (docs/spec/ysf.md 8): the same
+ #endif
+-#if CONFIG_M17
+ #if CONFIG_DSTAR
+ 	radio_dstar_view_t dstar;
+ #endif
++#if CONFIG_M17
+ 	radio_m17_view_t m17;	// M17 (docs/spec/m17.md 6): the same
+ #endif
+ #if CONFIG_MDC1200
+diff --git a/core/radio/radio_sm.c b/core/radio/radio_sm.c
+--- a/core/radio/radio_sm.c
++++ b/core/radio/radio_sm.c
+@@ -140,7 +140,7 @@
+ #endif
+ }
+ 
+-// M17 on this board: built, and the air interface receives or transmits it
++// D-STAR on this board: built, and the air interface receives or transmits it
+ static inline bool dstar_ok(void)
+ {
+ #if CONFIG_DSTAR
+@@ -685,6 +685,12 @@
+ #endif
+ #if CONFIG_M17
+ 	radio_m17_take(ch);
++#endif
++#if CONFIG_DSTAR
++	if (ch->kind == CODEPLUG_KIND_DSTAR && dstar_ok() && !radio_listen_band(ch->rx_hz)) {
++		ch->mode = RADIO_MODE_DSTAR;
++		ch->bw = RADIO_BW_12K5;
++	}
+ #endif
+ #if CONFIG_AM_RX
+ 	radio_am_take(ch);
+diff --git a/core/ui/ui_dual.c b/core/ui/ui_dual.c
+--- a/core/ui/ui_dual.c
++++ b/core/ui/ui_dual.c
+@@ -177,6 +177,8 @@
+ 	if (!codeplug_kind_built(c->kind))
+ 		return c->mode;
+ 	// The kinds a build runs: P25 (trunked too), NXDN and YSF
++	if (c->kind == CODEPLUG_KIND_DSTAR)
++		return RADIO_MODE_DSTAR;
+ 	return c->kind == CODEPLUG_KIND_NXDN || c->kind == CODEPLUG_KIND_NXDN_SCRAMBLER ? RADIO_MODE_NXDN :
+ 	       c->kind == CODEPLUG_KIND_YSF ? RADIO_MODE_YSF : c->kind == CODEPLUG_KIND_M17 ? RADIO_MODE_M17 : RADIO_MODE_P25;
+ }
+@@ -219,7 +221,8 @@
+ 	p->rx_hz = ch.rx_hz;
+ 	p->tx_voice_lock = s->valid && s->tx_voice_lock;
+ 	p->tx_voice_clear = s->valid && s->tx_voice_clear;
+-	if (p->mode == RADIO_MODE_P25 || p->mode == RADIO_MODE_NXDN || p->mode == RADIO_MODE_YSF || p->mode == RADIO_MODE_M17)
++	if (p->mode == RADIO_MODE_P25 || p->mode == RADIO_MODE_NXDN || p->mode == RADIO_MODE_YSF || p->mode == RADIO_MODE_M17 ||
++	    p->mode == RADIO_MODE_DSTAR)
+ 		return;	// no tone or slot: the engine's own squelch (the channel's settings say which)
+ 	sbuf_t b;
+ 	sb_init(&b, p->detail, sizeof p->detail);
+diff --git a/core/ui/ui_menus.c b/core/ui/ui_menus.c
+--- a/core/ui/ui_menus.c
++++ b/core/ui/ui_menus.c
+@@ -1335,6 +1335,12 @@
+ 	return CONFIG_YSF && (ch->kind == CODEPLUG_KIND_YSF || (ch->kind == CODEPLUG_KIND_NONE && ch->mode == RADIO_MODE_YSF));
+ }
+ 
++static bool ced_is_dstar(const channel_t *ch)
++{
++	return CONFIG_DSTAR &&
++	       (ch->kind == CODEPLUG_KIND_DSTAR || (ch->kind == CODEPLUG_KIND_NONE && ch->mode == RADIO_MODE_DSTAR));
++}
++
+ // The same for M17
+ static bool ced_is_m17(const channel_t *ch)
+ {
+@@ -2875,8 +2881,9 @@
+ 
+ #if CONFIG_CHANNEL_EDIT
+ // The modes the Mode row steps through, in this order: FM, AM, DMR, P25, NXDN at 4800 and at 9600 bit/s, YSF Wide and
+-// YSF Narrow, M17
+-enum { CM_FM, CM_AM, CM_DMR, CM_P25, CM_NXDN_4800, CM_NXDN_9600, CM_YSF_WIDE, CM_YSF_NARROW, CM_M17, CM_COUNT,
++// YSF Narrow, M17 and D-STAR
++enum { CM_FM, CM_AM, CM_DMR, CM_P25, CM_NXDN_4800, CM_NXDN_9600, CM_YSF_WIDE, CM_YSF_NARROW, CM_M17, CM_DSTAR,
++       CM_COUNT,
+        CM_OTHER = 0xFF };
+ 
+ // Whether this build and radio run step m for a channel received on c's frequency. A listen band (the air band, the
+@@ -2911,6 +2918,9 @@
+ #if CONFIG_M17
+ 	case CM_M17: return radio_m17_fits() && !listen;
+ #endif
++#if CONFIG_DSTAR
++	case CM_DSTAR: return radio_dstar_fits() && !listen;
++#endif
+ 	default: return false;
+ 	}
+ }
+@@ -2939,6 +2949,8 @@
+ #endif
+ 	if (ced_is_m17(c))
+ 		return CM_M17;
++	if (ced_is_dstar(c))
++		return CM_DSTAR;
+ 	if (c->kind == CODEPLUG_KIND_AM)
+ 		return CM_AM;
+ 	if (c->kind != CODEPLUG_KIND_NONE)
+@@ -3025,6 +3037,7 @@
+ 	case CM_YSF_WIDE:
+ 	case CM_YSF_NARROW: c->mode = RADIO_MODE_YSF; break;
+ 	case CM_M17: c->mode = RADIO_MODE_M17; break;
++	case CM_DSTAR: c->mode = RADIO_MODE_DSTAR; break;
+ 	default: c->mode = RADIO_MODE_FM; break;
+ 	}
+ 	// A stored P25, NXDN or YSF channel stepped to its own mode again (the rate, the deviation) keeps its tag's
+@@ -3033,7 +3046,8 @@
+ 	    ((m == CM_NXDN_4800 || m == CM_NXDN_9600) &&
+ 	     (ced_orig.kind == CODEPLUG_KIND_NXDN || ced_orig.kind == CODEPLUG_KIND_NXDN_SCRAMBLER)) ||
+ 	    ((m == CM_YSF_WIDE || m == CM_YSF_NARROW) && ced_orig.kind == CODEPLUG_KIND_YSF) ||
+-	    (m == CM_M17 && ced_orig.kind == CODEPLUG_KIND_M17)) {
++	    (m == CM_M17 && ced_orig.kind == CODEPLUG_KIND_M17) ||
++	    (m == CM_DSTAR && ced_orig.kind == CODEPLUG_KIND_DSTAR)) {
+ 		c->kind = ced_orig.kind;
+ 		c->system = ced_orig.system;
+ 		c->mode = ced_orig.mode;
+@@ -3049,7 +3063,7 @@
+ 		return false;
+ 	bool trunk = ced_orig.kind == CODEPLUG_KIND_DMR_TRUNK || ced_orig.kind == CODEPLUG_KIND_P25_TRUNK;
+ 	bool to_mode = ced_ch.kind == CODEPLUG_KIND_AM || ced_is_p25(&ced_ch) || ced_is_nxdn(&ced_ch) || ced_is_ysf(&ced_ch) ||
+-		       ced_is_m17(&ced_ch);
++		       ced_is_m17(&ced_ch) || ced_is_dstar(&ced_ch);
+ 	return trunk || !to_mode;
+ }
+ 
+@@ -3082,7 +3096,8 @@
+ {
+ 	bool listen = radio_listen_band(ced_ch.rx_hz);
+ 	bool p25 = ced_is_p25(&ced_ch), nxdn = ced_is_nxdn(&ced_ch), ysf = ced_is_ysf(&ced_ch), m17 = ced_is_m17(&ced_ch);
+-	bool air = p25 || nxdn || ysf || m17;
++	bool dstar = ced_is_dstar(&ced_ch);
++	bool air = p25 || nxdn || ysf || m17 || dstar;
+ 	bool am = ced_ch.kind == CODEPLUG_KIND_AM;	// receive only AM (radio_am.h): no sub-audio, VOX or burst; its record is a DMR stand-in
+ 	bool dmr = CONFIG_DMR && ced_ch.mode == RADIO_MODE_DMR && !listen && !air && !am;
+ 	bool edit = CONFIG_CHANNEL_EDIT;
+@@ -3124,8 +3139,8 @@
+ 		bool tone = r == CE_RX_TONE || r == CE_TX_TONE;
+ 		// P25, NXDN and YSF: no sub-audio tones or width; of the digital rows the talk target and unit ID, P25's
+ 		// talkaround; the NAC, RAN or DG-ID, NXDN's rate, YSF's data type and destination
+-		// M17: its CAN and destination only (its source is the radio-wide call sign)
+-		bool air_row = air && ((!m17 && ((r == CE_CONTACT && CONFIG_DMR) || r == CE_ID)) || (r == CE_DMO && p25) ||
++		// M17: its CAN and destination. D-STAR simplex has no per-mode fields.
++		bool air_row = air && !dstar && ((!m17 && ((r == CE_CONTACT && CONFIG_DMR) || r == CE_ID)) || (r == CE_DMO && p25) ||
+ 				       (r == CE_CODE && !into) || (r == CE_RATE && (nxdn || ysf) && !into) ||
+ 				       (r == CE_DEST && (ysf || m17) && !into) || (r == CE_TRUNK && nxdn && !into));
+ 		if (r == CE_CODE || r == CE_RATE || r == CE_DEST || r == CE_TRUNK ? !air_row : air && (fm_only || (dmr_only && !air_row)))
+@@ -3432,6 +3447,8 @@
+ #endif
+ 		else if (ced_is_m17(ch))
+ 			sb_str(&b, "M17");
++		else if (ced_is_dstar(ch))
++			sb_str(&b, "D-STAR");
+ 		else if (ch->kind != CODEPLUG_KIND_NONE)
+ 			sb_str(&b, codeplug_kind_name(ch->kind));
+ 		else if (radio_am_tx_refused(ch->rx_hz))
+diff --git a/core/ui/ui_svc_storage.c b/core/ui/ui_svc_storage.c
+--- a/core/ui/ui_svc_storage.c
++++ b/core/ui/ui_svc_storage.c
+@@ -59,6 +59,9 @@
+ #include "ysf/ysf_codeplug.h"
+ #include "radio/radio_ysf.h"
+ #endif
++#if CONFIG_DSTAR
++#include "dstar/dstar_codeplug.h"
++#endif
+ #if CONFIG_M17
+ #include "m17/m17_codeplug.h"
+ #include "radio/radio_m17.h"
+@@ -1171,8 +1174,16 @@
+ 
+ // A plain channel in an air mode written as a stored channel of its kind (the VFO, a mode changed for now); false in
+ // *ok's place when it isn't one: the caller writes it as a plain channel
+-static bool air_save_now(uint16_t number, const channel_t *ch, bool *ok)
+-{
++static bool air_save_now(uint16_t number, uint16_t from, const channel_t *ch, bool *ok)
++{
++#if CONFIG_DSTAR
++	if (ch->kind == CODEPLUG_KIND_DSTAR || (ch->kind == CODEPLUG_KIND_NONE && ch->mode == RADIO_MODE_DSTAR)) {
++		*ok = dstar_channel_save(number, from, ch);
++		return true;
++	}
++#else
++	(void)from;
++#endif
+ 	if (ch->kind != CODEPLUG_KIND_NONE)
+ 		return false;
+ #if CONFIG_P25
+@@ -1347,7 +1358,7 @@
+ 	if (job.temp & RADIO_TEMP_AIR)
+ 		done = air_quick_save(&ok, &missing);
+ #endif
+-	if (!done && !air_save_now(job.channel, &job_ch, &ok))
++	if (!done && !air_save_now(job.channel, 0, &job_ch, &ok))
+ 		ok = codeplug_set_channel(job.channel, &job_ch);
+ 	if (!ok) {
+ 		save_failed(missing ? TRN(STORE_ERR_TARGET_NOT_STORED, "Not a stored contact: for now only") :
+@@ -1399,8 +1410,6 @@
+ 
+ bool ui_svc_save_channel(void)
+ {
+-	if (CONFIG_DSTAR && ui_svc_view.ch.mode == RADIO_MODE_DSTAR)
+-		return false;
+ 	return take_channel() && cp_post(save_channel_job);
+ }
+ 
+@@ -1487,7 +1496,7 @@
+ 		done = true;
+ 	}
+ #endif
+-	if (!done && !air_save_now(job.channel, &job.now, &ok))
++	if (!done && !air_save_now(job.channel, from, &job.now, &ok))
+ 		ok = codeplug_set_channel(job.channel, &job.now) &&
+ 		     (job.now.kind == CODEPLUG_KIND_NONE || from == 0 || from == job.channel ||
+ 		      codeplug_tag_copy(from, job.channel, &job.now));
+diff --git a/docs/spec/channel-modes.md b/docs/spec/channel-modes.md
+--- a/docs/spec/channel-modes.md
++++ b/docs/spec/channel-modes.md
+@@ -155,6 +155,7 @@
+ | 6 | YSF conventional | YSF | `CONFIG_YSF` and a board whose air interface carries YSF (`radio_ysf_fits`) | [ysf-codeplug.md](ysf-codeplug.md) |
+ | 7 | M17 stream mode voice | M17 | `CONFIG_M17` and a board whose air interface carries M17 (`radio_m17_fits`) | [m17.md](m17.md) 5 |
+ | 8 | NXDN conventional voice scrambler | NXDN-S | `CONFIG_NXDN_SCRAMBLER` and a board whose air interface carries NXDN | [nxdn-codeplug.md](nxdn-codeplug.md) |
++| 9 | D-STAR DV simplex | D-STAR | `CONFIG_DSTAR` and a board whose air interface and audio support DV | No parameter block. The radio name is the source and routing is direct. |
+ 
+ | System type | Name | Short | Built when | Spec |
+ |---|---|---|---|---|
+diff --git a/site/static/js/codeplug/mode_dstar.js b/site/static/js/codeplug/mode_dstar.js
+new file mode 100644
+--- /dev/null
++++ b/site/static/js/codeplug/mode_dstar.js
+@@ -0,0 +1,20 @@
++// SPDX-License-Identifier: MIT
++// Copyright (c) 2026 lyra XE1POC
++import { grow } from "./modebytes.js";
++
++// D-STAR simplex uses the radio name and fixed DIRECT routing.
++export const dstarKind = {
++	id: 9,
++	feature: "DSTAR",
++	systemType: null,
++	contacts: false,
++	ownFreqs: true,
++	defaultTx: true,
++	recordFields: [],
++	flags: {},
++	newParams: () => ({}),
++	decode: () => ({}),
++	encode: (params, prev = null) => grow(prev, 0),
++	fields: () => [],
++	validate() {},
++};
+diff --git a/site/static/js/codeplug/modes.js b/site/static/js/codeplug/modes.js
+--- a/site/static/js/codeplug/modes.js
++++ b/site/static/js/codeplug/modes.js
+@@ -14,6 +14,7 @@
+ import { ysfKind } from "./mode_ysf.js";
+ import { m17Kind } from "./mode_m17.js";
+ import { amKind } from "./mode_am.js";
++import { dstarKind } from "./mode_dstar.js";
+ 
+ // id, the C token, the short name the radio shows, the feature that runs it, its module
+ export const KINDS = [
+@@ -25,6 +26,7 @@
+ 	{ id: 6, token: "YSF", short: "YSF", feature: "YSF", module: ysfKind },
+ 	{ id: 7, token: "M17", short: "M17", feature: "M17", module: m17Kind },
+ 	{ id: 8, token: "NXDN_SCRAMBLER", short: "NXDN-S", feature: "NXDN_SCRAMBLER", module: nxdnScramblerKind },
++	{ id: 9, token: "DSTAR", short: "D-STAR", feature: "DSTAR", module: dstarKind },
+ ];
+ 
+ export const SYSTEM_TYPES = [
+diff --git a/site/tests/modes.test.mjs b/site/tests/modes.test.mjs
+--- a/site/tests/modes.test.mjs
++++ b/site/tests/modes.test.mjs
+@@ -23,6 +23,22 @@
+ const vectors = (kind) => readFileSync(VECTORS, "utf8").split("\n").filter((l) => l.startsWith(kind + " ")).map((l) => l.slice(kind.length + 1));
+ const area = (img) => decodeArea(img.bytes).entries;
+ const round = (m) => decode(encode(m));
++
++test("D-STAR: select, save, reload and toggle transmit permission", () => {
++	const m = empty();
++	assert.deepEqual(offeredKinds(m, "FM,DMR,DSTAR").map((k) => k.id), [9]);
++	assert.deepEqual(offeredKinds(m, "FM,DMR").map((k) => k.id), []);
++	const ch = newChannel({ name: "DV simplex", rxHz: 433450000, txHz: 433450000 });
++	m.channels.push(ch);
++	setKind(m, ch, 9);
++	const first = round(m);
++	const saved = first.channels.find((c) => c.name === "DV simplex");
++	assert.equal(saved.kind, 9);
++	assert.equal(saved.rxHz, 433450000);
++	assert.equal(saved.tagTx, true);
++	saved.tagTx = false;
++	assert.equal(round(first).channels.find((c) => c.name === "DV simplex").tagTx, false);
++});
+ 
+ test("vectors: name check", () => {
+ 	const v = vectors("check");
+diff --git a/tests/host/Makefile b/tests/host/Makefile
+--- a/tests/host/Makefile
++++ b/tests/host/Makefile
+@@ -371,6 +371,15 @@
+ 	$(CC) $(CFLAGS) $(CORE_HAL) -I. -DDMR_RX_TRACE=0 -DCONFIG_DMR_IP_GATEWAY=0 -DCONFIG_SFR=1 -DCONFIG_APRS=0 \
+ 		-DCONFIG_P25=1 -DCONFIG_AIR_RAW=1 -DHAL_VOCODER_LEND_BYTES=0x4000 -o $@ $(RCP25) -lm
+ 
++# D-STAR in channel memory, on the same fake air provider.
++ifneq ($(wildcard $(CORE)/dstar/radio_dstar.c),)
++TESTS += radioCoreTestDstar
++RCDSTAR := $(sort $(RCP25) $(wildcard $(CORE)/dstar/*.c))
++radioCoreTestDstar: $(RCDSTAR) $(wildcard $(CORE)/dstar/*.h) $(wildcard $(CORE)/radio/*.h)
++	$(CC) $(CFLAGS) $(CORE_HAL) -I. -DDMR_RX_TRACE=0 -DCONFIG_DMR_IP_GATEWAY=0 -DCONFIG_SFR=1 -DCONFIG_APRS=0 \
++		-DCONFIG_P25=1 -DCONFIG_AIR_RAW=1 -DCONFIG_DSTAR=1 -DHAL_VOCODER_LEND_BYTES=0x4000 -o $@ $(RCDSTAR) -lm
++endif
++
+ # The same with P25 trunking (CONFIG_P25_TRUNK): a trunked site on the fake air, the follower in the radio core
+ TESTS   += radioCoreTestP25T
+ RCP25T  := $(RCP25) $(CORE)/p25/p25_tsbk.c $(CORE)/p25/p25_follow.c
+@@ -795,6 +804,10 @@
+ uiFlowTest: uiFlowTest.c $(UIDEPS)
+ 	$(CC) $(UIFLAGS) -DCONFIG_P25=1 -DCONFIG_P25_TRUNK=1 -DCONFIG_NXDN=1 -DCONFIG_YSF=1 -o $@ uiFlowTest.c $(UIAPP) -lz -lm
+ 
++TESTS += uiFlowTestDstar
++uiFlowTestDstar: uiFlowTest.c $(UIDEPS)
++	$(CC) $(UIFLAGS) -DCONFIG_P25=1 -DCONFIG_P25_TRUNK=1 -DCONFIG_NXDN=1 -DCONFIG_YSF=1 -DCONFIG_DSTAR=1 -o $@ uiFlowTest.c $(UIAPP) -lz -lm
++
+ uiFlowTestNxdnScrambler: uiFlowTest.c $(UIDEPS)
+ 	$(CC) $(UIFLAGS) -DCONFIG_P25=1 -DCONFIG_P25_TRUNK=1 -DCONFIG_NXDN=1 -DCONFIG_YSF=1 -DCONFIG_NXDN_SCRAMBLER=1 -o $@ uiFlowTest.c $(UIAPP) -lz -lm
+ 
+@@ -1548,6 +1561,12 @@
+ 
+ codeplugEditTest: codeplugEditTest.c $(CPEDIT) $(wildcard $(CORE)/codeplug/*.h $(CORE)/storage/*.h sim/sim_flash.h)
+ 	$(CC) $(CFLAGS) -I$(ROOT)/hal -I. -Wshadow -o $@ codeplugEditTest.c $(CPEDIT)
++
++ifneq ($(wildcard $(CORE)/dstar/dstar_codeplug.c),)
++TESTS += codeplugEditTestDstar
++codeplugEditTestDstar: codeplugEditTest.c $(CPEDIT) $(CORE)/dstar/dstar_codeplug.c $(CORE)/dstar/dstar_codeplug.h
++	$(CC) $(CFLAGS) -I$(ROOT)/hal -I. -Wshadow -DCONFIG_DSTAR=1 -o $@ codeplugEditTest.c $(CPEDIT) $(CORE)/dstar/dstar_codeplug.c
++endif
+ 
+ run: run-cpedit
+ run-cpedit: codeplugEditTest
+diff --git a/tests/host/codeplugEditTest.c b/tests/host/codeplugEditTest.c
+--- a/tests/host/codeplugEditTest.c
++++ b/tests/host/codeplugEditTest.c
+@@ -8,6 +8,10 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include "codeplug/codeplug.h"
++#if CONFIG_DSTAR
++#include "codeplug/codeplug_tag.h"
++#include "dstar/dstar_codeplug.h"
++#endif
+ #include "storage/storage.h"
+ #include "sim/sim_flash.h"
+ 
+@@ -835,8 +839,44 @@
+ 	free(before);
+ }
+ 
++#if CONFIG_DSTAR
++bool radio_dstar_fits(void) { return true; }
++
++static void test_dstar_memory(void)
++{
++	fresh();
++	channel_t ch = make("DV simplex", 433450000, 433450000);
++	CHECK(codeplug_set_channel(21, &ch));
++	ch.mode = RADIO_MODE_DSTAR;
++	CHECK(dstar_channel_save(21, 0, &ch));
++	sim_flash_power_on();
++	CHECK(storage_init());
++	CHECK(codeplug_init() == CODEPLUG_OPENFW);
++	channel_t saved;
++	CHECK(codeplug_channel(21, &saved));
++	CHECK(saved.kind == CODEPLUG_KIND_DSTAR && !saved.rx_only && saved.rx_hz == ch.rx_hz);
++	codeplug_tag_t tag;
++	CHECK(codeplug_tag_read(21, &tag) && (tag.flags & CODEPLUG_TAG_TX));
++	saved.rx_only = true;
++	CHECK(dstar_channel_save(22, 21, &saved));
++	CHECK(codeplug_channel(22, &saved) && saved.kind == CODEPLUG_KIND_DSTAR && saved.rx_only);
++	CHECK(codeplug_tag_remove(21));
++	CHECK(codeplug_channel(21, &saved) && saved.kind == CODEPLUG_KIND_NONE &&
++	      saved.mode == RADIO_MODE_DMR && saved.rx_only);
++	saved.mode = RADIO_MODE_FM;
++	saved.rx_only = false;
++	CHECK(codeplug_set_channel(22, &saved));
++	CHECK(codeplug_channel(22, &saved) && saved.kind == CODEPLUG_KIND_NONE &&
++	      saved.mode == RADIO_MODE_FM && !saved.rx_only);
++	CHECK(sim_flash_violations() == 0);
++}
++#endif
++
+ int main(void)
+ {
++#if CONFIG_DSTAR
++	test_dstar_memory();
++#endif
+ 	test_encode();
+ 	test_materialize();
+ 	test_channel_dmr_aes();
+diff --git a/tests/host/radioCoreTest.c b/tests/host/radioCoreTest.c
+--- a/tests/host/radioCoreTest.c
++++ b/tests/host/radioCoreTest.c
+@@ -11790,6 +11790,26 @@
+ }
+ #endif
+ 
++#if CONFIG_DSTAR
++#include "hostlink/build_info.h"
++
++static void test_dstar_memory(void)
++{
++	setup_codeplug();
++	add(3, "DV simplex", 446100000, RADIO_MODE_DMR, false, 2);
++	chans[3].kind = CODEPLUG_KIND_DSTAR;
++	start();
++	CHECK(strstr(build_modes_now(), "DSTAR,") != NULL);
++	req(RREQ_ZONE_POS, 2);
++	run(100);
++	CHECK(sm.view.channel_number == 3 && sm.view.ch.mode == RADIO_MODE_DSTAR &&
++	      radio_dstar_running() && !sim.started);
++	req(RREQ_ZONE_POS, 0);
++	run(100);
++	CHECK(!radio_dstar_running());
++}
++#endif
++
+ int main(int argc, char **argv)
+ {
+ #if CONFIG_P25 && CONFIG_NXDN && CONFIG_YSF
+@@ -11933,6 +11953,9 @@
+ #if CONFIG_M17
+ 	test_m17();
+ #endif
++#if CONFIG_DSTAR
++	test_dstar_memory();
++#endif
+ 	printf("# radioCoreTest: %d checks, %s\n", checks, failures ? "FAILED" : "PASSED");
+ 	return failures != 0;
+ }
+diff --git a/tests/host/sim/ui_sim.c b/tests/host/sim/ui_sim.c
+--- a/tests/host/sim/ui_sim.c
++++ b/tests/host/sim/ui_sim.c
+@@ -930,6 +930,11 @@
+ bool radio_p25_fits(void) { return p25_radio; }
+ #endif
+ #if CONFIG_NXDN
++#if CONFIG_DSTAR
++static bool dstar_radio;
++bool radio_dstar_fits(void);
++bool radio_dstar_fits(void) { return dstar_radio; }
++#endif
+ static bool nxdn_radio;		// below: the "nxdn" token
+ bool radio_nxdn_fits(void) { return nxdn_radio; }
+ // A stored NXDN channel's set-up (nxdn_codeplug.c): 9600 bit/s, RAN 1, unless the editor saved a block
+@@ -1811,6 +1816,9 @@
+ 	return 0xFFFFFFFFu & ~(soft_volume ? 0 : UI_FEAT_VOLUME) & ~(radio_bcast_capable() ? 0 : UI_FEAT_BCAST) &
+ 	       ~(ref_trim ? 0 : UI_FEAT_REF_TRIM) &
+ 	       ~(knob_radio ? 0 : UI_FEAT_VOLUME_KNOB) & ~(p25_radio ? 0 : UI_FEAT_P25) &
++#if CONFIG_DSTAR
++	       ~(dstar_radio ? 0 : UI_FEAT_DSTAR) &
++#endif
+ 	       ~(nxdn_radio ? 0 : UI_FEAT_NXDN);
+ }
+ // My radio's names (ui_svc_name_*): placeholders, as the user's own would be; a save writes at once
+@@ -2672,6 +2680,9 @@
+ 	view.volume_src = RVOL_KNOB;
+ 	p25_radio = false;
+ 	nxdn_radio = false;
++#if CONFIG_DSTAR
++	dstar_radio = false;
++#endif
+ #if CONFIG_NXDN_SCRAMBLER
+ 	sim_scrambler_key = false;
+ #endif
+@@ -3775,6 +3786,12 @@
+ 		p25_radio = true;
+ 		return true;
+ 	}
++#if CONFIG_DSTAR
++	if (strcmp(t, "dstar") == 0) {
++		dstar_radio = true;
++		return true;
++	}
++#endif
+ 	if (strcmp(t, "nxdn") == 0) {		// this radio runs NXDN
+ 		nxdn_radio = true;
+ 		return true;
+diff --git a/tests/host/uiFlowTest.c b/tests/host/uiFlowTest.c
+--- a/tests/host/uiFlowTest.c
++++ b/tests/host/uiFlowTest.c
+@@ -563,6 +563,12 @@
+ 	  "shows=121.500 shows=AM hides=FM", 8, false },
+ 	{ "E on a radio with AM: OK on the Mode row keeps it AM", "am ok 5 up up ok down down down ok 1 2 1 5 0 0 ok up",
+ 	  "ok", "toast=Air_band:_receive_only shows=AM hides=FM hides=Color_code hides=RX_CTCSS", 1, false },
++#if CONFIG_DSTAR
++	{ "D-STAR is selectable in a stored channel", "dstar ok 5 ok down down", "ok",
++	  "focus=Mode shows=D-STAR hides=Color_code hides=RX_CTCSS", 1, false },
++	{ "D-STAR can save a stored channel", "dstar ok 5 ok down down ok", "long:ok",
++	  "writes=1 toast=Saved_channel_3 shows=D-STAR", 1, true },
++#endif
+ 	// The Mode row steps FM, AM (where the radio receives it), DMR, P25, NXDN 4800, NXDN 9600. A DMR channel (3) goes on
+ 	// to P25 and NXDN; each keeps its own rows; saved, it is the stored channel in that mode
+ #if CONFIG_P25 && CONFIG_NXDN
