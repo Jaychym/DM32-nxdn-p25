@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <!-- Copyright (c) 2026 lyra XE1POC -->
 
-# D-STAR DV simplex on the DM-32UV
+# D-STAR DV on the DM-32UV
 
 Build with `python3 tools/build_current.py`. Pass `--no-dstar` to build without
 D-STAR. Use the radio name in Settings → My radio as the station's callsign
@@ -11,10 +11,23 @@ frequency and hold OK to save. The web Codeplug Editor shows D-STAR when
 the radio reports the feature. The channel tag stores the mode and the
 receive-only setting alongside the channel's standard frequencies.
 
-The outgoing header uses `CQCQCQ` for UR and `DIRECT` for RPT1/RPT2. The incoming
-source appears on the home screen after a valid header. The VFO and memory
-channels use simplex routing. Direct DV voice works in the host tests,
-including late entry when the header was missed.
+The incoming source appears on the home screen after a valid header. The VFO
+and channels with both repeater fields blank use direct routing. With URCALL
+blank, the radio sends `CQCQCQ`.
+
+## External hotspot
+
+Create a D-STAR memory in the web CPS with the hotspot's RF frequencies. For
+simplex hotspots, give the memory the same RX and TX frequency. Copy `RPT1` and
+`RPT2` from the D-Star section of the [WPSD dashboard](https://manual.wpsd.radio/modes/dstar/).
+For example, use `N0CALL B` for `RPT1` when the node uses module B and `N0CALL G`
+for `RPT2`. The CPS pads the callsigns so the module is in the eighth column.
+Use `CQCQCQ` for voice or enter `E` in URCALL for the node's echo command.
+The radio sends the repeater flag even on a zero-offset memory.
+
+The host regression decodes the routed header from the transmitted symbol
+stream, receives a reply with audio, and checks legacy direct channels. Check
+both directions with the physical hotspot before relying on the path.
 
 The default DM-32UV build omits the built-in HTTP status server and the DMR
 single-frequency repeater (SFR) to leave more main RAM free. CPS, APRS

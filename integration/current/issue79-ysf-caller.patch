@@ -1,0 +1,137 @@
+diff --git a/core/ui/ui_screens.c b/core/ui/ui_screens.c
+index 9c9a7d7..acfe5fd 100644
+--- a/core/ui/ui_screens.c
++++ b/core/ui/ui_screens.c
+@@ -2508,6 +2508,13 @@ static void sb_mdc_id(sbuf_t *b, uint32_t id)
+ }
+ #endif
+ 
++#if CONFIG_YSF
++static bool ysf_caller_visible(const radio_view_t *v)
++{
++	return v->ch.mode == RADIO_MODE_YSF && (v->ysf.flags & RADIO_YSF_RX) && v->ysf.src[0] != '\0';
++}
++#endif
++
+ static void draw_activity(const radio_view_t *v, const ui_state_t *s)
+ {
+ 	const ui_layout_t *L = &ui_layout;
+@@ -2526,6 +2533,14 @@ static void draw_activity(const radio_view_t *v, const ui_state_t *s)
+ 	bool meter = v->state == RS_RX || (v->state == RS_IDLE && v->monitor && v->ch.mode != RADIO_MODE_DMR);
+ 	switch (meter ? RS_RX : v->state) {
+ 	case RS_RX: {
++#if CONFIG_YSF
++		if (ysf_caller_visible(v)) {
++			gfx_text_fit(sm, v->ysf.src, w, fit, sizeof fit);
++			gfx_text(sm, 0, two ? y2 : y, fit, ui_col.rx);
++			if (!two)
++				break;
++		}
++#endif
+ #if CONFIG_AIR
+ 		air_call_t ac;
+ 		bool air_rx = air_call(v, &ac);
+@@ -2541,6 +2556,10 @@ static void draw_activity(const radio_view_t *v, const ui_state_t *s)
+ 		draw_meter(0, y + big->h / 4, w - tw - big->w, big->h / 2, v->rssi_dbm);
+ 		if (!two)
+ 			break;
++#if CONFIG_YSF
++		if (ysf_caller_visible(v))
++			break;
++#endif
+ #if CONFIG_AIR
+ 		if (air_rx) {
+ 			air_call_line(&ac, sm, y2);
+@@ -2727,6 +2746,11 @@ static void draw_home_large(const radio_view_t *v, const ui_state_t *s)
+ 	gfx_text(f, 0, y, fit, tx ? ui_col.tx : ui_col.fg);
+ 	y += room;
+ 	sb_init(&b, buf, sizeof buf);
++#if CONFIG_YSF
++	if (v->state == RS_RX && ysf_caller_visible(v))
++		sb_str(&b, v->ysf.src);
++	else
++#endif
+ #if CONFIG_DMR
+ 	if (v->ch.mode == RADIO_MODE_DMR && v->dmr.active) {
+ 		// The target with its name, or its short form when the whole doesn't fit even the medium font
+diff --git a/docs/spec/ysf.md b/docs/spec/ysf.md
+index 371d04e..b23aa29 100644
+--- a/docs/spec/ysf.md
++++ b/docs/spec/ysf.md
+@@ -81,6 +81,8 @@ error); weight 3 with odd parity is four errors and is rejected.
+ | DCH1 (V/D-1, Data FR, header, terminator) | 20 bytes | 45 bytes (360 bits) |
+ | DCH2 (DN) | 10 bytes | 25 bytes (200 bits) |
+ 
++Home displays the decoded source call sign during an active reception.
++
+ A header or terminator always carries two DCH1s (CSD1: destination, source,
+ downlink, uplink; CSD2: downlink, uplink, remote 1..4). A V/D-1 or DN
+ communication frame carries one DCH; a Data FR communication frame carries
+diff --git a/docs/user/07-channels-zones-vfo.md b/docs/user/07-channels-zones-vfo.md
+index fde34b7..323696d 100644
+--- a/docs/user/07-channels-zones-vfo.md
++++ b/docs/user/07-channels-zones-vfo.md
+@@ -416,6 +416,7 @@ is YSF (C4FM) conventional voice and data, Wide or Narrow deviation, through the
+ Host tested only: it has not been tried on air against a real YSF radio yet.
+ 
+ - It hears voice calls on every DG-ID, to every destination. Data calls are dropped for now.
++- Home shows the source call sign when it has been decoded during a YSF reception, including in Large Text.
+ - PTT sends a voice call to ALL with DG-ID 0 in V/D-1, Narrow deviation, from your source call sign (blank until set).
+ - Home shows "YSF", what PTT calls ("ALL") and the DG-ID and data type ("DG 0 V/D-1"). During a call it shows who
+   calls and where, or why the call isn't played. FM's tone and width tiles say "FM only: this is YSF".
+diff --git a/tests/host/sim/ui_sim.c b/tests/host/sim/ui_sim.c
+index cf8d04c..08e81d7 100644
+--- a/tests/host/sim/ui_sim.c
++++ b/tests/host/sim/ui_sim.c
+@@ -30,6 +30,7 @@
+ //   fmrx / fmrxend      an FM signal opens / closes the squelch
+ //   p25rx:<src>,<dst>[,u|e|o]   a P25 call (CONFIG_P25 builds): u a unit call, e encrypted, o another talk group
+ //                       (both not played); p25rxend ends it
++//   ysfrx:<call> / ysfrxend   start / end a YSF reception with a decoded source call sign
+ //   ysfdt:<dt>         configure the TX data type of the simulated YSF view
+ //   chkind:<n>,p25|nxdn stored channel n is a P25 or NXDN channel (CONFIG_P25 / CONFIG_NXDN builds)
+ //   p25t:<state>[,<tg>] the channel on view is a trunked P25 one (CONFIG_P25_TRUNK builds), its follower in state
+@@ -3444,6 +3445,19 @@ static bool run_token(char *t, char *err, size_t len)
+ 		return true;
+ 	}
+ #if CONFIG_YSF
++	if ((strcmp(t, "ysfrx") == 0 && arg != NULL) || strcmp(t, "ysfrxend") == 0) {
++		if (arg != NULL) {
++			view.state = RS_RX;
++			view.ysf.flags |= RADIO_YSF_RX;
++			snprintf(view.ysf.src, sizeof view.ysf.src, "%s", arg);
++		} else {
++			view.ysf.flags &= (uint8_t)~RADIO_YSF_RX;
++			view.state = RS_IDLE;
++		}
++		changed();
++		advance(100);
++		return true;
++	}
+ 	if (strcmp(t, "ysfdt") == 0 && arg != NULL) {
+ 		view.ysf.tx_dt = (uint8_t)strtoul(arg, NULL, 10);
+ 		changed();
+diff --git a/tests/host/uiFlowTest.c b/tests/host/uiFlowTest.c
+index c94068c..6701b13 100644
+--- a/tests/host/uiFlowTest.c
++++ b/tests/host/uiFlowTest.c
+@@ -76,6 +76,8 @@ static const flow_t flows[] = {
+ 	{ "NXDN Quick: TG", "dlmode:nxdn", "quick 8 2 0 ok", "screen=quick shows=TG airtalk=20 temporary=1", 5, false },
+ #endif
+ #if CONFIG_YSF
++	{ "YSF caller on Home", "dlmode:ysf ysfrx:K1ABC", "", "screen=home shows=K1ABC", 0, false },
++	{ "YSF call ended", "dlmode:ysf ysfrx:K1ABC", "ysfrxend", "screen=home hides=K1ABC", 0, false },
+ 	{ "YSF Quick: two-digit DG-ID 99", "dlmode:ysf", "quick 2 9 9 ok", "screen=quick shows=DG-ID aircode=99 temporary=1", 5, false },
+ 	{ "YSF Quick: DG-ID 00", "dlmode:ysf", "quick 2 0 0 ok", "screen=quick shows=00 aircode=0 temporary=1", 5, false },
+ 	{ "YSF Quick: destination", "dlmode:ysf", "quick 8 back back back back back back ok",
+@@ -424,6 +426,10 @@ static const flow_t flows[] = {
+ 	  "dual=1 sel=B entry=1465 showsraw=146.5__", 4, false },
+ 	{ "11 dual watch: B VFO shows a deleted digit", "quick 7 ctx 1 vfokey tune:a", "1 4 6 5 back",
+ 	  "dual=1 sel=B entry=146 showsraw=146.___", 5, false },
++#if CONFIG_YSF
++	{ "YSF caller on Large text Home", "ok 7 2 down down down down down ok long:back dlmode:ysf ysfrx:K1ABC", "",
++	  "screen=home shows=K1ABC", 0, false },
++#endif
+ 	{ "11 dual watch: Large text shows typed B VFO frequency", "ok 7 2 down down down down down ok long:back quick 7 ctx 1 vfokey",
+ 	  "1 4 6 5", "dual=1 sel=B entry=1465 showsraw=146.5__", 4, false },
+ 	// Up / Down with nothing to step to says why

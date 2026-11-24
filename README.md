@@ -7,7 +7,9 @@
 Unete a mi grupo de telegram <https://t.me/+fGNVb8mR-eliYmMx>
 
 Firmware abierto para el **Baofeng DM-32UV** con **DMR, P25, NXDN48, NXDN96, M17, YSF y D-STAR**.
-También incluye FM, AM de recepción y FM comercial. Desde el 17 de noviembre de 2026 se compila sobre
+También incluye FM y AM de recepción. La compilación incluye **66–88 MHz en FM estrecha de 12.5 kHz, solo
+recepción**, en lugar del sintonizador de FM comercial. Se puede sintonizar desde el VFO o guardar en una memoria.
+La sensibilidad en esta banda requiere pruebas en el DM-32UV. Desde el 17 de noviembre de 2026 se compila sobre
 [RadioFoundry](https://github.com/RadioFoundry/RadioFoundry) actual (commit `e89121e9`), que ya trae P25 y NXDN, más
 los cambios de esta rama en [`integration/current/base.patch`](integration/current/base.patch). Deriva de
 [Open25-DM32](https://github.com/tylerwatt12/Open25-DM32) (tylerwatt12). La mantiene **lyra XE1POC**.
@@ -87,6 +89,8 @@ Para cambiar el grupo sin editar el codeplug, abre **Menú rápido › TG** en e
 
 El importador de respaldos de fábrica requiere volver a cargar y asignar las claves manualmente. La ubicación de **Encryption ID** en el archivo `.data` sigue por confirmar. [Reporte de interoperabilidad y formato del respaldo](../../issues/42)
 
+En DMR, AES protege la voz. Los SMS/TMS y los datos LRRP se transmiten en claro. Los identificadores de origen y destino, incluido el grupo de conversación, y la posición enviada como GPS Info siguen visibles en la señalización. [Seguimiento del cifrado de datos](../../issues/70).
+
 ## Instalar
 
 **Seleccionar una clave AES-256 por canal.** Carga las claves en **Radio → Claves AES-256** del
@@ -110,8 +114,9 @@ En el VFO se puede elegir en **Menú rápido → Modo**. En el [CPS web](https:/
 abre un canal, elige **D-STAR** en **Modo** y escribe el codeplug. Para NXDN, la opción **Velocidad** del editor permite
 elegir 4800 o 9600 bit/s.
 
-Para D-STAR simplex, configura el indicativo en **Ajustes → Mi radio → Nombre de radio**.
-El firmware usa destino `CQCQCQ` y enrutamiento `DIRECT`. Consulta las [pruebas y el alcance](docs/dstar-experimental.md).
+Configura tu indicativo en **Ajustes → Mi radio → Nombre de radio**. Para un hotspot externo,
+configura `RPT1` y `RPT2` en el canal D-STAR del CPS. Si es simplex, pon la misma frecuencia en RX y TX.
+Consulta [cómo configurar D-STAR y probar el eco](docs/dstar-experimental.md#external-hotspot).
 
 ## Compilar
 
@@ -160,6 +165,8 @@ channels. M17 and D-STAR are experimental. The build includes AES-256 voice on D
 (`e89121e9`) plus `integration/current/*.patch`; the old patch series no longer builds. Quick Code/TG/Dest selectors cover P25, NXDN and YSF. YSF RX follows the received VW/AMBE data type and restores the configured TX voice path (host-tested); Pi-Star and on-radio confirmation remain open in #64. The dual-watch DMR row keeps the complete color code beside the PTT pill (RadioFoundry #856). Motorola-style talk permit tones. DMR PCM recovery after NXDN/FM/P25 is host-tested (`3f1c173`); hotspot wake-up and on-air confirmation remain open in #62. DSD+ decodes NXDN96 calls from this firmware (18 Nov: TG 91, RID 321, RAN 22). A talkgroup-less NXDN channel now transmits all-call (`e6c105f`). The 40 Hz NXDN TX pre-compensation (`d30230a`) has no equivalent in this build — NXDN TX goes through the HR_C7000 native 4FSK slot engine, not an audio path — so it was documented as not portable (`3e83541`), not ported. The current build supports P25 Phase 1 trunking TX. Reload AES keys when migrating from the older patch series. The pink theme is back as the Kawaii layer (`7c972f0`). Releases ship the image **without** the proprietary AMBE
 codec; the [web flasher](https://donttellmeimcute.github.io/dm32-web-cps-flasher/) takes it from your own radio.
 DMR AES-256 group calls were verified over the air in both directions with stock Baofeng DM-32UV firmware, on simplex and through a repeater. In Baofeng CPS, **Encryption ID** is the on-air key ID. Use that ID and the same full 32-byte key when entering the key manually in the web CPS. [Interoperability report](../../issues/42)
+
+DMR AES protects the voice payload. SMS/TMS and LRRP data are transmitted in the clear. Source and destination IDs, including the talkgroup, and location sent as GPS Info remain visible in DMR signaling. [Packet data encryption tracking](../../issues/70).
 
 GPL-3.0-or-later, RadioFoundry code MIT.
 

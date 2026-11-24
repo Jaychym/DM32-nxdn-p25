@@ -1,0 +1,410 @@
+diff --git a/core/debuglink/debuglink_view_air.c b/core/debuglink/debuglink_view_air.c
+index 307ab1a..b2a4da6 100644
+--- a/core/debuglink/debuglink_view_air.c
++++ b/core/debuglink/debuglink_view_air.c
+@@ -26,9 +26,15 @@ void debuglink_view_air(dl_text_t *t)
+ 	// The air interface provider's receive side in the open P25 / NXDN session (hal_air.h air_rx_counts_t):
+ 	// airp.open=0 while none is open or the provider doesn't count
+ 	if (board.air != NULL && board.air->rx_counts != NULL && board.air->rx_counts(&rc)) {
+-		dl_text(t, "airp.open=1\nairp.records=%u\nairp.synced=%u\nairp.halves=%u\nairp.overruns=%u\nairp.chunks=%u\n",
++		dl_text(t, "airp.open=1\nairp.records=%u\nairp.synced=%u\nairp.halves=%u\nairp.overruns=%u\nairp.chunks=%u\n"
++			"airp.copy_restarts=%u\n",
+ 			(unsigned)rc.records, (unsigned)rc.synced, (unsigned)rc.halves, (unsigned)rc.overruns,
+-			(unsigned)rc.chunks);
++			(unsigned)rc.chunks, (unsigned)rc.copy_restarts);
++		if (rc.lost_ms != 0) {
++			dl_text(t, "airp.copy_lost_ms=%u\nairp.copy_lost_regs=%x,%x,%x,%x\n", (unsigned)rc.lost_ms,
++				(unsigned)rc.lost_regs[0], (unsigned)rc.lost_regs[1], (unsigned)rc.lost_regs[2],
++				(unsigned)rc.lost_regs[3]);
++		}
+ 	} else {
+ 		dl_text(t, "airp.open=0\n");
+ 	}
+diff --git a/docs/spec/debuglink.md b/docs/spec/debuglink.md
+index d8ac0df..3741d6c 100644
+--- a/docs/spec/debuglink.md
++++ b/docs/spec/debuglink.md
+@@ -354,7 +354,7 @@ short. View 5: the `cps.*` and `cpsf.*` keys moved from `storage` to `cps` (27),
+ | 21 | `crash` | the crash log's record from before this start ([crash-log.md](crash-log.md) 3): `crash.built crash.valid`; when valid `crash.arch` (1 CM4, 2 CK803) `crash.kind` (1 fault, 2 stack overflow, 3 out of heap, 4 assert, 5 hang, 6 stall) `crash.cause crash.flags crash.count crash.pc crash.lr crash.sp crash.psr crash.status` (four words) `crash.task crash.uptime_ms crash.build` (the commit's first 8 hex digits, 00000000 unknown) `crash.r0` .. `crash.r13`, `crash.stack` (the 16 words at `sp`, comma separated hex) when the flags have bit 2, then `crash.tasks crash.tasks_more` and `crash.t0` .. for each other task `<name>,<where>` (4-letter name, a comma in it shown as `_`; `where` 8 hex digits, [crash-log.md](crash-log.md) 1.2). Built without the crash log: `crash.built=0` |
+ | 22 | `watchdog` | the hardware watchdog ([watchdog.md](watchdog.md)): `watchdog.built watchdog.timeout_ms` (the nominal timeout; 0 stopped or re-armed by a bench LOAD) `watchdog.feeds` (by the idle task since start) `watchdog.starving` `watchdog.idle_age_ms` (since the idle task last ran) `watchdog.max_gap_ms` (the longest the idle task stayed out since start or CLEAR_GAP) `watchdog.regs` (the platform's raw registers, comma separated hex: HR_C7000 LOCK, OT_LOAD_H, OT_LOAD_L, RST_LOAD, EN, KNOCK; STM32 IWDG PR, RLR, SR), and while a test starves it `watchdog.starved_ms` (since the feeds stopped). Built without the watchdog: `watchdog.built=0` |
+ | 23 | `reset` | why this start happened ([crash-log.md](crash-log.md) 1.3), with or without a crash record: `reset.built reset.cause` (`power software watchdog brownout pin warm unknown`) `reset.flags` (the chip's reset flags register as read, hex; 0 without one) `reset.uptime_ms` (the last run's uptime) `reset.warm` (starts since a power loss). Its own section because a full `crash` section comes close to a reply's size. Built without the crash log: `reset.built=0` |
+-| 24 | `air` | the air interface provider's receive side in an open P25 or NXDN session (`hal_air_t.rx_counts`): `airp.open` (0: no session, or the provider doesn't count) `airp.records` (receive records the chip gave) `airp.synced` (of those, with a sync detection) `airp.halves` (FM copy halves taken) `airp.overruns` (dropped: the task was behind) `airp.chunks` (handed to the framer); built without `CONFIG_AIR`: none of these; the data TX queue ([dmr-data.md](dmr-data.md) 12): `airq.built airq.depth` (packets queued, the one being sent included) `airq.bytes` (their octets with record headers and padding) `airq.high airq.high_bytes` (the most of each since start) `airq.capacity` (`CONFIG_DMR_AIR_QUEUE_BYTES`) `airq.queued airq.full` (refused: no room) `airq.sent airq.failed airq.gave_up` (the service never took it) `airq.aged` (queued too long) `airq.other` (no DMR ID, too long for a list, canceled) `airq.waits` (ticks the oldest packet waited for the service); `airq.chained` (packets that went in the transmission of the one before them); `data.tx_guarded` (lists held back by the guard) `data.tx_guard_ms data.tx_chain` (the spacing in force, op 11 of 3.12) `data.ip_cnf_rate` (`3/4`, `1/2` or `1`: op 12) `ip.chains` (transmissions with more than one IP packet) `ip.chained` (the packets after the first in them); zone sharing ([zone-share.md](zone-share.md)): `zs.built zs.offers` (0 off, 1 ask) `zs.send_state` (0 idle, 1 sending, 2 sent, 3 failed) `zs.offer_pending zs.offer_src zs.rx_messages zs.rx_bad zs.rx_busy zs.rx_off zs.offered zs.rate_limited zs.expired zs.sends zs.sent zs.send_failed zs.requests zs.refusals zs.last_refusal`. Built without the queue: `airq.built=0`; without zone sharing: `zs.built=0` |
++| 24 | `air` | the air interface provider's receive side in an open P25 or NXDN session (`hal_air_t.rx_counts`): `airp.open` (0: no session, or the provider doesn't count) `airp.records` (receive records the chip gave) `airp.synced` (of those, with a sync detection) `airp.halves` (FM copy halves taken) `airp.overruns` (dropped: the task was behind) `airp.chunks` (handed to the framer), `airp.copy_restarts` (HR_C7000 receive copy restarts), `airp.copy_lost_ms` and `airp.copy_lost_regs` (first restart and its interrupt-controller state); built without `CONFIG_AIR`: none of these; the data TX queue ([dmr-data.md](dmr-data.md) 12): `airq.built airq.depth` (packets queued, the one being sent included) `airq.bytes` (their octets with record headers and padding) `airq.high airq.high_bytes` (the most of each since start) `airq.capacity` (`CONFIG_DMR_AIR_QUEUE_BYTES`) `airq.queued airq.full` (refused: no room) `airq.sent airq.failed airq.gave_up` (the service never took it) `airq.aged` (queued too long) `airq.other` (no DMR ID, too long for a list, canceled) `airq.waits` (ticks the oldest packet waited for the service); `airq.chained` (packets that went in the transmission of the one before them); `data.tx_guarded` (lists held back by the guard) `data.tx_guard_ms data.tx_chain` (the spacing in force, op 11 of 3.12) `data.ip_cnf_rate` (`3/4`, `1/2` or `1`: op 12) `ip.chains` (transmissions with more than one IP packet) `ip.chained` (the packets after the first in them); zone sharing ([zone-share.md](zone-share.md)): `zs.built zs.offers` (0 off, 1 ask) `zs.send_state` (0 idle, 1 sending, 2 sent, 3 failed) `zs.offer_pending zs.offer_src zs.rx_messages zs.rx_bad zs.rx_busy zs.rx_off zs.offered zs.rate_limited zs.expired zs.sends zs.sent zs.send_failed zs.requests zs.refusals zs.last_refusal`. Built without the queue: `airq.built=0`; without zone sharing: `zs.built=0` |
+ | 25 | `net_svc` | the radio's UDP services on the USB network link: with mDNS `mdns.state mdns.name mdns.queries mdns.answered mdns.sent mdns.busy mdns.conflicts mdns.bad` (`mdns.md` 5), with TFTP `tftp.state tftp.reads tftp.writes tftp.errors tftp.timeouts tftp.retransmits tftp.last_size tftp.blksize tftp.write_allowed` (`tftp.md` 6); `net_svc.built=0` without either |
+ | 26 | `net_link` | the host link's MTUs ([usb-network.md](usb-network.md) 3.2), with the IP gateway: `net.mtu` (the link's, DHCP option 26) `net.air_mtu` (one transmission's) and the drops `net.air_too_big net.frag_needed net.up_too_big`; `CONFIG_NET_PPP` builds `ppp.running ppp.ip_up ppp.lcp ppp.ipcp` (RFC 1661 state numbers, 9 = opened) `ppp.rx_frames ppp.tx_frames ppp.rx_errors ppp.mru ppp.peer_mru` ([ppp.md](ppp.md)); `net_link.built=0` without either |
+ | 27 | `cps` | open-firmware CPS (`cps.built openfw_eeprom requests reads commits refused overflows last session pending junk reboots_ignored`; [settings-store.md](settings-store.md), [cps-protocol.md](cps-protocol.md)), with `CONFIG_CPS_FAST` the fast codeplug protocol (`cpsf.state read written commits refused`; [cps-fast.md](cps-fast.md)) |
+diff --git a/docs/spec/gotchas.md b/docs/spec/gotchas.md
+index b112e09..903170e 100644
+--- a/docs/spec/gotchas.md
++++ b/docs/spec/gotchas.md
+@@ -192,7 +192,11 @@ is unmasked, but a line still high after its request was taken never interrupts
+ and rises. A modem request whose cause stays set (the system interrupt handler stops after four passes with causes
+ still listed) leaves its source silent for good. A dead timeslot interrupt means no repeater wake-up is ever sent. Rule: drop every pending modem request at each receiver restart and after a stalled
+ transmission; drop a system request pending for 50 ms with no handler run; count both and keep the first one's PIC
+-state (`modem-hrc7000.md` 3.3). Radios: the HR_C7000 boards; one report.
++state (`modem-hrc7000.md` 3.3). An air session (P25, NXDN) halts the slot engine and that check with it, so a lost
++FM copy request there, or the modem's system source left masked at the PIC, leaves receive deaf until the session
++closes (suspected in #923; the masked source measured so, the lost request not reproduced): the session's poll sets
++the copy up again and unmasks the modem sources after 200 ms with no half (`airp.copy_restarts`, the first one's PIC
++words in `airp.copy_lost_regs`). Radios: the HR_C7000 boards; one report.
+ 
+ **2.10 A receiver restart in the middle of a burst.**
+ Symptom: a direct answer in the other timeslot, right after our terminator (30 ms after its start), was lost: decoded but with BS sync, its timeslot
+diff --git a/docs/spec/hardware-dm32.md b/docs/spec/hardware-dm32.md
+index f2d072a..1fb55a7 100644
+--- a/docs/spec/hardware-dm32.md
++++ b/docs/spec/hardware-dm32.md
+@@ -412,7 +412,9 @@ PIC_MASK_1 for v ≥ 64.
+ Level mode still acts on the line rising (measured with timer 6, source 6, through the debug link's SoC register
+ access, debuglink.md 3.24): a rise while the source is masked sets its INT_ST bit and is delivered when it is unmasked;
+ after the request is taken, a line still high does not interrupt again, unmasked and with the INT_ST bit still set,
+-until it falls and rises. A handler must clear its device's cause, or the source stays silent (gotchas 2.9).
++until it falls and rises. A handler must clear its device's cause, or the source stays silent (gotchas 2.9). Clearing the
++INT_ST bit while the source is masked does not drop a held rise: the request is still delivered at the unmask
++(measured on the modem's system source, 29). A source left masked stays silent.
+ 
+ Dispatch: all 64 user vectors (32–95) point at one common entry; it saves context, writes 0x04 to PIC_COW1, takes the
+ vector number from PSR bits 23:16, subtracts 32 and calls through a 64-entry software table.
+diff --git a/docs/spec/modem-hrc7000.md b/docs/spec/modem-hrc7000.md
+index 145edec..a9c1430 100644
+--- a/docs/spec/modem-hrc7000.md
++++ b/docs/spec/modem-hrc7000.md
+@@ -577,6 +577,7 @@ rising only (gotchas 2.9). TS and RF requests have no readable status, so the dr
+ | Every receiver restart (5.2: DMR entry, a color code or framing change, a stale or lost reception, the end of every transmission) | writes INTERP_CLEAR b0-b2 and writes SYS_INTERP_LIST back to SYS_INTERP_CLEAR. Not b3 (RF RX) or the PCM pair: other drivers own them |
+ | No timeslot interrupt for 200 ms while sending | the transmission ends (`dmr.tx_error=stalled`), and its receiver restart clears as above. Counted (`dmr.modem_stalls`) |
+ | A SYS_INTERP_LIST cause enabled in SYS_INTERP_MASK, pending at the 10 ms polls for 50 ms with no system interrupt taken | written back to SYS_INTERP_CLEAR. Counted (`dmr.modem_stuck`) |
++| An air session or tap receiving (10.1) with no FM copy half for 200 ms (one comes every 32 ms; a copy interrupt with FM_ADDR_SW naming neither half doesn't count, one that finds the ring full does). The halted engine's check above does not run then | SYS_INTERP_LIST written back to SYS_INTERP_CLEAR, the copy set up again and the modem sources unmasked. Counted (`airp.copy_restarts`); the first one's PIC words kept apart from the engine's (`airp.copy_lost_ms`, `airp.copy_lost_regs`) |
+ 
+ For the first stall or stuck request, the glue keeps PIC_MASK, PIC_MASK_1, PIC_INT_ST and PIC_INT_ST_1 as read before
+ that poll (`dmr.modem_lost_ms`, `dmr.modem_lost_regs`, [debuglink.md](debuglink.md) 3.7). It then unmasks the modem
+@@ -1053,7 +1054,7 @@ What a working DMR driver does that a first attempt tends to miss. Details are i
+ | 15 | Timeslot handler | run it from RAM so flash busy time adds no jitter |
+ | 16 | Calibration | SIG_CENTER and RF_MOD_BIAS_CTRL from factory data |
+ | 17 | Interrupt masking | PIC_MASK bits 29-31 and PIC_MASK_1 bit 0 (3.2) |
+-| 18 | Lost requests | clear every pending modem request at each receiver restart; drop a system request pending with no handler run (3.3) |
++| 18 | Lost requests | clear every pending modem request at each receiver restart; drop a system request pending with no handler run; in an air session, set the copy up again and unmask the modem sources after 200 ms with no half (3.3) |
+ 
+ ---
+ 
+@@ -1083,6 +1084,7 @@ output. Whether 4FSK reaches it whole (de-emphasis, the band's edges, the level)
+ | Save | SYS_INTERP_MASK, FM_BANDWIDTH, FM_DEV_COEF |
+ | Copy set-up | TXRX 0, SLOTON 0, LAYER2_CONTROL 0xC0, FM_PTT 0, AUDIO_CONTROL FM playback (b6) off, FM_BANDWIDTH 0x00 (band-pass off, 12.5 kHz), FM_DEV_COEF 0x40A25, WORK_MODE 0x80, SYS_INTERP_CLEAR and MASK = bit 14 + bit 12 |
+ | Each half | Bit 14: the half FM_ADDR_SW names into a 512-sample ring (two halves), stamped with the interrupt's time less 255 samples. A half that finds the ring full is dropped and the next one is flagged as a gap |
++| Watchdog | No half for 200 ms while receiving, not suspended: SYS_INTERP_LIST to SYS_INTERP_CLEAR, the copy set-up again, the next half a gap; the glue unmasks the modem sources (3.3, `airp.copy_restarts`) |
+ | Session | The modem task feeds each half to the soft modem (`core/air/air_softmodem.h`), resetting it at a flagged half; its chunks go out as `AIR_EV_RX` |
+ | Undo | Mask, band and coefficient back; TXRX 0, WORK_MODE 0x80 then 0x6E, LAYER2_CONTROL 0xC0, TXRX 0xC00000 then 0. A mode change before the undo leaves the band and coefficient to the next FM entry and puts back only the mask (only power-on writes it otherwise) |
+ 
+diff --git a/drivers/modem/hrc7000/hrc7000_air.c b/drivers/modem/hrc7000/hrc7000_air.c
+index a9407e0..136dd85 100644
+--- a/drivers/modem/hrc7000/hrc7000_air.c
++++ b/drivers/modem/hrc7000/hrc7000_air.c
+@@ -27,6 +27,7 @@
+ #define TX_AIR_DELAY_US		5000u	// a slot set up at a boundary goes on air about 5 ms later (2.10)
+ #define STALL_US		200000u
+ #define NO_KEY_US		200000u	// transmitting this long without an RF TX interrupt: dropped
++#define COPY_STALL_US		200000u	// receiving this long without a copy half (one every 32 ms): set up again
+ 
+ _Static_assert((HRC7000_AIR_RING % HALF) == 0 && HRC7000_AIR_RING / HALF == 2, "the ring is two copy halves");
+ 
+@@ -141,6 +142,7 @@ static AIR_ISR void copy_on(hrc7000_air_t *a)
+ 	w(a, C7_SYS_INTERP_CLEAR, C7_SYS_FM_RX | SYS_PHY_RDY);
+ 	w(a, C7_SYS_INTERP_MASK, C7_SYS_FM_RX | SYS_PHY_RDY);
+ 	a->gap = true;		// the next half does not follow what the ring holds
++	a->t_copy = now(a);
+ 	__atomic_thread_fence(__ATOMIC_RELEASE);
+ 	a->copy = true;
+ }
+@@ -180,6 +182,7 @@ static AIR_ISR void take_half(hrc7000_air_t *a, uint32_t t)
+ 	if (h - a->tail > HRC7000_AIR_RING - HALF) {
+ 		a->st.overruns++;
+ 		a->gap = true;		// the samples after the ring's are not the next ones
++		a->t_copy = t;		// a half came: the reader, not the copy, is behind (a tap nobody reads for a while)
+ 		return;
+ 	}
+ 	if (hrc7000_fm_rx_audio(a->dev, &a->buf->ring[h % HRC7000_AIR_RING]) == 0) {
+@@ -189,6 +192,7 @@ static AIR_ISR void take_half(hrc7000_air_t *a, uint32_t t)
+ 	a->t_half[(h / HALF) % 2u] = t - (HALF - 1u) * SAMPLE_US;
+ 	a->gap_half[(h / HALF) % 2u] = a->gap;	// the task's receiver starts over at this half
+ 	a->gap = false;
++	a->t_copy = t;		// a half taken holds the watchdog off; an interrupt with no half (no_half) does not
+ 	__atomic_thread_fence(__ATOMIC_RELEASE);
+ 	a->head = h + HALF;
+ 	a->st.halves++;
+@@ -587,6 +591,15 @@ void hrc7000_air_poll(hrc7000_air_t *a)
+ 			tx_stop(a, t, true);
+ 		}
+ 	}
++	// A copy request lost for good (modem-hrc7000.md 3.3): a request line still high after the interrupt took the
++	// request never interrupts again, and receive goes deaf. No half for 200 ms: the request cleared, the copy set up
++	// again. The halted slot engine's own check (dmr.modem_stuck) does not run in a session
++	if ((a->open || a->tap) && a->copy && a->tx == HRC7000_AIR_RX && !a->suspended &&
++	    (uint32_t)(now(a) - a->t_copy) > COPY_STALL_US) {
++		a->st.copy_restarts++;
++		w(a, C7_SYS_INTERP_CLEAR, r(a, C7_SYS_INTERP_LIST));
++		copy_on(a);
++	}
+ 	unlock(a);
+ 	if (a->open && !a->tap && (a->fit & AIR_FIT_RX) != 0) {
+ 		rx_samples(a);
+diff --git a/drivers/modem/hrc7000/hrc7000_air.h b/drivers/modem/hrc7000/hrc7000_air.h
+index 0dc6e47..e0f889f 100644
+--- a/drivers/modem/hrc7000/hrc7000_air.h
++++ b/drivers/modem/hrc7000/hrc7000_air.h
+@@ -67,6 +67,7 @@ typedef struct {
+ 	uint32_t tx_underruns;	// ... of those, idle for want of a chunk mid-transmission
+ 	uint32_t tx_done;
+ 	uint32_t stalls;	// no slot boundary for 200 ms while transmitting: dropped
++	uint32_t copy_restarts;	// no copy half for 200 ms while receiving: the copy set up again
+ 	uint32_t modem_us;	// time in the soft modem ...
+ 	uint32_t modem_span_us;	// ... for this much signal
+ } hrc7000_air_stats_t;
+@@ -93,6 +94,7 @@ typedef struct hrc7000_air {
+ 	uint32_t t_half[2];	// the time of each ring half's first sample
+ 	bool gap;		// the next half taken does not follow the ring's last (lost or a new set-up)
+ 	bool gap_half[2];	// ... per ring half as taken: the session's receiver starts over there
++	uint32_t t_copy;	// the last half that came (taken or dropped for a full ring) or the set-up: the watchdog's start
+ 
+ 	// The session
+ 	bool open;
+diff --git a/hal/hal_air.h b/hal/hal_air.h
+index 9cea0d9..455f9bf 100644
+--- a/hal/hal_air.h
++++ b/hal/hal_air.h
+@@ -131,6 +131,9 @@ typedef struct {
+ 	uint32_t halves;	// FM copy halves taken (a tap provider)
+ 	uint32_t overruns;	// ... dropped: the task was behind
+ 	uint32_t chunks;	// chunks handed to the framer (AIR_EV_RX)
++	uint32_t copy_restarts;	// the copy set up again after no half came for a while (a tap provider)
++	uint32_t lost_ms;	// ... the first since start-up: its uptime (0: none) and four words of the platform's interrupt
++	uint32_t lost_regs[4];	// controller just before the poll that found it, as the provider's source lists them
+ } air_rx_counts_t;
+ 
+ // A provider. One session at a time: open ... close. The core stops the board's DMR stack before open (the provider
+diff --git a/platform/hrc7000/dmr_glue.c b/platform/hrc7000/dmr_glue.c
+index bd2f1e9..7563d3c 100644
+--- a/platform/hrc7000/dmr_glue.c
++++ b/platform/hrc7000/dmr_glue.c
+@@ -223,6 +223,33 @@ HRC_FLASHFUNC static void lost_check(const uint32_t before[4])
+ 	hrc_irq_restore(s);
+ }
+ 
++#if CONFIG_AIR
++// The same for an air session or tap, kept apart from the engine's record: dmr.modem_stalls and dmr.modem_stuck count
++// the engine's recoveries only. The air poll set the copy up again (no half for 200 ms, modem-hrc7000.md 3.3): keep the
++// first one's PIC words, and unmask the modem sources again, in case a mask left set and not the chip stopped the halves
++static uint32_t air_lost_seen;	// copy_restarts at the last check (the session's count: 0 again at each take)
++static uint32_t air_lost_ms;
++static uint32_t air_lost_regs[4];
++
++HRC_FLASHFUNC static void air_lost_check(const uint32_t before[4])
++{
++	uint32_t n = AIR->st.copy_restarts;
++	if (n == air_lost_seen) {
++		return;
++	}
++	air_lost_seen = n;
++	if (air_lost_ms == 0) {
++		memcpy(air_lost_regs, before, sizeof air_lost_regs);
++		air_lost_ms = hal_millis() | 1u;
++	}
++	uint32_t s = hrc_irq_save();
++	if (active && lock_depth == 0) {
++		irqs_enable(true);
++	}
++	hrc_irq_restore(s);
++}
++#endif
++
+ HRC_FLASHFUNC static void health(dmr_modem_health_t *h)
+ {
+ 	h->stalls = eng.st.stalls;
+@@ -248,7 +275,10 @@ HRC_FLASHFUNC static void dmr_task(void *arg)
+ 		}
+ #if CONFIG_AIR
+ 		if (air_on) {
++			uint32_t pic[4];
++			pic_words(pic);
+ 			hrc7000_air_poll(AIR);	// the engine is halted, and its queue is the session's memory
++			air_lost_check(pic);
+ 			continue;
+ 		}
+ #endif
+@@ -521,6 +551,7 @@ HRC_FLASHFUNC static bool air_take(void)
+ 	hrc7000_dmr_halt(&eng);
+ 	lock(NULL);
+ 	eng.evq_tail = eng.evq_head;	// what the engine left is dropped
++	air_lost_seen = 0;		// the session's stats start at 0
+ 	hrc7000_air_init(AIR, eng.dev, &ops, &((air_mem_t *)(void *)eng.evq)->b, AIR_SM);
+ 	return true;	// locked
+ }
+@@ -619,7 +650,9 @@ static bool air_rx_counts(air_rx_counts_t *c)
+ 	if (!air_on) {
+ 		return false;
+ 	}
+-	*c = (air_rx_counts_t){ .halves = AIR->st.halves, .overruns = AIR->st.overruns, .chunks = AIR->st.chunks };
++	*c = (air_rx_counts_t){ .halves = AIR->st.halves, .overruns = AIR->st.overruns, .chunks = AIR->st.chunks,
++				.copy_restarts = AIR->st.copy_restarts, .lost_ms = air_lost_ms };
++	memcpy(c->lost_regs, air_lost_regs, sizeof c->lost_regs);
+ 	return true;
+ }
+ 
+@@ -688,6 +721,10 @@ HRC_FLASHFUNC void hrc_dmr_stats_reset(void)
+ 	lost_seen = 0;	// the loss record goes with its counters: health() would show a first loss from before the reset
+ 	lost_ms = 0;
+ 	memset(lost_regs, 0, sizeof lost_regs);
++#if CONFIG_AIR
++	air_lost_ms = 0;
++	memset(air_lost_regs, 0, sizeof air_lost_regs);
++#endif
+ 	unlock(NULL);
+ 	hrc_audio_pcm_gate_reset();	// its line is one of ours
+ }
+diff --git a/tests/host/hrc7000AirTest.c b/tests/host/hrc7000AirTest.c
+index 7f5dee4..8b53de1 100644
+--- a/tests/host/hrc7000AirTest.c
++++ b/tests/host/hrc7000AirTest.c
+@@ -3,9 +3,10 @@
+ // HR_C7000 air interface provider and receive tap (drivers/modem/hrc7000/hrc7000_air.c; docs/spec/modem-hrc7000.md 10)
+ // on plain arrays standing in for the modem registers and buffers, with a stub soft modem that records what it is fed:
+ // the copy set-up and its undoing, every sample once and in order from the interrupt to the tap and the soft modem,
+-// time stamps, overrun and the receiver's restart at the gap, transmit halves per slot boundary with no stale half,
+-// idle on underrun, last-chunk padding, the modulation bytes set and put back, abort, the watchdog, suspend / resume,
+-// open / close / open, the DMR engine on the same memory after close, and a seeded fuzz of interrupt and task order.
++// time stamps, overrun and the receiver's restart at the gap, the copy set up again after a lost request, transmit
++// halves per slot boundary with no stale half, idle on underrun, last-chunk padding, the modulation bytes set and put
++// back, abort, the watchdog, suspend / resume, open / close / open, the DMR engine on the same memory after close, and
++// a seeded fuzz of interrupt and task order.
+ #include <stdio.h>
+ #include <string.h>
+ #include "modem/hrc7000/hrc7000_air.h"
+@@ -613,6 +614,122 @@ static void test_abort_watchdog_suspend(void)
+ 	CHECK(dmr_set_up() && lock_depth == 0);
+ }
+ 
++// A copy request lost for good (modem-hrc7000.md 3.3): the line stays high and no half ever comes. After 200 ms with no
++// half the poll clears the request, sets the copy up again and counts it; receive goes on at a gap. Not while halves
++// come, while transmitting (no copy), suspended or closed
++static void test_copy_watchdog(void)
++{
++	setup();
++	CHECK(hrc7000_air_open(A, &prof, AIR_FIT_RX | AIR_FIT_TX, on_event, NULL));
++	for (int k = 0; k < 20; k++) {
++		copy_half();
++		now += 5000;
++		hrc7000_air_poll(A);
++	}
++	CHECK(A->st.copy_restarts == 0 && ngot == 20 * HALF && nresets == 1);
++
++	// The request taken but its line left high: no interrupt from here on
++	REG(C7_SYS_INTERP_LIST) = C7_SYS_FM_RX;
++	REG(C7_WORK_MODE) = 0x55;	// to see the set-up written again
++	now += 199000 - 5000;
++	hrc7000_air_poll(A);
++	CHECK(A->st.copy_restarts == 0 && REG(C7_WORK_MODE) == 0x55);
++	now += 2000;
++	hrc7000_air_poll(A);
++	CHECK(A->st.copy_restarts == 1 && copy_set_up() && REG(C7_SYS_INTERP_CLEAR) == (C7_SYS_FM_RX | PHY_RDY));
++	CHECK(lock_depth == 0 && lock_max == 1);
++	hrc7000_air_poll(A);
++	CHECK(A->st.copy_restarts == 1);	// the timer starts over at the set-up
++	REG(C7_SYS_INTERP_LIST) = 0;
++
++	// Receive back: the next half starts the receiver over
++	int resets = nresets, got_before = ngot;
++	for (int k = 0; k < 10; k++) {
++		copy_half();
++		hrc7000_air_poll(A);
++	}
++	CHECK(ngot == got_before + 10 * (int)HALF && nresets == resets + 1 && reset_at[resets] == got_before);
++	CHECK(A->st.copy_restarts == 1 && bad_times == 0);
++
++	// Copy interrupts that yield no half (FM_ADDR_SW naming neither): no proof of receive, so the watchdog still fires
++	uint32_t no_half = A->st.no_half, halves = A->st.halves;
++	for (int k = 0; k < 6; k++) {
++		now += 32000;
++		REG(C7_FM_ADDR_SW) = 0;
++		REG(C7_SYS_INTERP_LIST) = C7_SYS_FM_RX;
++		hrc7000_air_isr_sys(A);
++		REG(C7_SYS_INTERP_LIST) = 0;
++		hrc7000_air_poll(A);
++		CHECK(A->st.copy_restarts == 1);	// 192 ms since the last half
++	}
++	now += 32000;
++	REG(C7_SYS_INTERP_LIST) = C7_SYS_FM_RX;
++	hrc7000_air_isr_sys(A);
++	REG(C7_SYS_INTERP_LIST) = 0;
++	hrc7000_air_poll(A);
++	CHECK(A->st.no_half == no_half + 7 && A->st.halves == halves && A->st.copy_restarts == 2 && copy_set_up());
++	got_before = ngot;
++	resets = nresets;
++	copy_half();
++	hrc7000_air_poll(A);
++	CHECK(ngot == got_before + (int)HALF && nresets == resets + 1 && A->st.copy_restarts == 2);
++
++	// The task behind (ring full): halves still come, only dropped, so no restart
++	for (int k = 0; k < 10; k++) {
++		copy_half();
++	}
++	hrc7000_air_poll(A);
++	CHECK(A->st.overruns > 0 && A->st.copy_restarts == 2);
++
++	// Transmitting: no copy, so nothing to watch, the slots keep the TX alive
++	air_tx_chunk_t c0 = chunk(0, 144, 0);
++	CHECK(hrc7000_air_tx_queue(A, &c0) && hrc7000_air_tx_begin(A));
++	hrc7000_air_isr_rftx(A);
++	for (int k = 0; k < 12; k++) {
++		slot();
++		if (hrc7000_air_tx_space(A) > 0) {
++			hrc7000_air_tx_queue(A, &c0);
++		}
++		hrc7000_air_poll(A);
++	}
++	CHECK(hrc7000_air_tx_active(A) && A->st.copy_restarts == 2 && A->st.stalls == 0);
++	hrc7000_air_tx_abort(A);
++	CHECK(copy_set_up());
++	hrc7000_air_poll(A);
++	CHECK(A->st.copy_restarts == 2);
++
++	// Suspended: the chip is not in the copy
++	hrc7000_air_suspend(A);
++	REG(C7_WORK_MODE) = 0x55;
++	now += 1000000;
++	hrc7000_air_poll(A);
++	CHECK(A->st.copy_restarts == 2 && REG(C7_WORK_MODE) == 0x55);
++	hrc7000_air_resume(A);
++	now += 150000;
++	hrc7000_air_poll(A);
++	CHECK(A->st.copy_restarts == 2);
++	copy_half();
++	hrc7000_air_poll(A);
++	CHECK(A->st.copy_restarts == 2);
++
++	// Closed: nothing
++	hrc7000_air_close(A, true);
++	now += 1000000;
++	hrc7000_air_poll(A);
++	CHECK(dmr_set_up() && A->st.copy_restarts == 2);
++
++	// The tap too (the glue polls it the same way)
++	CHECK(hrc7000_air_tap_start(A));
++	now += 201000;
++	hrc7000_air_poll(A);
++	CHECK(A->st.copy_restarts == 1 && copy_set_up());
++	copy_half();
++	int16_t tb[HALF];
++	CHECK(hrc7000_air_tap_read(A, tb, HALF) == HALF);
++	hrc7000_air_tap_stop(A);
++	CHECK(dmr_set_up() && lock_depth == 0);
++}
++
+ // Close mid-transmission, open again, then the DMR engine on the same memory
+ static void test_open_close_dmr(void)
+ {
+@@ -759,6 +876,7 @@ int main(void)
+ 	test_tx();
+ 	test_underrun_and_end();
+ 	test_abort_watchdog_suspend();
++	test_copy_watchdog();
+ 	test_open_close_dmr();
+ 	test_fuzz();
+ 	printf("hrc7000AirTest: %d checks, %d failures\n", checks, failures);

@@ -14,6 +14,8 @@
 #define DSTAR_FRAME_BYTES (DSTAR_VOICE_BYTES + DSTAR_SLOW_DATA_BYTES)
 #define DSTAR_SUPERFRAME_FRAMES 21
 
+#define DSTAR_FLAG_REPEATER 0x40u
+
 // Raw header: three flag bytes, RPT2, RPT1, UR, MY, and the four-byte MY suffix.
 typedef struct {
 	uint8_t flags[3];

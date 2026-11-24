@@ -65,20 +65,41 @@ jobs:
       - name: Build firmware
         run: python3 tools/build_current.py --jobs 4
 
-      - name: Check AES voice, DMR, P25, NXDN, YSF and M17
+      - name: Check digital voice and the MMDVM modem interface
         run: |
           set -eu
           T=build/current/tests/host
-          tests="radioFeaturesTest radioCoreTestNxdn radioListenBandsTest aprsRadioTest rda5807mTest voiceCipherTest dmrAesTest dmrPrivacyTest dmrCallTest dmrCallTestAes hrc7000DmrTest p25Test p25EngineTest p25EngineTestAes p25VoiceTest
+          tests="radioFeaturesTest radioCoreTestNxdn radioListenBandsTest aprsRadioTest rda5807mTest voiceCipherTest dmrAesTest dmrPrivacyTest dmrCallTest dmrCallTestAes hrc7000DmrTest hrc7000AirTest p25Test p25EngineTest p25EngineTestAes p25VoiceTest
             nxdnTest nxdnEngineTest nxdnEngineTestAes aesTest ysfTest ysfEngineTest radioCoreTestYsf
-            radioCoreTestP25Nxdn radioCoreTestAirInterop fd6818Test m17Test m17VoiceTest radioCoreTestM17 codeplugEditTest codeplugTagTest settingsTest uiFlowTest"
+            radioCoreTestP25Nxdn radioCoreTestAirInterop fd6818Test m17Test m17VoiceTest radioCoreTestM17 radioCoreTestDstar
+            mmdvmTest codeplugEditTest codeplugEditTestDstar codeplugTagTest settingsTest uiFlowTest uiFlowTestReplay"
           make -C "$T" -j4 $tests
           for t in $tests; do
             (cd "$T" && ./"$t")
           done
 
-      - name: Check channel privacy selection in the CPS
-        run: node --test build/current/site/tests/channel-aes.test.mjs build/current/site/tests/bootimage.test.mjs
+      - name: Decode current NXDN48 TX with MMDVMHost
+        run: |
+          set -eu
+          capture="$RUNNER_TEMP/nxdn48-capture"
+          modem="$RUNNER_TEMP/mmdvmhost"
+          mkdir -p "$capture"
+          (cd build/current/tests/host && ./radioCoreTestAirInterop "$capture")
+          git init -q "$modem"
+          git -C "$modem" fetch -q --depth=1 https://github.com/g4klx/MMDVMHost.git 6ffa6d354a2c185316201c27c831c766a25a5653
+          git -C "$modem" checkout -q --detach FETCH_HEAD
+          c++ -std=c++17 -O2 -I"$modem" "$modem"/{NXDNLICH,NXDNSACCH,NXDNFACCH1,NXDNConvolution,NXDNCRC}.cpp \
+            tests/nxdn/stubs/utils_count.cc tests/nxdn/test_nxdn_current_mmdvm.cc -o "$capture/nxdn-mmdvm"
+          "$capture/nxdn-mmdvm" "$capture/nxdn48.bin"
+
+      - name: Check channel modes, privacy and boot images in the CPS
+        run: |
+          set -eu
+          export RFOUNDRY_SITE_FIXTURES="$RUNNER_TEMP/cps-fixtures"
+          mkdir -p "$RFOUNDRY_SITE_FIXTURES"
+          make -C build/current/tests/host cpsSim
+          build/current/tests/host/cpsSim --populate --dump "$RFOUNDRY_SITE_FIXTURES/codeplug_sim.bin" </dev/null
+          node --test build/current/site/tests/{modes,csv,channel-aes,bootimage}.test.mjs
 
       - name: Check the P25 and NXDN bench tools
         run: |
@@ -114,7 +135,9 @@ jobs:
               raise SystemExit("release manifest does not match the M17/MDC1200 build configuration")
           if "AIR_RAW" in enabled or "AIR_RAW" not in disabled:
               raise SystemExit("release manifest unexpectedly enables AIR_RAW")
-          print("Manifest features verified: M17=y MDC1200=y AIR_RAW=n")
+          if "BCAST_FM" in enabled or "BCAST_FM" not in disabled:
+              raise SystemExit("release manifest unexpectedly enables broadcast FM")
+          print("Manifest features verified: M17=y MDC1200=y AIR_RAW=n BCAST_FM=n")
           PY
           ls -l dist
           cat dist/SHA256SUMS
