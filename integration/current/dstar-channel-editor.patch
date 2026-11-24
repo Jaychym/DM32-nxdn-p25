@@ -1,0 +1,514 @@
+diff --git a/core/ui/lang/es.po b/core/ui/lang/es.po
+--- a/core/ui/lang/es.po
++++ b/core/ui/lang/es.po
+@@ -2408,6 +2408,11 @@
+ msgstr "Banda solo RX: usa FM"
+ 
+ #: core/ui/ui_menus.c
++msgctxt "CHAN_WHY_DSTAR_ROUTE"
++msgid "Check URCALL, RPT1 and RPT2"
++msgstr "Revisa URCALL, RPT1 y RPT2"
++
++#: core/ui/ui_menus.c
+ msgctxt "CHAN_WHY_PICK_TX_CONTACT"
+ msgid "Pick a TX contact first"
+ msgstr "Elige antes un contacto TX"
+diff --git a/core/ui/lang/fr.po b/core/ui/lang/fr.po
+--- a/core/ui/lang/fr.po
++++ b/core/ui/lang/fr.po
+@@ -2408,6 +2408,11 @@
+ msgstr "Bande RX seule: FM"
+ 
+ #: core/ui/ui_menus.c
++msgctxt "CHAN_WHY_DSTAR_ROUTE"
++msgid "Check URCALL, RPT1 and RPT2"
++msgstr "Vérifiez URCALL, RPT1 et RPT2"
++
++#: core/ui/ui_menus.c
+ msgctxt "CHAN_WHY_PICK_TX_CONTACT"
+ msgid "Pick a TX contact first"
+ msgstr "Choisir contact TX"
+diff --git a/core/ui/lang/it.po b/core/ui/lang/it.po
+--- a/core/ui/lang/it.po
++++ b/core/ui/lang/it.po
+@@ -2408,6 +2408,11 @@
+ msgstr "Banda solo RX: metti FM"
+ 
+ #: core/ui/ui_menus.c
++msgctxt "CHAN_WHY_DSTAR_ROUTE"
++msgid "Check URCALL, RPT1 and RPT2"
++msgstr "Controlla URCALL, RPT1 e RPT2"
++
++#: core/ui/ui_menus.c
+ msgctxt "CHAN_WHY_PICK_TX_CONTACT"
+ msgid "Pick a TX contact first"
+ msgstr "Scegli prima un contatto TX"
+diff --git a/core/ui/lang/zh.po b/core/ui/lang/zh.po
+--- a/core/ui/lang/zh.po
++++ b/core/ui/lang/zh.po
+@@ -2410,6 +2410,11 @@
+ msgstr "仅收频段：请设 FM"
+ 
+ #: core/ui/ui_menus.c
++msgctxt "CHAN_WHY_DSTAR_ROUTE"
++msgid "Check URCALL, RPT1 and RPT2"
++msgstr "检查 URCALL、RPT1 和 RPT2"
++
++#: core/ui/ui_menus.c
+ msgctxt "CHAN_WHY_PICK_TX_CONTACT"
+ msgid "Pick a TX contact first"
+ msgstr "请先选发射联系人"
+diff --git a/core/ui/ui_menus.c b/core/ui/ui_menus.c
+--- a/core/ui/ui_menus.c
++++ b/core/ui/ui_menus.c
+@@ -2546,7 +2546,8 @@
+ // ======================= One channel's settings, edited in place (ui.md 2.1) =======================
+ // Without CONFIG_CHANNEL_EDIT the rows are read only and OK goes to the channel
+ 
+-enum { CE_NAME, CE_NUMBER, CE_MODE, CE_CODE, CE_RATE, CE_DEST, CE_TRUNK, CE_RX, CE_TX, CE_POWER, CE_RX_ONLY, CE_BW, CE_RX_TONE, CE_TX_TONE, CE_VOX,
++enum { CE_NAME, CE_NUMBER, CE_MODE, CE_CODE, CE_RATE, CE_DEST, CE_TRUNK, CE_URCALL, CE_RPT1, CE_RPT2,
++       CE_RX, CE_TX, CE_POWER, CE_RX_ONLY, CE_BW, CE_RX_TONE, CE_TX_TONE, CE_VOX,
+        CE_BURST,
+        CE_ANI, CE_ANI_SEND, CE_ANI_ID, CE_ANI_DECODE,	// an FM channel's signaling ID (MDC-1200): its type, when it is sent, the ID, decode
+        CE_CC, CE_TS, CE_CONTACT, CE_LIST, CE_ID, CE_DMO, CE_BEEP, CE_ALIAS1, CE_ALIAS2, CE_TOT, CE_SCAN, CE_ECO,
+@@ -2558,8 +2559,8 @@
+ #if CONFIG_CHANNEL_EDIT
+ static uint16_t ced_src;		// the stored channel it was read from (a copy's source), 0 = none (the VFO)
+ #endif
+-#if CONFIG_P25 || CONFIG_NXDN || CONFIG_YSF
+-static ui_air_conv_t ced_air;		// a P25, NXDN or YSF channel's own settings, read once on entry (the list redraws often)
++#if CONFIG_P25 || CONFIG_NXDN || CONFIG_YSF || CONFIG_DSTAR
++static ui_air_conv_t ced_air;		// the channel's air mode settings, read once on entry
+ #if CONFIG_CHANNEL_EDIT
+ static ui_air_conv_t ced_air_orig;	// as stored
+ #endif
+@@ -2679,11 +2680,17 @@
+ 	[CE_SCAN] = CE_FIELD(scan_skip), [CE_ECO] = CE_FIELD(no_eco),
+ };
+ 
+-#if CONFIG_P25 || CONFIG_NXDN || CONFIG_YSF
++#if CONFIG_P25 || CONFIG_NXDN || CONFIG_YSF || CONFIG_DSTAR
+ // The NAC, RAN or DG-ID row (CE_CODE), the rate's or data type's (CE_RATE), and the destination's (CE_DEST): what the block holds for them
+ static bool ced_air_changed(uint8_t r)
+ {
+ 	const ui_air_conv_t *a = &ced_air, *b = &ced_air_orig;
++#if CONFIG_DSTAR
++	if (ced_is_dstar(&ced_ch) && r >= CE_URCALL && r <= CE_RPT2) {
++		uint8_t i = r - CE_URCALL;
++		return strcmp(a->dstar.call[i], ced_is_dstar(&ced_orig) ? b->dstar.call[i] : "") != 0;
++	}
++#endif
+ #if CONFIG_P25
+ 	if (ced_is_p25(&ced_ch))
+ 		return r == CE_AES ? a->p25.aes != b->p25.aes || a->p25.kid != b->p25.kid :
+@@ -2728,8 +2735,9 @@
+ 	}
+ 	if (r >= CE_ZONES)
+ 		return false;
+-#if CONFIG_P25 || CONFIG_NXDN || CONFIG_YSF
++#if CONFIG_P25 || CONFIG_NXDN || CONFIG_YSF || CONFIG_DSTAR
+ 	if (r == CE_CODE || r == CE_RATE || r == CE_DEST || r == CE_TRUNK || r == CE_NXDN_SCRAMBLER ||
++	    (r >= CE_URCALL && r <= CE_RPT2) ||
+ 	    (r == CE_AES && (ced_is_p25(&ced_ch) || ced_is_nxdn(&ced_ch))))
+ 		return ced_air_changed(r);
+ #endif
+@@ -2793,9 +2801,11 @@
+ // plain channel in P25, NXDN or YSF, the radio's settings from its view
+ static void ced_air_read(uint16_t number, const channel_t *ch)
+ {
+-#if CONFIG_P25 || CONFIG_NXDN || CONFIG_YSF
++#if CONFIG_P25 || CONFIG_NXDN || CONFIG_YSF || CONFIG_DSTAR
++#if CONFIG_P25 || CONFIG_NXDN || CONFIG_YSF || CONFIG_M17
+ 	const radio_view_t *v = ui_view();
+ 	bool here = ch->kind == CODEPLUG_KIND_NONE && (v->vfo ? number == 0 : v->channel_number == number);
++#endif
+ 	memset(&ced_air, 0, sizeof ced_air);
+ #if CONFIG_P25
+ 	if (ced_is_p25(ch)) {
+@@ -2872,6 +2882,10 @@
+ 		}
+ 	}
+ #endif
++#if CONFIG_DSTAR
++	if (ced_is_dstar(ch))
++		dstar_channel_read(number, ch, &ced_air.dstar);
++#endif
+ #if CONFIG_CHANNEL_EDIT
+ 	ced_air_orig = ced_air;
+ #endif
+@@ -2978,6 +2992,10 @@
+ // was one of that mode when opened, else from the defaults
+ static void ced_cm_set(channel_t *c, uint8_t m)
+ {
++#if CONFIG_DSTAR
++	if (m == CM_DSTAR && !ced_is_dstar(c))
++		ced_air.dstar = ced_is_dstar(&ced_orig) ? ced_air_orig.dstar : (dstar_route_t){0};
++#endif
+ #if CONFIG_NXDN
+ 	if (m == CM_NXDN_4800 || m == CM_NXDN_9600) {
+ 		if (!ced_is_nxdn(c)) {
+@@ -3142,7 +3160,9 @@
+ 		bool tone = r == CE_RX_TONE || r == CE_TX_TONE;
+ 		// P25, NXDN and YSF: no sub-audio tones or width; of the digital rows the talk target and unit ID, P25's
+ 		// talkaround; the NAC, RAN or DG-ID, NXDN's rate, YSF's data type and destination
+-		// M17: its CAN and destination. D-STAR simplex has no per-mode fields.
++		// M17: its CAN and destination. D-STAR: callsign routing on the channel being edited.
++		if (r >= CE_URCALL && r <= CE_RPT2 && (!dstar || into))
++			continue;
+ 		bool air_row = air && !dstar && ((!m17 && ((r == CE_CONTACT && CONFIG_DMR) || r == CE_ID)) || (r == CE_DMO && p25) ||
+ 				       (r == CE_CODE && !into) || (r == CE_RATE && (nxdn || ysf) && !into) ||
+ 				       (r == CE_DEST && (ysf || m17) && !into) || (r == CE_TRUNK && nxdn && !into));
+@@ -3376,7 +3396,9 @@
+ {
+ 	static const tr_id_t labels[CE_COUNT] = { TRN(LABEL_NAME, "Name"), TRN(CHAN_LABEL_NUMBER, "Number"),
+ 		TRN(LABEL_MODE, "Mode"), TRX(CHAN_LABEL_NAC, "NAC"), TRN(CHAN_LABEL_RATE, "Rate"),
+-		TRN(CHAN_LABEL_DEST, "Destination"), TRN(CHAN_LABEL_TRUNK, "Trunk"), TRX(CHAN_LABEL_RX, "RX"), TRX(CHAN_LABEL_TX, "TX"), TRN(LABEL_POWER, "Power"),
++		TRN(CHAN_LABEL_DEST, "Destination"), TRN(CHAN_LABEL_TRUNK, "Trunk"),
++		TRX(CHAN_LABEL_URCALL, "URCALL"), TRX(CHAN_LABEL_RPT1, "RPT1"), TRX(CHAN_LABEL_RPT2, "RPT2"),
++		TRX(CHAN_LABEL_RX, "RX"), TRX(CHAN_LABEL_TX, "TX"), TRN(LABEL_POWER, "Power"),
+ 		TRN(WORD_RX_ONLY, "RX only"), TRN(CHAN_LABEL_BANDWIDTH, "Bandwidth"),
+ 		TRN(CHAN_LABEL_RX_TONE, "RX CTCSS/DCS"), TRN(CHAN_LABEL_TX_TONE, "TX CTCSS/DCS"), TRX(WORD_VOX, "VOX"),
+ 		TRN(WORD_TONE_BURST, "Tone burst"),
+@@ -3437,6 +3459,17 @@
+ 	case CE_NUMBER:
+ 		sb_u32(&b, ced_num, 1);
+ 		break;
++#if CONFIG_DSTAR
++	case CE_URCALL:
++	case CE_RPT1:
++	case CE_RPT2: {
++		const char *call = ced_air.dstar.call[r - CE_URCALL];
++		while (*call == ' ')
++			call++;
++		sb_str(&b, *call ? call : r == CE_URCALL ? "CQCQCQ" : "DIRECT");
++		break;
++	}
++#endif
+ 	case CE_MODE:
+ 		// What the radio does with it: a listen band is AM or FM whatever the channel says
+ 		if (ced_is_p25(ch))
+@@ -3707,6 +3740,13 @@
+ static bool discard_kind;	// ... or before a save that takes a stored channel's own mode away (its tag)
+ static bool ced_drop_ok;	// the answer was yes
+ 
++#if CONFIG_DSTAR
++static bool ced_dstar_route_changed(void)
++{
++	return ced_air_changed(CE_URCALL) || ced_air_changed(CE_RPT1) || ced_air_changed(CE_RPT2);
++}
++#endif
++
+ // The first problem that keeps the copy from being saved, as a toast; NULL when it can be saved
+ static const char *ced_problem(void)
+ {
+@@ -3719,9 +3759,17 @@
+ 		return TR(CHAN_WHY_TX_NOT_ALLOWED, "TX can't transmit there: set RX only");
+ 	if (CONFIG_DMR && c->mode == RADIO_MODE_DMR && radio_listen_band(c->rx_hz))
+ 		return TR(CHAN_WHY_RX_ONLY_BAND_SET_FM, "Receive only band: set FM");
++#if CONFIG_DSTAR
++	if (ced_is_dstar(c) && ced_dstar_route_changed()) {
++		uint8_t packed[DSTAR_ROUTE_BYTES];
++		if (!dstar_route_pack(&ced_air.dstar, packed))
++			return TR(CHAN_WHY_DSTAR_ROUTE, "Check URCALL, RPT1 and RPT2");
++	}
++#endif
+ 	// The contact is whom PTT calls, so a channel that never transmits needs none
+ 	// (P25 and NXDN: none is talk group 1)
+-	if (CONFIG_DMR && c->mode == RADIO_MODE_DMR && !c->rx_only && c->contact == 0 && !ced_is_p25(c) && !ced_is_nxdn(c))
++	if (CONFIG_DMR && c->mode == RADIO_MODE_DMR && !c->rx_only && c->contact == 0 && !ced_is_p25(c) && !ced_is_nxdn(c) &&
++	    !ced_is_dstar(c))
+ 		return TR(CHAN_WHY_PICK_TX_CONTACT, "Pick a TX contact first");
+ 	return NULL;
+ }
+@@ -3742,6 +3790,10 @@
+ 	}
+ #endif
+ 	(void)as_new;
++#if CONFIG_DSTAR
++	if (ced_is_dstar(&ced_ch) && ced_dstar_route_changed())
++		return ui_svc_write_channel_air(num, &ced_ch, ced_src, &ced_air);
++#endif
+ #if CONFIG_P25 || CONFIG_NXDN || CONFIG_YSF
+ 	// A changed NAC, RAN, DG-ID, rate, data type or destination goes with the channel; unchanged, the tag is written
+ 	// as without the editor (a plain channel in P25, NXDN or YSF takes the radio's settings, a copy its source's tag)
+@@ -3791,7 +3843,7 @@
+ 	ced_src = num;
+ 	ui_frame()->arg = num;
+ 	ced_orig = ced_ch;
+-#if CONFIG_P25 || CONFIG_NXDN || CONFIG_YSF
++#if CONFIG_P25 || CONFIG_NXDN || CONFIG_YSF || CONFIG_DSTAR
+ 	ced_air_orig = ced_air;
+ #endif
+ 	sbuf_t b;
+@@ -4218,6 +4270,13 @@
+ 	uint8_t r = ced_rows[i];
+ 	switch (r) {
+ 	case CE_NAME: ui_text_open(c->name, CODEPLUG_NAME_LEN); break;
++#if CONFIG_DSTAR
++	case CE_URCALL:
++	case CE_RPT1:
++	case CE_RPT2:
++		ui_text_open(ced_air.dstar.call[r - CE_URCALL], DSTAR_CALL_CHARS);
++		break;
++#endif
+ 	case CE_MODE:
+ 		// The next mode the radio runs: FM, AM, DMR, P25, NXDN 4800, NXDN 9600 (ced_mode_step). Not in a listen
+ 		// band (AM in the air band, FM on the broadcast receiver: the channel's mode is moot there). A channel of
+diff --git a/core/ui/ui_svc.h b/core/ui/ui_svc.h
+--- a/core/ui/ui_svc.h
++++ b/core/ui/ui_svc.h
+@@ -27,6 +27,9 @@
+ #endif
+ #if CONFIG_M17
+ #include "m17/m17_codeplug.h"
++#endif
++#if CONFIG_DSTAR
++#include "dstar/dstar_codeplug.h"
+ #endif
+ 
+ // Position format values stored in settings_t.pos_format.
+@@ -123,9 +126,8 @@
+ // copy of a channel of a kind takes its mode with it (channel-modes.md 2.4). false: a write is still going on, or no
+ // codeplug storage in this build
+ bool ui_svc_write_channel(uint16_t number, const channel_t *ch, uint16_t from);
+-#if CONFIG_P25 || CONFIG_NXDN || CONFIG_YSF
+-// A P25, NXDN or YSF channel's own settings, its tag's parameter block (p25-codeplug.md 2, nxdn-codeplug.md 2,
+-// ysf-codeplug.md 2)
++#if CONFIG_P25 || CONFIG_NXDN || CONFIG_YSF || CONFIG_DSTAR
++// An air mode channel's own settings, stored in its tag's parameter block (channel-modes.md).
+ typedef union {
+ #if CONFIG_P25
+ 	p25_conv_t p25;
+@@ -138,6 +140,9 @@
+ #endif
+ #if CONFIG_M17
+ 	m17_conv_t m17;
++#endif
++#if CONFIG_DSTAR
++	dstar_route_t dstar;
+ #endif
+ } ui_air_conv_t;
+ // ui_svc_write_channel for a P25, NXDN or YSF channel (ch's kind, or a plain one in that mode) with conv as its block:
+diff --git a/core/ui/ui_svc_storage.c b/core/ui/ui_svc_storage.c
+--- a/core/ui/ui_svc_storage.c
++++ b/core/ui/ui_svc_storage.c
+@@ -853,10 +853,12 @@
+ 	};
+ 	uint32_t id;		// the talk target's, or the radio's own DMR ID
+ 	bool private_call;
+-#if CONFIG_P25 || CONFIG_NXDN || CONFIG_YSF
++#if CONFIG_P25 || CONFIG_NXDN || CONFIG_YSF || CONFIG_DSTAR
+ 	bool air_set;		// write_channel_job: air is the channel's block
+ 	bool air_own;		// ... and the channel's talk target and talkaround are its own, not the radio's settings
+ 	ui_air_conv_t air;
++#endif
++#if CONFIG_P25 || CONFIG_NXDN || CONFIG_YSF
+ 	uint8_t air_quick_mask;
+ 	union {
+ #if CONFIG_P25
+@@ -1178,7 +1180,7 @@
+ {
+ #if CONFIG_DSTAR
+ 	if (ch->kind == CODEPLUG_KIND_DSTAR || (ch->kind == CODEPLUG_KIND_NONE && ch->mode == RADIO_MODE_DSTAR)) {
+-		*ok = dstar_channel_save(number, from, ch);
++		*ok = dstar_channel_save(number, from, ch, NULL);
+ 		return true;
+ 	}
+ #else
+@@ -1413,7 +1415,7 @@
+ 	return take_channel() && cp_post(save_channel_job);
+ }
+ 
+-#if CONFIG_P25 || CONFIG_NXDN || CONFIG_YSF
++#if CONFIG_P25 || CONFIG_NXDN || CONFIG_YSF || CONFIG_DSTAR
+ // The channel editor's P25, NXDN or YSF channel with its block: a plain one in that mode becomes a stored one as in
+ // air_save_now; one of the kind is written with the block over its tag's, the rest of the tag kept. A copy (from: the
+ // source, another number) takes the source's tag first, so it keeps the same; where that fails its tag is new. False
+@@ -1421,6 +1423,12 @@
+ static bool air_conv_save(uint16_t number, uint16_t from, const channel_t *ch, const ui_air_conv_t *conv, bool own, bool *ok)
+ {
+ 	bool plain = ch->kind == CODEPLUG_KIND_NONE;
++#if CONFIG_DSTAR
++	if (plain ? ch->mode == RADIO_MODE_DSTAR : ch->kind == CODEPLUG_KIND_DSTAR) {
++		*ok = dstar_channel_save(number, from, ch, &conv->dstar);
++		return true;
++	}
++#endif
+ 	bool p25 = false, nxdn = false, ysf = false, m17 = false;
+ #if CONFIG_M17
+ 	m17 = plain ? ch->mode == RADIO_MODE_M17 : ch->kind == CODEPLUG_KIND_M17;
+@@ -1454,6 +1462,7 @@
+ 	if (m17)
+ 		*ok = plain ? m17_save_now(number, ch, &conv->m17) : m17_conv_save(number, ch, &conv->m17);
+ #endif
++	(void)own;
+ 	return true;
+ }
+ #endif
+@@ -1487,7 +1496,7 @@
+ 	bool ok = false;
+ 	uint16_t from = (uint16_t)job.id;
+ 	bool done = false;
+-#if CONFIG_P25 || CONFIG_NXDN || CONFIG_YSF
++#if CONFIG_P25 || CONFIG_NXDN || CONFIG_YSF || CONFIG_DSTAR
+ 	done = job.air_set && air_conv_save(job.channel, from, &job.now, &job.air, job.air_own, &ok);
+ #endif
+ #if CONFIG_AM_RX
+@@ -1520,7 +1529,7 @@
+ 	job.temp = !ui_svc_view.vfo && ui_svc_view.channel_number == number && ui_svc_view.temporary;	// here: drop the temporary changes after it
+ 	job.now = *ch;
+ 	job.id = from;
+-#if CONFIG_P25 || CONFIG_NXDN || CONFIG_YSF
++#if CONFIG_P25 || CONFIG_NXDN || CONFIG_YSF || CONFIG_DSTAR
+ 	job.air_set = conv != NULL;	// before the post: the job may run at once on its own task
+ 	job.air_own = own;
+ 	if (conv != NULL)
+@@ -1536,7 +1545,7 @@
+ 	return write_channel_post(number, ch, from, NULL, false);
+ }
+ 
+-#if CONFIG_P25 || CONFIG_NXDN || CONFIG_YSF
++#if CONFIG_P25 || CONFIG_NXDN || CONFIG_YSF || CONFIG_DSTAR
+ bool ui_svc_write_channel_air(uint16_t number, const channel_t *ch, uint16_t from, const ui_air_conv_t *conv)
+ {
+ 	return write_channel_post(number, ch, from, conv, false);
+diff --git a/core/ui/ui_svc_stub.c b/core/ui/ui_svc_stub.c
+--- a/core/ui/ui_svc_stub.c
++++ b/core/ui/ui_svc_stub.c
+@@ -44,7 +44,7 @@
+ WEAK bool ui_svc_vox(bool on) { (void)on; return false; }
+ WEAK bool ui_svc_save_channel(void) { return false; }
+ WEAK bool ui_svc_write_channel(uint16_t number, const channel_t *ch, uint16_t from) { (void)number; (void)ch; (void)from; return false; }
+-#if CONFIG_P25 || CONFIG_NXDN
++#if CONFIG_P25 || CONFIG_NXDN || CONFIG_YSF || CONFIG_DSTAR
+ WEAK bool ui_svc_write_channel_air(uint16_t number, const channel_t *ch, uint16_t from, const ui_air_conv_t *conv)
+ {
+ 	(void)conv;
+diff --git a/docs/spec/ui.md b/docs/spec/ui.md
+--- a/docs/spec/ui.md
++++ b/docs/spec/ui.md
+@@ -223,6 +223,10 @@
+   P25 writes a stored P25 channel from the radio's P25 settings ([p25-codeplug.md](p25-codeplug.md) 2.3).
+ - An NXDN channel the same way: Mode "NXDN", then RAN and Rate in place of NAC, no Talkaround. Own ID over 65519 is
+   refused ("NXDN IDs go up to 65519").
++- A D-STAR channel shows URCALL, RPT1 and RPT2 below Mode. OK edits each callsign and holding OK saves the channel.
++  A blank URCALL sends CQCQCQ. Enter E for hotspot echo. Leave both repeater fields blank for direct operation or
++  enter the node callsign and module in RPT1 and the gateway callsign in RPT2. The two repeater fields save together.
++  Copy here takes the source channel's route.
+ - NAC shows the received NAC in hex, then the sent one where they differ ("F7E/293"); RAN the same in decimal. OK opens
+   it. NAC: digits type hex digits (up to 3; a fourth starts over), Up and Down step the last one through 0-F (so A-F
+   are reached), with none typed they step the whole NAC; BACK takes a digit back. RAN: a spinner 0-63 that also takes
+diff --git a/tests/host/codeplugEditTest.c b/tests/host/codeplugEditTest.c
+--- a/tests/host/codeplugEditTest.c
++++ b/tests/host/codeplugEditTest.c
+@@ -854,7 +854,7 @@
+ 	channel_t ch = make("DV simplex", 433450000, 433450000);
+ 	CHECK(codeplug_set_channel(21, &ch));
+ 	ch.mode = RADIO_MODE_DSTAR;
+-	CHECK(dstar_channel_save(21, 0, &ch));
++	CHECK(dstar_channel_save(21, 0, &ch, NULL));
+ 	sim_flash_power_on();
+ 	CHECK(storage_init());
+ 	CHECK(codeplug_init() == CODEPLUG_OPENFW);
+@@ -863,9 +863,25 @@
+ 	CHECK(saved.kind == CODEPLUG_KIND_DSTAR && !saved.rx_only && saved.rx_hz == ch.rx_hz);
+ 	codeplug_tag_t tag;
+ 	CHECK(codeplug_tag_read(21, &tag) && (tag.flags & CODEPLUG_TAG_TX));
++	dstar_route_t direct;
++	dstar_channel_read(21, &saved, &direct);
++	CHECK(!direct.call[DSTAR_UR][0] && !direct.call[DSTAR_RPT1][0] && !direct.call[DSTAR_RPT2][0]);
++	dstar_route_t route = { .call = { "e", "n0abc b", "n0abc g" } };
++	CHECK(dstar_channel_save(21, 21, &saved, &route));
++	dstar_header_t header;
++	CHECK(dstar_channel_route(21, &saved, &header));
++	CHECK(header.flags[0] == DSTAR_FLAG_REPEATER && !memcmp(header.ur, "       E", 8) &&
++	      !memcmp(header.rpt1, "N0ABC  B", 8) && !memcmp(header.rpt2, "N0ABC  G", 8));
+ 	saved.rx_only = true;
+-	CHECK(dstar_channel_save(22, 21, &saved));
++	CHECK(dstar_channel_save(22, 21, &saved, NULL));
+ 	CHECK(codeplug_channel(22, &saved) && saved.kind == CODEPLUG_KIND_DSTAR && saved.rx_only);
++	dstar_channel_read(22, &saved, &route);
++	CHECK(!strcmp(route.call[DSTAR_RPT1], "N0ABC  B") && !strcmp(route.call[DSTAR_RPT2], "N0ABC  G"));
++	dstar_route_t incomplete = { .call = { "", "N0ABC B", "" } };
++	CHECK(!dstar_channel_save(22, 22, &saved, &incomplete));
++	CHECK(dstar_channel_route(22, &saved, &header) && header.flags[0] == DSTAR_FLAG_REPEATER);
++	CHECK(dstar_channel_save(22, 22, &saved, &direct));
++	CHECK(dstar_channel_route(22, &saved, &header) && header.flags[0] == 0 && !memcmp(header.ur, "CQCQCQ  ", 8));
+ 	CHECK(codeplug_tag_remove(21));
+ 	CHECK(codeplug_channel(21, &saved) && saved.kind == CODEPLUG_KIND_NONE &&
+ 	      saved.mode == RADIO_MODE_DMR && saved.rx_only);
+diff --git a/tests/host/Makefile b/tests/host/Makefile
+--- a/tests/host/Makefile
++++ b/tests/host/Makefile
+@@ -806,8 +806,8 @@
+ 	$(CC) $(UIFLAGS) -DCONFIG_P25=1 -DCONFIG_P25_TRUNK=1 -DCONFIG_NXDN=1 -DCONFIG_YSF=1 -o $@ uiFlowTest.c $(UIAPP) -lz -lm
+ 
+ TESTS += uiFlowTestDstar
+-uiFlowTestDstar: uiFlowTest.c $(UIDEPS)
+-	$(CC) $(UIFLAGS) -DCONFIG_P25=1 -DCONFIG_P25_TRUNK=1 -DCONFIG_NXDN=1 -DCONFIG_YSF=1 -DCONFIG_DSTAR=1 -o $@ uiFlowTest.c $(UIAPP) -lz -lm
++uiFlowTestDstar: uiFlowTest.c $(UIDEPS) $(CORE)/dstar/dstar_codeplug.c $(CORE)/dstar/dstar_codeplug.h
++	$(CC) $(UIFLAGS) -DCONFIG_P25=1 -DCONFIG_P25_TRUNK=1 -DCONFIG_NXDN=1 -DCONFIG_YSF=1 -DCONFIG_DSTAR=1 -o $@ uiFlowTest.c $(UIAPP) $(CORE)/dstar/dstar_codeplug.c -lz -lm
+ 
+ uiFlowTestNxdnScrambler: uiFlowTest.c $(UIDEPS)
+ 	$(CC) $(UIFLAGS) -DCONFIG_P25=1 -DCONFIG_P25_TRUNK=1 -DCONFIG_NXDN=1 -DCONFIG_YSF=1 -DCONFIG_NXDN_SCRAMBLER=1 -o $@ uiFlowTest.c $(UIAPP) -lz -lm
+diff --git a/tests/host/sim/ui_sim.c b/tests/host/sim/ui_sim.c
+--- a/tests/host/sim/ui_sim.c
++++ b/tests/host/sim/ui_sim.c
+@@ -795,7 +795,8 @@
+ 		return sim_held;
+ 	channel_t c = *ch;
+ 	if (c.kind == CODEPLUG_KIND_NONE) {
+-		c.kind = c.mode == RADIO_MODE_P25 ? CODEPLUG_KIND_P25 : CODEPLUG_KIND_NXDN;
++		c.kind = c.mode == RADIO_MODE_DSTAR ? CODEPLUG_KIND_DSTAR :
++			c.mode == RADIO_MODE_P25 ? CODEPLUG_KIND_P25 : CODEPLUG_KIND_NXDN;
+ 		c.mode = RADIO_MODE_DMR;	// the stand-in record
+ 	}
+ #if CONFIG_NXDN_SCRAMBLER
+@@ -914,6 +915,30 @@
+ 	(void)ch;
+ 	return true;
+ }
++
++#if CONFIG_DSTAR
++// The D-STAR channel editor reads back the block written through the simulated storage job.
++int codeplug_tag_params(uint16_t number, const channel_t *ch, uint8_t *buf, uint16_t cap)
++{
++	const ui_air_conv_t *air = sim_air(number);
++	uint8_t packed[DSTAR_ROUTE_BYTES];
++	if (ch->kind != CODEPLUG_KIND_DSTAR || !air || !dstar_route_pack(&air->dstar, packed))
++		return -1;
++	memcpy(buf, packed, cap < sizeof packed ? cap : sizeof packed);
++	return sizeof packed;
++}
++
++// Writes in this simulator go through ui_svc_write_channel_air, which keeps the decoded block.
++bool codeplug_tag_write(uint16_t number, const char *name, const codeplug_tag_t *tag, const uint8_t *params, uint16_t len)
++{
++	return false;
++}
++
++bool codeplug_tag_rewrite(uint16_t number, const char *name, const codeplug_tag_t *tag, const uint8_t *params, uint16_t len)
++{
++	return false;
++}
++#endif
+ 
+ #if CONFIG_P25
+ static bool p25_radio;		// below: the "p25" token
+diff --git a/tests/host/uiFlowTest.c b/tests/host/uiFlowTest.c
+--- a/tests/host/uiFlowTest.c
++++ b/tests/host/uiFlowTest.c
+@@ -574,6 +574,13 @@
+ 	  "focus=Mode shows=D-STAR hides=Color_code hides=RX_CTCSS", 1, false },
+ 	{ "D-STAR can save a stored channel", "dstar ok 5 ok down down ok", "long:ok",
+ 	  "writes=1 toast=Saved_channel_3 shows=D-STAR", 1, true },
++	{ "D-STAR channel editor offers hotspot routing", "dstar ok 5 ok down down ok", "down down down",
++	  "focus=RPT2 shows=URCALL shows=RPT1 shows=CQCQCQ shows=DIRECT", 3, false },
++	{ "D-STAR channel editor refuses only one repeater field", "dstar ok 5 ok down down ok down down",
++	  "ok 2 long:1 3 0 2 2 ok long:ok", "writes=0 toast=Check_URCALL,_RPT1_and_RPT2", 9, true },
++	{ "D-STAR channel editor saves and reloads hotspot routing", "dstar ok 5 ok down down ok down",
++	  "ok 3 3 ok down ok 2 long:1 3 0 2 2 ok down ok 2 long:1 3 0 4 ok long:ok back ok down down down down down",
++	  "writes=1 focus=RPT2 shows=A1D", 30, true },
+ #endif
+ 	// The Mode row steps FM, AM (where the radio receives it), DMR, P25, NXDN 4800, NXDN 9600. A DMR channel (3) goes on
+ 	// to P25 and NXDN; each keeps its own rows; saved, it is the stored channel in that mode
