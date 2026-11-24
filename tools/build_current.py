@@ -134,6 +134,7 @@ PATCHES = (
 	'issue76-dual-preserve-decoded-voice.patch',
 	'issue29-p25-rx-wrap.patch',
 	'remaining-user-features.patch',
+	'dm32-ram-defaults.patch',
 )
 
 

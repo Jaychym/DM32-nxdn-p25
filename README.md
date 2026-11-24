@@ -102,6 +102,8 @@ make -C build/current/tests/host voiceCipherTest nxdnEngineTestAes p25EngineTest
 
 La imagen queda en `build/current/build/dm32/rfoundry_dm32.bin`. Detalle del cifrado: `docs/spec/air-encryption.md` dentro del árbol `build/current`.
 
+La compilación predeterminada del DM-32UV desactiva el servidor de estado HTTP y el repetidor DMR SFR para recuperar RAM.
+
 Si usas `--tree`, elige un directorio dedicado y vacío la primera vez. Al volver a compilar en ese directorio,
 la herramienta restablece el commit base y elimina los archivos sin seguimiento fuera de `build/`.
 

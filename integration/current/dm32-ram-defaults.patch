@@ -1,0 +1,20 @@
+diff --git a/boards/dm32/config.mk b/boards/dm32/config.mk
+--- a/boards/dm32/config.mk
++++ b/boards/dm32/config.mk
+@@ -10,6 +10,8 @@
+ CONFIG_FONT_XL ?= y
+ CONFIG_UI_KAWAII ?= y
+ CONFIG_DMR_REPLAY ?= $(CONFIG_DMR)
++# The default image omits the single-frequency repeater to save main RAM.
++CONFIG_SFR ?= n
+ CONFIG_FONT_AA ?= y
+ # FONT_BIG needs FONT_AA: off with it
+ CONFIG_FONT_BIG ?= $(CONFIG_FONT_AA)
+@@ -33,6 +35,7 @@
+ # Keep two simultaneous TCP connections and omit optional IP services in the default DM-32UV image.
+ TCP_CONNS ?= 2
+ CONFIG_STARTUP_PIN ?= y
++CONFIG_NET_HTTP ?= n
+ CONFIG_NET_WEBCTL ?= n
+ CONFIG_NET_RIGCTL ?= n
+ CONFIG_NET_USRP ?= n
