@@ -11,6 +11,7 @@ The image is TREE/build/dm32/rfoundry_dm32.bin; package it with TREE/tools/relea
 """
 import argparse
 import os
+import shutil
 from pathlib import Path
 import subprocess
 
@@ -146,7 +147,7 @@ def out(*args, cwd=None):
 	return subprocess.check_output([str(a) for a in args], cwd=cwd, text=True).strip()
 
 
-def prepare(tree):
+def prepare(tree, dstar=False):
 	if not (tree / '.git').exists():
 		tree.mkdir(parents=True, exist_ok=True)
 		if any(tree.iterdir()):
@@ -163,6 +164,10 @@ def prepare(tree):
 	run('git', 'clean', '-q', '-fdx', '-e', 'build/', cwd=tree)
 	for patch in PATCHES:
 		run('git', 'apply', '--binary', PATCH_DIR / patch, cwd=tree)
+	if dstar:
+		run('git', 'apply', '--binary', PATCH_DIR / 'dstar-mode.patch', cwd=tree)
+		run('git', 'apply', '--binary', PATCH_DIR / 'dstar-channels.patch', cwd=tree)
+		shutil.copytree(ROOT / 'src/dstar', tree / 'core/dstar')
 	run('git', 'submodule', 'update', '--init', '--depth=1', 'third_party/FreeRTOS-Kernel', cwd=tree)
 
 
@@ -172,17 +177,22 @@ def main():
 	                help='dedicated build directory (must be empty on first use)')
 	ap.add_argument('--cross', default=os.environ.get('CROSS', str(ROOT / 'toolchain/bin/csky-elf-')))
 	ap.add_argument('--jobs', type=int, default=min(os.cpu_count() or 2, 8))
+	ap.add_argument('--dstar', action=argparse.BooleanOptionalAction, default=True,
+	                help='build experimental D-STAR DV for the VFO and stored channels (simplex, RF unverified)')
 	ap.add_argument('--no-m17', action='store_true', help='build with CONFIG_M17=n (M17 voice; Codec 2 real time on the MCU unverified)')
 	ap.add_argument('--no-mdc1200', action='store_true', help='build with CONFIG_MDC1200=n (MDC-1200 ID on FM channels)')
 	args = ap.parse_args()
 	tree = args.tree.resolve()
-	prepare(tree)
+	prepare(tree, args.dstar)
 	# The version is this repository's commit, the time its commit time: the patched tree is never committed
 	version = out('git', 'rev-parse', '--short=8', 'HEAD', cwd=ROOT)
 	git_time = out('git', 'log', '-1', '--format=%ct', 'HEAD', cwd=ROOT)
+	# Reserve more main RAM for the private D-STAR build while keeping the host link and APRS enabled.
+	dstar_options = ('CONFIG_NET_HTTP=n', 'CONFIG_SFR=n') if args.dstar else ()
 	run('make', '-j%d' % args.jobs, 'BOARD=dm32', 'CROSS=' + args.cross, 'BUILD=build/dm32', 'GITVERSION=' + version,
-	    'GITDIRTY=', 'RFOUNDRY_GIT_TIME=' + git_time, 'CONFIG_MDC1200=' + ('n' if args.no_mdc1200 else 'y'), 'CONFIG_M17=' + ('n' if args.no_m17 else 'y'),
-	    'all', 'stack-check', cwd=tree)
+	    'GITDIRTY=', 'RFOUNDRY_GIT_TIME=' + git_time, 'CONFIG_DSTAR=' + ('y' if args.dstar else 'n'),
+	    'CONFIG_MDC1200=' + ('n' if args.no_mdc1200 else 'y'), 'CONFIG_M17=' + ('n' if args.no_m17 else 'y'),
+	    *dstar_options, 'all', 'stack-check', cwd=tree)
 
 
 if __name__ == '__main__':
