@@ -1,0 +1,647 @@
+diff --git a/core/cps/cps_fast.c b/core/cps/cps_fast.c
+index dfb17d5..399dbf4 100644
+--- a/core/cps/cps_fast.c
++++ b/core/cps/cps_fast.c
+@@ -603,8 +603,17 @@ static size_t op_status(uint8_t *out)
+ size_t cps_fast_cmd(const uint8_t *req, uint16_t len, uint8_t *out, size_t cap, uint32_t now_ms)
+ {
+ #if CONFIG_STARTUP_PIN
+-	if (!settings_programming_allowed())
++	// An authenticated read never grants a general programming session. Every block is
++	// checked on the radio, including when another client takes over a programming cable.
++	if (len && req[0] == CPSF_OP_PIN_READ) {
++		if (len < 8 || (req[7] != CPSF_OP_INFO && req[7] != CPSF_OP_SUMS && req[7] != CPSF_OP_READ) ||
++		    !settings_read_pin_authorize(req + 1, now_ms))
++			return status_only(out, DL_ST_REFUSED);
++		req += 7;
++		len -= 7;
++	} else if (!settings_programming_allowed()) {
+ 		return status_only(out, DL_ST_REFUSED);
++	}
+ #endif
+ 	if (len < 1) {
+ 		return status_only(out, DL_ST_BAD_ARG);
+diff --git a/core/cps/cps_fast.h b/core/cps/cps_fast.h
+index 9f7d317..5b3c079 100644
+--- a/core/cps/cps_fast.h
++++ b/core/cps/cps_fast.h
+@@ -35,7 +35,8 @@ enum {
+ 	CPSF_OP_END,		// -> none: the block is decoded, checked and written (direct) or staged
+ 	CPSF_OP_COMMIT,		// -> none: staged: the commit starts (poll STATUS); direct: the session ends
+ 	CPSF_OP_STATUS,		// -> state u8, mode u8, blocks u16, copied u16, reason u8
+-	CPSF_OP_ABORT,		// -> none: the session ends; staged blocks are dropped
++	CPSF_OP_ABORT = 9,		// -> none: the session ends; staged blocks are dropped
++	CPSF_OP_PIN_READ = 10,	// six ASCII digits, then INFO, SUMS or READ
+ };
+ 
+ // Block formats: an LZ4 stream, or none at all for a block of 0xFF (0 is kept for a raw block, not offered: an LZ4
+diff --git a/core/debuglink/debuglink.c b/core/debuglink/debuglink.c
+index 0144792..7e50cba 100644
+--- a/core/debuglink/debuglink.c
++++ b/core/debuglink/debuglink.c
+@@ -241,6 +241,10 @@ static size_t cmd_version(uint8_t *out, size_t cap)
+ 	dl_text(&t, "features=%s%s\n", build_modes_now(), build_features_now());
+ 	dl_text_kv_str(&t, "codec", debuglink_codec_id(board.vocoder));
+ #if CONFIG_STARTUP_PIN
++#if CONFIG_CPS_FAST
++	if (settings_read_pin_available())
++		dl_text(&t, "cps_read_pin=1\n");
++#endif
+ 	if (!settings_programming_allowed())
+ 		dl_text(&t, "programming_locked=1\n");
+ #endif
+@@ -813,7 +817,7 @@ static size_t cmd_storage(const uint8_t *req, uint16_t len, uint8_t *out, size_t
+ static size_t handle(uint8_t cmd, const uint8_t *req, uint16_t len, uint8_t *out, size_t cap)
+ {
+ #if CONFIG_STARTUP_PIN
+-	if (cmd != DL_CMD_PING && cmd != DL_CMD_VERSION && !settings_programming_allowed())
++	if (cmd != DL_CMD_PING && cmd != DL_CMD_VERSION && cmd != DL_CMD_CODEPLUG && !settings_programming_allowed())
+ 		return status_only(out, DL_ST_REFUSED);
+ #endif
+ 	switch (cmd) {
+diff --git a/core/debuglink/dl_frame.c b/core/debuglink/dl_frame.c
+index 412b804..e2217a6 100644
+--- a/core/debuglink/dl_frame.c
++++ b/core/debuglink/dl_frame.c
+@@ -2,6 +2,7 @@
+ // Copyright (c) 2026 The RadioFoundry Authors
+ // The host link's framing and dispatch (see dl_frame.h)
+ #include "debuglink/dl_frame.h"
++#include <string.h>
+ 
+ enum { S_SOF1, S_SOF2, S_CMD, S_SEQ, S_LEN0, S_LEN1, S_DATA, S_CRC0, S_CRC1 };
+ 
+@@ -142,6 +143,7 @@ size_t dl_parser_feed(dl_parser_t *p, const uint8_t *buf, size_t len, uint32_t n
+ 				}
+ 				write(reply_buf, dl_frame(reply_buf, (uint8_t)(p->cmd | DL_REPLY_FLAG), p->seq, (uint16_t)n));
+ 			}
++			memset(p->req, 0, p->len);
+ 			reset(p);
+ 			return i + 1;	// one frame per call: the caller looks at what follows
+ 		}
+diff --git a/core/settings/settings.c b/core/settings/settings.c
+index 545c1f1..069fd0b 100644
+--- a/core/settings/settings.c
++++ b/core/settings/settings.c
+@@ -29,7 +29,7 @@ _Static_assert(SETTINGS_PAGES <= SETTINGS_PAGES_MAX, "settings_t outgrew its pag
+ _Static_assert(sizeof(settings_t) % 4 == 0, "settings_t has tail padding");
+ _Static_assert(offsetof(settings_t, dual_b) == SETTINGS_PAGE_BYTES, "page 1 starts at its first field");
+ _Static_assert(offsetof(settings_t, ref_trim_ppb) % 2 == 0, "ref_trim_ppb is aligned");
+-_Static_assert(sizeof(settings_t) == 444, "settings_t changed size: update docs/spec/settings-store.md 3 and this");
++_Static_assert(sizeof(settings_t) == 456, "settings_t changed size: update docs/spec/settings-store.md 3 and this");
+ 
+ static settings_t live;			// under the quick lock
+ static settings_t saved;		// what the newest record holds (or the defaults)
+diff --git a/core/settings/settings.h b/core/settings/settings.h
+index cc34949..40c5927 100644
+--- a/core/settings/settings.h
++++ b/core/settings/settings.h
+@@ -264,7 +264,10 @@ typedef struct {
+ 	uint32_t pin_salt;		// zero leaves the startup PIN off
+ 	uint8_t pin_verifier[8];	// salted verifier, never the digits
+ 	uint8_t pin_protect_programming;	// explicitly lock CPS and backup interfaces at restart
+-	uint8_t reserved_pin[3];
++	uint8_t startup_digits;	// zero in old records means six
++	uint8_t reserved_pin[2];
++	uint32_t cps_read_salt;	// zero disables the independent CPS read password
++	uint8_t cps_read_verifier[8];
+ } settings_t;
+ 
+ // Pages: settings_t is stored as records of SETTINGS_PAGE_BYTES each (settings-store.md 2.1). Only the pages its size
+diff --git a/core/settings/settings_pin.c b/core/settings/settings_pin.c
+index eb1fccc..3749433 100644
+--- a/core/settings/settings_pin.c
++++ b/core/settings/settings_pin.c
+@@ -10,7 +10,11 @@
+ #include "settings_pin.h"
+ 
+ // Single radio CPU. Only startup and the local UI change these flags; host protocols only read them.
+-static volatile bool cps_protected, cps_granted, credential_prompt;
++static volatile bool cps_protected, cps_granted, credential_prompt, read_protected;
++// The serial task owns throttling. A new connection does not reset the retry count.
++static uint8_t read_failures;
++static uint32_t read_blocked_until;
++
+ 
+ static void pin_verifier(uint32_t pin, uint32_t salt, uint8_t out[8])
+ {
+@@ -51,15 +55,24 @@ bool settings_pin_matches(uint32_t pin)
+ 	return different == 0;
+ }
+ 
+-void settings_pin_set(uint32_t pin, uint32_t salt)
++uint8_t settings_startup_digits(void)
+ {
+-	if (pin >= SETTINGS_PIN_LIMIT)
++	const settings_t *s = settings_begin();
++	uint8_t digits = s->startup_digits == 4 ? 4 : 6;
++	settings_end(hal_millis());
++	return digits;
++}
++
++void settings_pin_set(uint32_t pin, uint32_t salt, uint8_t digits)
++{
++	if ((digits != 4 && digits != 6) || pin >= (digits == 4 ? 10000u : SETTINGS_PIN_LIMIT))
+ 		return;
+ 	if (salt == 0)
+ 		salt = 1;
+ 	uint8_t check[8];
+ 	pin_verifier(pin, salt, check);
+ 	settings_t *s = settings_begin();
++	s->startup_digits = digits;
+ 	s->pin_salt = salt;
+ 	memcpy(s->pin_verifier, check, sizeof check);
+ 	settings_end(hal_millis());
+@@ -86,13 +99,14 @@ bool settings_pin_can_store(void)
+ void settings_pin_boot(void)
+ {
+ 	const settings_t *s = settings_begin();
++	read_protected = s->cps_read_salt != 0;
+ 	cps_protected = s->pin_salt != 0 && s->pin_protect_programming == 1;
+ 	cps_granted = credential_prompt = false;
+ 	settings_end(hal_millis());
+ }
+ 
+ bool settings_programming_protected(void) { return cps_protected; }
+-bool settings_programming_allowed(void) { return !credential_prompt && (!cps_protected || cps_granted); }
++bool settings_programming_allowed(void) { return !credential_prompt && ((!cps_protected && !read_protected) || cps_granted); }
+ void settings_pin_prompt(bool on) { credential_prompt = on; }
+ 
+ void settings_programming_protect(bool on)
+@@ -106,4 +120,72 @@ void settings_programming_protect(bool on)
+ }
+ 
+ void settings_programming_grant(bool on) { cps_granted = on; }
++
++bool settings_read_pin_enabled(void) { return read_protected; }
++bool settings_read_pin_available(void) { return read_protected && !credential_prompt && (!cps_protected || cps_granted); }
++
++void settings_read_pin_set(uint32_t pin, uint32_t salt)
++{
++	if (pin >= SETTINGS_PIN_LIMIT)
++		return;
++	if (salt == 0)
++		salt = 1;
++	uint8_t check[8];
++	pin_verifier(pin | 0x800000u, salt, check);
++	settings_t *s = settings_begin();
++	s->cps_read_salt = salt;
++	memcpy(s->cps_read_verifier, check, sizeof check);
++	settings_end(hal_millis());
++	cps_granted = false;
++	read_protected = true;
++}
++
++void settings_read_pin_clear(void)
++{
++	settings_t *s = settings_begin();
++	s->cps_read_salt = 0;
++	memset(s->cps_read_verifier, 0, sizeof s->cps_read_verifier);
++	settings_end(hal_millis());
++	read_protected = cps_granted = false;
++}
++
++bool settings_read_pin_matches(uint32_t pin)
++{
++	if (pin >= SETTINGS_PIN_LIMIT)
++		return false;
++	uint8_t saved[8], check[8];
++	const settings_t *s = settings_begin();
++	uint32_t salt = s->cps_read_salt;
++	memcpy(saved, s->cps_read_verifier, sizeof saved);
++	settings_end(hal_millis());
++	if (!salt)
++		return false;
++	pin_verifier(pin | 0x800000u, salt, check);
++	uint8_t diff = 0;
++	for (unsigned i = 0; i < sizeof check; i++)
++		diff |= check[i] ^ saved[i];
++	return diff == 0;
++}
++
++bool settings_read_pin_authorize(const uint8_t ascii[6], uint32_t now)
++{
++	if (!settings_read_pin_available() || (read_blocked_until && (int32_t)(now - read_blocked_until) < 0))
++		return false;
++	read_blocked_until = 0;
++	uint32_t pin = 0;
++	for (unsigned i = 0; i < 6; i++) {
++		if (ascii[i] < '0' || ascii[i] > '9')
++			return false;
++		pin = pin * 10u + (ascii[i] - '0');
++	}
++	if (settings_read_pin_matches(pin)) {
++		read_failures = 0;
++		return true;
++	}
++	if (++read_failures >= 3) {
++		read_failures = 0;
++		read_blocked_until = (now + 20000u) | 1u;
++	}
++	return false;
++}
+ #endif
+diff --git a/core/settings/settings_pin.h b/core/settings/settings_pin.h
+index a68344c..94bee46 100644
+--- a/core/settings/settings_pin.h
++++ b/core/settings/settings_pin.h
+@@ -11,7 +11,14 @@
+ 
+ bool settings_pin_enabled(void);
+ bool settings_pin_matches(uint32_t pin);
+-void settings_pin_set(uint32_t pin, uint32_t salt);
++uint8_t settings_startup_digits(void);
++void settings_pin_set(uint32_t pin, uint32_t salt, uint8_t digits);
++bool settings_read_pin_enabled(void);
++void settings_read_pin_set(uint32_t pin, uint32_t salt);
++void settings_read_pin_clear(void);
++bool settings_read_pin_matches(uint32_t pin);
++bool settings_read_pin_available(void);
++bool settings_read_pin_authorize(const uint8_t ascii[6], uint32_t now);
+ void settings_pin_clear(void);
+ bool settings_pin_can_store(void);
+ 
+diff --git a/core/ui/lang/es.po b/core/ui/lang/es.po
+index 4fdcea3..36693c6 100644
+--- a/core/ui/lang/es.po
++++ b/core/ui/lang/es.po
+@@ -5621,3 +5621,31 @@ msgstr "Zona no legible por esta radio"
+ msgctxt "SHARE_ERR_OFFER_GONE"
+ msgid "The offer is gone"
+ msgstr "La oferta ya no existe"
++
++msgctxt "PIN_NEW_READ"
++msgid "New CPS read PIN"
++msgstr "Nuevo PIN de lectura CPS"
++
++msgctxt "PIN_READ_CURRENT"
++msgid "Current CPS read PIN"
++msgstr "PIN actual de lectura CPS"
++
++msgctxt "PIN_FOUR_HINT"
++msgid "4 digits then OK"
++msgstr "4 dígitos y OK"
++
++msgctxt "PIN_READ_SET"
++msgid "Set or change CPS read PIN"
++msgstr "Configurar PIN de lectura CPS"
++
++msgctxt "PIN_READ_REMOVE"
++msgid "Remove CPS read PIN"
++msgstr "Quitar PIN de lectura CPS"
++
++msgctxt "PIN_READ_ON"
++msgid "CPS read PIN is on"
++msgstr "PIN de lectura CPS activado"
++
++msgctxt "PIN_READ_OFF"
++msgid "CPS read PIN is off"
++msgstr "PIN de lectura CPS desactivado"
+diff --git a/core/ui/ui_menus.c b/core/ui/ui_menus.c
+index c07d9c8..6620a40 100644
+--- a/core/ui/ui_menus.c
++++ b/core/ui/ui_menus.c
+@@ -7243,7 +7243,7 @@ static const ui_scr_def_t tone_scan_screen = {
+ 
+ typedef enum { ST_TOGGLE, ST_LIST, ST_NUMBER, ST_ACTION } set_type_t;
+ enum { SA_DIAG, SA_FIRMWARE, SA_CODEPLUG, SA_RESET, SA_MY_RADIO, SA_CRASH, SA_LANGUAGE, SA_HARDWARE, SA_FIXED_POS, SA_DATA_SERVICES,
+-       SA_BL_TEST, SA_PIN_CHANGE, SA_PIN_REMOVE, SA_PIN_CPS_SETUP, SA_PIN_CPS_ACCESS };
++       SA_BL_TEST, SA_PIN_CHANGE, SA_PIN_REMOVE, SA_PIN_CPS_SETUP, SA_PIN_CPS_ACCESS, SA_READ_PIN_SET, SA_READ_PIN_REMOVE };
+ 
+ typedef struct {
+ 	tr_id_t name;			// TRN; TR_NONE for a key's row (set_name)
+@@ -7718,6 +7718,10 @@ static const set_item_t s_my_radio[] = {
+ 	ACTION(TRN(PIN_MENU_CHANGE, "Set or change startup PIN"), "password security", SA_PIN_CHANGE),
+ 	ACTION(TRN(PIN_MENU_REMOVE, "Remove startup PIN"), "password security", SA_PIN_REMOVE),
+ #if CONFIG_HOSTLINK
++#if CONFIG_CPS_FAST
++	ACTION(TRN(PIN_READ_SET, "Set or change CPS read PIN"), "password CPS", SA_READ_PIN_SET),
++	ACTION(TRN(PIN_READ_REMOVE, "Remove CPS read PIN"), "password CPS", SA_READ_PIN_REMOVE),
++#endif
+ 	ACTION(TRN(PIN_MENU_CPS_SETUP, "Set or remove programming lock"), "codeplug cps password", SA_PIN_CPS_SETUP),
+ 	ACTION(TRN(PIN_MENU_CPS_ACCESS, "Unlock or relock programming"), "codeplug cps password", SA_PIN_CPS_ACCESS),
+ #endif
+@@ -8176,6 +8180,8 @@ static void group_select(uint16_t i, bool hold)
+ 		case SA_CODEPLUG: ui_push(SCR_INFO, INFO_CODEPLUG); break;
+ 		case SA_MY_RADIO: ui_push(SCR_DMR_ID, 0); break;
+ #if CONFIG_STARTUP_PIN
++		case SA_READ_PIN_SET: ui_pin_menu(UI_PIN_READ_SET); break;
++		case SA_READ_PIN_REMOVE: ui_pin_menu(UI_PIN_READ_REMOVE); break;
+ 		case SA_PIN_CHANGE: ui_pin_menu(UI_PIN_CHANGE); break;
+ 		case SA_PIN_REMOVE: ui_pin_menu(UI_PIN_REMOVE); break;
+ 		case SA_PIN_CPS_SETUP: ui_pin_menu(UI_PIN_PROGRAMMING_SETUP); break;
+diff --git a/core/ui/ui_pin.c b/core/ui/ui_pin.c
+index e01b8e0..074c0dc 100644
+--- a/core/ui/ui_pin.c
++++ b/core/ui/ui_pin.c
+@@ -26,26 +26,27 @@ static struct {
+ 	uint8_t attempts;
+ 	ui_pin_mode_t mode;
+ 	bool opening_programming;
++	bool use_read_pin;
+ } menu;
+ 
+-static void pin_draw(const char *title, const pin_input_t *in, const char *status)
++static void pin_draw(const char *title, const pin_input_t *in, unsigned digits, const char *status)
+ {
+ 	const font_t *f = ui_layout.medium;
+ 	int w = gfx_width(), h = gfx_height();
+ 	char mask[SETTINGS_PIN_DIGITS + 1];
+-	for (unsigned i = 0; i < SETTINGS_PIN_DIGITS; i++)
++	for (unsigned i = 0; i < digits; i++)
+ 		mask[i] = i < in->digits ? '*' : '_';
+-	mask[SETTINGS_PIN_DIGITS] = 0;
++	mask[digits] = 0;
+ 	gfx_clear(ui_col.bg);
+ 	ui_draw_title(f, 0, h / 5, w, NULL, title, ui_col.fg);
+ 	gfx_text(f, (w - gfx_text_width(f, mask)) / 2, h / 2, mask, ui_col.fg);
+ 	ui_draw_title(ui_layout.small, 0, h - ui_layout.small->h - 3, w, NULL, status, ui_col.dim);
+ }
+ 
+-static bool pin_digit(pin_input_t *in, uint8_t action)
++static bool pin_digit(pin_input_t *in, uint8_t action, unsigned digits)
+ {
+ 	if (action >= ACT_DIGIT_0 && action <= ACT_DIGIT_9) {
+-		if (in->digits < SETTINGS_PIN_DIGITS) {
++		if (in->digits < digits) {
+ 			in->value = in->value * 10u + (action - ACT_DIGIT_0);
+ 			in->digits++;
+ 		}
+@@ -97,6 +98,11 @@ static uint8_t boot_action(uint32_t keys)
+ 	return ACT_NONE;
+ }
+ 
++static const char *digit_hint(unsigned digits)
++{
++	return digits == 4 ? TR(PIN_FOUR_HINT, "4 digits then OK") : TR(PIN_DIGIT_HINT, "6 digits then OK");
++}
++
+ void ui_pin_startup(void)
+ {
+ 	settings_pin_boot();
+@@ -111,6 +117,7 @@ void ui_pin_startup(void)
+ 		lang_set(LANG_ENGLISH);
+ 	ui_layout_init();
+ 
++	unsigned digits = settings_startup_digits();
+ 	pin_input_t in = { 0 };
+ 	uint8_t attempts = 0;
+ 	uint32_t retry = 0, stable = board.input->scan(), previous = stable;
+@@ -132,10 +139,10 @@ void ui_pin_startup(void)
+ 		if (raw == previous && raw != stable) {
+ 			uint8_t action = stable == 0 ? boot_action(raw) : ACT_NONE;
+ 			stable = raw;
+-			if (!waiting && pin_digit(&in, action)) {
++			if (!waiting && pin_digit(&in, action, digits)) {
+ 				invalid = false;
+ 				redraw = true;
+-			} else if (!waiting && action == ACT_SELECT && in.digits == SETTINGS_PIN_DIGITS) {
++			} else if (!waiting && action == ACT_SELECT && in.digits == digits) {
+ 				bool unlock = settings_pin_matches(in.value);
+ 				in = (pin_input_t){ 0 };
+ 				if (unlock)
+@@ -148,9 +155,9 @@ void ui_pin_startup(void)
+ 		previous = raw;
+ 		if (display && (redraw || waiting != was_waiting)) {
+ 			gfx_frame_begin();
+-			pin_draw(TR(PIN_ENTER_STARTUP, "Enter startup PIN"), &in, wait_active(now, retry) ?
++			pin_draw(TR(PIN_ENTER_STARTUP, "Enter startup PIN"), &in, digits, wait_active(now, retry) ?
+ 				TR(PIN_RETRY_LATER, "Wait before retrying") : invalid ? TR(PIN_WRONG, "Incorrect PIN") :
+-				TR(PIN_DIGIT_HINT, "6 digits then OK"));
++				digit_hint(digits));
+ 			gfx_flush();
+ 		}
+ 		redraw = false;
+@@ -163,17 +170,19 @@ void ui_pin_menu(ui_pin_mode_t mode)
+ {
+ 	if (ui_key_is_injected())
+ 		return;
+-	bool configured = settings_pin_enabled();
++	bool read_mode = mode == UI_PIN_READ_SET || mode == UI_PIN_READ_REMOVE;
++	menu.use_read_pin = read_mode || (mode == UI_PIN_PROGRAMMING_ACCESS && !settings_programming_protected() && settings_read_pin_enabled());
++	bool configured = menu.use_read_pin ? settings_read_pin_enabled() : settings_pin_enabled();
+ 	if (!settings_pin_can_store() || !keypad_available()) {
+ 		ui_toast(TR(PIN_UNAVAILABLE, "PIN setup unavailable"));
+ 		return;
+ 	}
+-	if (mode != UI_PIN_CHANGE && !configured) {
+-		ui_toast(TR(PIN_NOT_SET, "Startup PIN is off"));
++	if (mode != UI_PIN_CHANGE && mode != UI_PIN_READ_SET && !configured) {
++		ui_toast(menu.use_read_pin ? TR(PIN_READ_OFF, "CPS read PIN is off") : TR(PIN_NOT_SET, "Startup PIN is off"));
+ 		return;
+ 	}
+ 	if (mode == UI_PIN_PROGRAMMING_ACCESS) {
+-		if (!settings_programming_protected()) {
++		if (!settings_programming_protected() && !settings_read_pin_enabled()) {
+ 			ui_toast(TR(PIN_CPS_PROTECTION_OFF, "Programming lock is off"));
+ 			return;
+ 		}
+@@ -187,18 +196,24 @@ void ui_pin_menu(ui_pin_mode_t mode)
+ 	settings_pin_prompt(true);
+ }
+ 
++static uint8_t menu_digits(void)
++{
++	return menu.use_read_pin ? 6 : menu.step == PIN_OLD ? settings_startup_digits() : 4;
++}
++
+ static void menu_draw(void)
+ {
+-	const char *title = menu.step == PIN_NEW ? TR(PIN_ENTER_NEW, "Enter new startup PIN") :
++	const char *title = menu.step == PIN_NEW ? (menu.use_read_pin ? TR(PIN_NEW_READ, "New CPS read PIN") : TR(PIN_ENTER_NEW, "Enter new startup PIN")) :
+ 		menu.step == PIN_CONFIRM ? TR(PIN_ENTER_AGAIN, "Repeat new PIN") :
++		menu.use_read_pin ? TR(PIN_READ_CURRENT, "Current CPS read PIN") :
+ 		menu.mode == UI_PIN_PROGRAMMING_ACCESS ? (!menu.opening_programming ?
+ 			TR(PIN_CPS_RELOCK, "PIN to relock programming") : TR(PIN_CPS_ENTER, "PIN for programming")) :
+ 		menu.mode == UI_PIN_PROGRAMMING_SETUP ? (settings_programming_protected() ?
+ 			TR(PIN_CPS_DISABLE, "PIN to remove lock") : TR(PIN_CPS_ENABLE, "PIN to lock programming")) :
+ 		TR(PIN_ENTER_CURRENT, "Enter current PIN");
+ 	const char *status = wait_active(hal_millis(), menu.deadline) ?
+-		TR(PIN_RETRY_LATER, "Wait before retrying") : TR(PIN_DIGIT_HINT, "6 digits then OK");
+-	pin_draw(title, &menu.input, status);
++		TR(PIN_RETRY_LATER, "Wait before retrying") : digit_hint(menu_digits());
++	pin_draw(title, &menu.input, menu_digits(), status);
+ 	ui_draw_banner(&ui_st);
+ }
+ 
+@@ -215,25 +230,30 @@ static bool menu_key(const input_event_t *ev)
+ 		return false;
+ 	if (wait_active(hal_millis(), menu.deadline))
+ 		return ev->action != ACT_BACK;
+-	if (pin_digit(&menu.input, ev->action))
++	if (pin_digit(&menu.input, ev->action, menu_digits()))
+ 		return true;
+ 	if (ev->action != ACT_SELECT)
+ 		return false;
+-	if (menu.input.digits != SETTINGS_PIN_DIGITS) {
+-		ui_toast(TR(PIN_DIGIT_HINT, "6 digits then OK"));
++	if (menu.input.digits != menu_digits()) {
++		ui_toast(digit_hint(menu_digits()));
+ 		return true;
+ 	}
+ 	uint32_t pin = menu.input.value;
+ 	menu.input = (pin_input_t){ 0 };
+ 	switch (menu.step) {
+ 	case PIN_OLD:
+-		if (!settings_pin_matches(pin)) {
++		if (!(menu.use_read_pin ? settings_read_pin_matches(pin) : settings_pin_matches(pin))) {
+ 			menu.deadline = delay_tries(&menu.attempts, hal_millis());
+ 			ui_toast(TR(PIN_WRONG, "Incorrect PIN"));
+ 			break;
+ 		}
+ 		menu.attempts = 0;
+ 		switch (menu.mode) {
++		case UI_PIN_READ_REMOVE:
++			settings_read_pin_clear();
++			ui_pop();
++			ui_toast(TR(PIN_READ_OFF, "CPS read PIN is off"));
++			break;
+ 		case UI_PIN_REMOVE:
+ 			settings_pin_clear();
+ 			ui_pop();
+@@ -254,6 +274,7 @@ static bool menu_key(const input_event_t *ev)
+ 			ui_toast(open ? TR(PIN_CPS_UNLOCKED, "Programming unlocked") : TR(PIN_CPS_LOCKED, "Programming locked"));
+ 			break;
+ 		}
++		case UI_PIN_READ_SET:
+ 		case UI_PIN_CHANGE:
+ 			menu.step = PIN_NEW;
+ 			break;
+@@ -270,9 +291,12 @@ static bool menu_key(const input_event_t *ev)
+ 			ui_toast(TR(PIN_MISMATCH, "PINs do not match"));
+ 			break;
+ 		}
+-		settings_pin_set(pin, hal_micros());
++		if (menu.use_read_pin)
++			settings_read_pin_set(pin, hal_micros());
++		else
++			settings_pin_set(pin, hal_micros(), 4);
+ 		ui_pop();
+-		ui_toast(TR(PIN_SET, "Startup PIN is on"));
++		ui_toast(menu.use_read_pin ? TR(PIN_READ_ON, "CPS read PIN is on") : TR(PIN_SET, "Startup PIN is on"));
+ 		break;
+ 	}
+ 	return true;
+diff --git a/core/ui/ui_pin.h b/core/ui/ui_pin.h
+index ab07db7..74fd00f 100644
+--- a/core/ui/ui_pin.h
++++ b/core/ui/ui_pin.h
+@@ -9,7 +9,7 @@
+ // Only the boot task reads the physical keypad. It starts radio and host tasks after the owner unlocks the radio.
+ void ui_pin_startup(void);
+ typedef enum {
+-	UI_PIN_CHANGE, UI_PIN_REMOVE, UI_PIN_PROGRAMMING_SETUP, UI_PIN_PROGRAMMING_ACCESS,
++	UI_PIN_CHANGE, UI_PIN_REMOVE, UI_PIN_PROGRAMMING_SETUP, UI_PIN_PROGRAMMING_ACCESS, UI_PIN_READ_SET, UI_PIN_READ_REMOVE,
+ } ui_pin_mode_t;
+ void ui_pin_menu(ui_pin_mode_t mode);
+ extern const ui_scr_def_t ui_pin_screen;
+diff --git a/docs/spec/settings-store.md b/docs/spec/settings-store.md
+index 52d8820..1929985 100644
+--- a/docs/spec/settings-store.md
++++ b/docs/spec/settings-store.md
+@@ -76,7 +76,7 @@ so with two pages a sector is erased once every 64 saves.
+ ### 2.1 Pages
+ 
+ `settings_t` is longer than one slot's payload, so it is stored as pages: page k holds bytes `236 * k` on.
+-`SETTINGS_PAGES` is the number its size needs (2 now, 444 bytes); the page field allows 16 (3776 bytes). Each page is
++`SETTINGS_PAGES` is the number its size needs (2 now, 456 bytes); the page field allows 16 (3776 bytes). Each page is
+ a record with its own length, so `settings_t` grows by appending fields, and a short page fills the fields it has.
+ 
+ | Rule | Why |
+diff --git a/docs/user/17-settings.md b/docs/user/17-settings.md
+index 36343eb..af4abd6 100644
+--- a/docs/user/17-settings.md
++++ b/docs/user/17-settings.md
+@@ -267,15 +267,17 @@ values.
+ ### Startup PIN
+ 
+ On a keypad radio that offers **Set or change startup PIN** under **Settings → My radio**, enter the same
+-six digits twice. After the next power-on, enter that PIN and press **OK**. The radio and its host services
++four digits twice. An existing six-digit PIN keeps its original length until changed. After the next power-on, enter that PIN and press **OK**. The radio and its host services
+ start after the PIN is accepted. Changing or removing the PIN requires the current PIN. Three wrong attempts
+ pause entry for 20 seconds. There is no default PIN.
+ 
+ This is a local access lock. It does not encrypt the codeplug or protect memory from access outside the running
+ firmware, such as the hardware bootloader. Keep your PIN somewhere you can recover it.
+ 
++The **CPS read PIN** is a separate, optional six-digit password. Set it under **Settings → My radio → Set or change CPS read PIN**, even if startup protection is off. The web editor asks for it on each **Read from radio**, over the programming cable. The read password authorizes only codeplug reads. For writing, backups or older software, use **Unlock or relock programming** on the radio, then relock after use. **Remove CPS read PIN** requires the existing read PIN. Both PINs are off on a fresh radio.
++
+ After setting a startup PIN, use **Set or remove programming lock** in the same menu and confirm with the PIN.
+ Reading, writing and backing up the codeplug through the running firmware then require a second local unlock.
+ Choose **Unlock or relock programming**, enter the PIN on the radio and reconnect the computer.
+ Choose that option again and enter the PIN to relock without restarting. Switching the radio off also relocks
+-programming. Enter every PIN on the radio keypad. Host reads pause while the PIN prompt is open.
++programming. Enter the startup PIN and the legacy programming unlock on the radio keypad. Host reads pause while the PIN prompt is open.
+diff --git a/tests/host/cpsFastTest.c b/tests/host/cpsFastTest.c
+index 1a4e729..f1782f0 100644
+--- a/tests/host/cpsFastTest.c
++++ b/tests/host/cpsFastTest.c
+@@ -977,7 +977,25 @@ static void test_fast_programming_lock(void)
+ {
+ 	boot(&dm1701_map, true);
+ 	settings_pin_boot();
+-	settings_pin_set(123456, 98765);
++	CHECK(!settings_read_pin_enabled() && op(CPSF_OP_INFO) == DL_ST_OK);
++	settings_read_pin_set(1234, 54321); // 001234, independent of the startup lock
++	CHECK(settings_flush());
++	boot(&dm1701_map, false);
++	settings_pin_boot();
++	CHECK(!settings_pin_enabled() && settings_read_pin_enabled());
++	uint8_t auth[] = { CPSF_OP_PIN_READ, '0','0','1','2','3','4', CPSF_OP_INFO };
++	CHECK(op(CPSF_OP_INFO) == DL_ST_REFUSED && call(auth, sizeof auth) == DL_ST_OK);
++	auth[7] = CPSF_OP_BEGIN;
++	CHECK(call(auth, sizeof auth) == DL_ST_REFUSED);
++	auth[7] = CPSF_OP_INFO;
++	settings_pin_prompt(true);
++	CHECK(call(auth, sizeof auth) == DL_ST_REFUSED);
++	settings_pin_prompt(false);
++	for (unsigned i = 0; i < 3; i++)
++		CHECK(!settings_read_pin_authorize((const uint8_t *)"901234", 1000+i));
++	CHECK(!settings_read_pin_authorize(auth+1, 1200) && settings_read_pin_authorize(auth+1, 22000));
++	settings_read_pin_clear();
++	settings_pin_set(123456, 98765, 6);
+ 	settings_programming_protect(true);
+ 	CHECK(op(CPSF_OP_INFO) == DL_ST_REFUSED);
+ 	CHECK(op(CPSF_OP_READ) == DL_ST_REFUSED);
+diff --git a/tests/host/cpsTest.c b/tests/host/cpsTest.c
+index 8a68600..60c5840 100644
+--- a/tests/host/cpsTest.c
++++ b/tests/host/cpsTest.c
+@@ -762,7 +762,7 @@ static void test_programming_pin(void)
+ 	CHECK(settings_programming_allowed());
+ 	settings_programming_protect(true);
+ 	CHECK(settings_programming_allowed());  // requires a PIN before protection can start
+-	settings_pin_set(123456, 98765);
++	settings_pin_set(123456, 98765, 6);
+ 	settings_programming_protect(true);
+ 	CHECK(!settings_programming_allowed());
+ 	CHECK(!read_block(1, 0xA0, sizeof b, b) && is_nak());
+diff --git a/tests/host/settingsTest.c b/tests/host/settingsTest.c
+index ddb5dba..7d22b09 100644
+--- a/tests/host/settingsTest.c
++++ b/tests/host/settingsTest.c
+@@ -1233,13 +1233,22 @@ static void test_startup_pin(void)
+ 	sim_flash_create(FLASH_SIZE, &map);
+ 	boot();
+ 	CHECK(settings_pin_can_store() && !settings_pin_enabled() && !settings_pin_matches(12345));
+-	settings_pin_set(12345, 0x12345678);
++	CHECK(settings_startup_digits() == 6 && !settings_read_pin_enabled());
++	settings_read_pin_set(987654, 12345);
++	CHECK(settings_read_pin_enabled() && !settings_pin_enabled() && !settings_programming_allowed());
++	settings_pin_set(42, 777, 4); // 0042
++	CHECK(settings_startup_digits() == 4 && settings_pin_matches(42));
++	settings_pin_clear();
++	CHECK(!settings_pin_enabled() && settings_read_pin_enabled());
++	settings_read_pin_clear();
++	CHECK(settings_programming_allowed());
++	settings_pin_set(12345, 0x12345678, 6);
+ 	CHECK(settings_pin_enabled() && settings_pin_matches(12345));  // entered as 012345
+ 	CHECK(!settings_pin_matches(123456) && !settings_pin_matches(SETTINGS_PIN_LIMIT));
+ 	CHECK(settings_flush());
+ 	boot();
+ 	CHECK(settings_pin_enabled() && settings_pin_matches(12345));
+-	settings_pin_set(876543, 0x23456789);
++	settings_pin_set(876543, 0x23456789, 6);
+ 	CHECK(!settings_pin_matches(12345) && settings_pin_matches(876543));
+ 	CHECK(settings_flush());
+ 	boot();

@@ -137,6 +137,7 @@ PATCHES = (
 	'remaining-user-features.patch',
 	'dm32-ram-defaults.patch',
 	'tier3-codeplug-rx.patch',
+	'optional-access-pins.patch',
 )
 
 
