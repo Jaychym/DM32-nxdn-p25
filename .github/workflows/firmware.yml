@@ -78,6 +78,20 @@ jobs:
             (cd "$T" && ./"$t")
           done
 
+      - name: Decode current NXDN48 TX with MMDVMHost
+        run: |
+          set -eu
+          capture="$RUNNER_TEMP/nxdn48-capture"
+          modem="$RUNNER_TEMP/mmdvmhost"
+          mkdir -p "$capture"
+          (cd build/current/tests/host && ./radioCoreTestAirInterop "$capture")
+          git init -q "$modem"
+          git -C "$modem" fetch -q --depth=1 https://github.com/g4klx/MMDVMHost.git 6ffa6d354a2c185316201c27c831c766a25a5653
+          git -C "$modem" checkout -q --detach FETCH_HEAD
+          c++ -std=c++17 -O2 -I"$modem" "$modem"/{NXDNLICH,NXDNSACCH,NXDNFACCH1,NXDNConvolution,NXDNCRC}.cpp \
+            tests/nxdn/stubs/utils_count.cc tests/nxdn/test_nxdn_current_mmdvm.cc -o "$capture/nxdn-mmdvm"
+          "$capture/nxdn-mmdvm" "$capture/nxdn48.bin"
+
       - name: Check channel privacy selection in the CPS
         run: node --test build/current/site/tests/channel-aes.test.mjs build/current/site/tests/bootimage.test.mjs
 
