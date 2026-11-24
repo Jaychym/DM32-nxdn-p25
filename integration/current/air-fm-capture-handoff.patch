@@ -1,0 +1,246 @@
+diff --git a/core/aprs/aprs.h b/core/aprs/aprs.h
+index c410aea..56e668c 100644
+--- a/core/aprs/aprs.h
++++ b/core/aprs/aprs.h
+@@ -255,6 +255,10 @@ bool aprs_rf_pending(void);
+ bool aprs_can_receive(void);
+ // The receive path is running (the receiver must stay awake: no battery saving)
+ bool aprs_rx_listening(void);
++#if CONFIG_APRS_RX
++// Release the FM audio path before another mode takes the receiver (radio task only).
++void aprs_rx_stop(void);
++#endif
+ // A status packet (">text")
+ bool aprs_send_status(const char *text);
+ // A message with acks and retries; false when one is still waiting or the text is unusable
+diff --git a/core/aprs/aprs_ax25.c b/core/aprs/aprs_ax25.c
+index f85630c..a5dfb49 100644
+--- a/core/aprs/aprs_ax25.c
++++ b/core/aprs/aprs_ax25.c
+@@ -855,6 +855,20 @@ static bool rx_by_stream(void)
+ // try routes the receiver and back
+ #define RX_RETRY_MS	1000u
+ 
++void aprs_rx_stop(void)
++{
++	aprs_s.rx_retry_wait = false;
++	if (!aprs_s.rx_running)
++		return;
++	if (rx_by_board()) {
++		if (board.afsk->rx_stop != NULL)
++			board.afsk->rx_stop();
++	} else {
++		audio_mux_aprs_rx(false);
++	}
++	aprs_s.rx_running = false;
++}
++
+ // The receive path: on while receiving FM with the setting on (radio task, outside the lock)
+ void aprs_ax25_rx_service(const aprs_radio_t *r, uint32_t now_ms)
+ {
+@@ -862,8 +876,12 @@ void aprs_ax25_rx_service(const aprs_radio_t *r, uint32_t now_ms)
+ 	bool own = rx_by_board();
+ 	bool want = aprs_s.cfg.rx_on && r->fm_rx && r->rx_hz != 0 && r->rx_hz == aprs_cfg_freq(&aprs_s.cfg) &&
+ 		    (own || rx_by_stream());
++	if (!want) {
++		aprs_rx_stop();
++		return;
++	}
+ 	// The wait only after a refusal: an old rx_retry_ms compared 24.8 days later would read as in the future
+-	if (want && !aprs_s.rx_running && (!aprs_s.rx_retry_wait || (int32_t)(now_ms - aprs_s.rx_retry_ms) >= 0)) {
++	if (!aprs_s.rx_running && (!aprs_s.rx_retry_wait || (int32_t)(now_ms - aprs_s.rx_retry_ms) >= 0)) {
+ 		aprs_s.rx_peak = 0;
+ 		aprs_s.rx_running = afsk_demod_init(&aprs_s.demod, own ? h->rx_rate_hz : 8000u, demod_frame, NULL);
+ 		if (aprs_s.rx_running && own) {
+@@ -876,18 +894,6 @@ void aprs_ax25_rx_service(const aprs_radio_t *r, uint32_t now_ms)
+ 		} else if (aprs_s.rx_running) {
+ 			audio_mux_aprs_rx(true);
+ 		}
+-	} else if (!want && aprs_s.rx_running) {
+-		if (own) {
+-			if (h->rx_stop != NULL) {
+-				h->rx_stop();
+-			}
+-		} else {
+-			audio_mux_aprs_rx(false);
+-		}
+-		aprs_s.rx_running = false;
+-	}
+-	if (!want) {
+-		aprs_s.rx_retry_wait = false;	// a refusal's wait is for the try it followed, not a later one
+ 	}
+ 	if (aprs_s.rx_running) {
+ 		uint16_t n = (uint16_t)(sizeof(aprs_s.rxbuf) / sizeof(aprs_s.rxbuf[0]));
+diff --git a/core/radio/radio_sm.c b/core/radio/radio_sm.c
+index 894c590..41e1e5e 100644
+--- a/core/radio/radio_sm.c
++++ b/core/radio/radio_sm.c
+@@ -792,6 +792,9 @@ static void end_reception(radio_sm_t *sm, uint32_t now_ms)
+ // Receive on what view.ch says now
+ static void dmr_begin(radio_sm_t *sm);
+ static void dmr_end(radio_sm_t *sm);
++#if RADIO_MDC_RX
++static void mdc_rx_stop(radio_sm_t *sm);
++#endif
+ #if CONFIG_AIR
+ // Not inlined: tune's frame is on the radio task's deepest path
+ static void air_stop(radio_sm_t *sm) __attribute__((noinline));
+@@ -916,6 +919,15 @@ static void tune(radio_sm_t *sm, uint32_t now_ms)
+ 		RADIO_MODE_DMR : RADIO_MODE_FM;
+ 	// P25, NXDN and YSF run with the board in its digital mode, the DMR stack stopped; a retune starts the engine over
+ 	bool air = air_mode(sm->view.ch.mode);
++	if (air) {
++		// The FM sample copy shares the digital provider's interrupt. Release it before opening the provider.
++#if RADIO_MDC_RX
++		mdc_rx_stop(sm);
++#endif
++#if CONFIG_APRS_RX
++		aprs_rx_stop();
++#endif
++	}
+ 	bool air_same = false;
+ 	if (air) {
+ 		mode = (radio_mode_t)sm->view.ch.mode;
+diff --git a/docs/spec/air-interface.md b/docs/spec/air-interface.md
+index 8daeaeb..389b39c 100644
+--- a/docs/spec/air-interface.md
++++ b/docs/spec/air-interface.md
+@@ -205,7 +205,7 @@ before anything is queued: `tx_deny=air_no_tx` ("This mode: receive only").
+ | M17 stream mode voice | written, host tested, in the radio core ([m17.md](m17.md)); `CONFIG_M17`, off by default |
+ | A DMR engine on symbols | not written. The interface carries TDMA (slot length, slot events, the slot clock, per-slot transmit chunks, syncs inside the burst); today's DMR runs on the modem chip's own layer 2 |
+ | 2-level modes | carried (the dibit map, the soft modem's fit) |
+-| AFSK (APRS) | not a symbol mode: its tones ride the audio band. The sample taps can feed a demodulator for it; nothing uses them for that yet |
++| FM audio decoders (APRS and MDC-1200) | The radio task releases the FM capture before starting a digital session. Providers may share the same audio interrupt between FM capture and digital reception. |
+ 
+ ## 9. Bench access
+ 
+diff --git a/tests/host/Makefile b/tests/host/Makefile
+index 151e7e8..239f7d7 100644
+--- a/tests/host/Makefile
++++ b/tests/host/Makefile
+@@ -426,14 +426,6 @@ radioCoreTestP25Nxdn: $(RCP25NX) $(wildcard $(CORE)/radio/*.h) $(wildcard $(CORE
+ 	$(CC) $(CFLAGS) $(CORE_HAL) -I. -DDMR_RX_TRACE=0 -DCONFIG_DMR_IP_GATEWAY=0 -DCONFIG_SFR=1 -DCONFIG_APRS=0 \
+ 		-DCONFIG_P25=1 -DCONFIG_NXDN=1 -DCONFIG_AIR_RAW=1 -o $@ $(RCP25NX) -lm
+ 
+-TESTS += radioCoreTestAirInterop
+-RCINTEROP := $(sort $(RCP25NX) $(RCYSF))
+-radioCoreTestAirInterop: $(RCINTEROP) $(wildcard $(CORE)/radio/*.h) $(wildcard $(CORE)/air/*.h) \
+-                         $(wildcard $(CORE)/nxdn/*.h $(CORE)/p25/*.h $(CORE)/ysf/*.h)
+-	$(CC) $(CFLAGS) $(CORE_HAL) -I. -DDMR_RX_TRACE=0 -DCONFIG_DMR_IP_GATEWAY=0 -DCONFIG_SFR=1 -DCONFIG_APRS=0 \
+-		-DCONFIG_P25=1 -DCONFIG_NXDN=1 -DCONFIG_YSF=1 -DCONFIG_AIR_RAW=1 -DHAL_VOCODER_LEND_BYTES=0x4000 \
+-		-o $@ $(RCINTEROP) -lm
+-
+ # The same with APRS: what the data service hears goes into the station list (a DMR APRS position, docs/spec/aprs.md 8.2)
+ TESTS   += radioCoreTestAprs
+ RCAPRS  := $(RCORE) $(CORE)/aprs/aprs.c $(CORE)/aprs/aprs_ax25.c $(CORE)/aprs/aprs_dmr.c $(CORE)/aprs/aprs_host.c $(APRSLIB) \
+@@ -442,6 +434,15 @@ radioCoreTestAprs: $(RCAPRS) $(wildcard $(CORE)/radio/*.h) $(wildcard $(CORE)/dm
+                    $(CORE)/ui/ui_svc.h $(wildcard $(CORE)/aprs/*.h)
+ 	$(CC) $(CFLAGS) $(CORE_HAL) -I. -DDMR_RX_TRACE=0 -DCONFIG_DMR_IP_GATEWAY=0 -DCONFIG_SFR=1 -o $@ $(RCAPRS) -lm
+ 
++# The three digital modes on one modem, with APRS and MDC-1200 using the shared FM sample capture.
++TESTS += radioCoreTestAirInterop
++RCINTEROP := $(sort $(RCP25NX) $(RCYSF) $(RCAPRS) $(CORE)/mdc/mdc1200.c)
++radioCoreTestAirInterop: $(RCINTEROP) $(wildcard $(CORE)/radio/*.h) $(wildcard $(CORE)/air/*.h) \
++                         $(wildcard $(CORE)/nxdn/*.h $(CORE)/p25/*.h $(CORE)/ysf/*.h)
++	$(CC) $(CFLAGS) $(CORE_HAL) -I. -DDMR_RX_TRACE=0 -DCONFIG_DMR_IP_GATEWAY=0 -DCONFIG_SFR=1 -DCONFIG_APRS=1 -DCONFIG_MDC1200=1 \
++		-DCONFIG_P25=1 -DCONFIG_NXDN=1 -DCONFIG_YSF=1 -DCONFIG_AIR_RAW=1 -DHAL_VOCODER_LEND_BYTES=0x4000 \
++		-o $@ $(RCINTEROP) -lm
++
+ # The same with APRS over DMR only (CONFIG_APRS_AFSK=0): the engine and the DMR backend, nothing of AX.25 compiled
+ TESTS   += radioCoreTestAprsDmr
+ RCAPRSD := $(RCORE) $(CORE)/aprs/aprs.c $(CORE)/aprs/aprs_dmr.c $(CORE)/aprs/aprs_host.c $(CORE)/aprs/aprs_fmt.c \
+diff --git a/tests/host/radioCoreTest.c b/tests/host/radioCoreTest.c
+index b73cb05..cd4f547 100644
+--- a/tests/host/radioCoreTest.c
++++ b/tests/host/radioCoreTest.c
+@@ -171,6 +171,15 @@ static struct {
+ #if CONFIG_AIR
+ static bool air_clock_handoff, air_audio_start_fail;
+ #endif
++#if CONFIG_APRS_RX && CONFIG_P25 && CONFIG_NXDN && CONFIG_YSF
++static bool fm_capture;
++static bool afsk_rx_start(void) { fm_capture = true; return true; }
++static void afsk_rx_stop(void) { fm_capture = false; }
++static uint16_t afsk_rx_read(int16_t *buf, uint16_t n) { (void)buf; (void)n; return 0; }
++static const hal_afsk_t fake_afsk = {
++	.rx_start = afsk_rx_start, .rx_stop = afsk_rx_stop, .rx_read = afsk_rx_read, .rx_rate_hz = 8000,
++};
++#endif
+ static bool a_start(audio_block_cb_t cb, void *ctx)
+ {
+ #if CONFIG_AIR
+@@ -444,6 +453,10 @@ static uint32_t air_fit(uint8_t i, const air_profile_t *pr)
+ }
+ static bool air_open(uint8_t i, air_event_cb_t cb, void *ctx)
+ {
++#if CONFIG_APRS_RX && CONFIG_P25 && CONFIG_NXDN && CONFIG_YSF
++	if (i == 0 && fm_capture)
++		return false;	// the HR_C7000 provider and the FM tap share the copy interrupt
++#endif
+ 	fake_air_t *p = &fair[i];
+ 	uint32_t opens = p->opens, closes = p->closes;
+ 	memset(p, 0, sizeof(*p));
+@@ -527,6 +540,9 @@ const board_t board = {
+ 	.dmr = &sim_modem,
+ 	.audio = &fake_audio,
+ 	.vocoder = &fake_vocoder,
++#if CONFIG_APRS_RX && CONFIG_P25 && CONFIG_NXDN && CONFIG_YSF
++	.afsk = &fake_afsk,
++#endif
+ #if CONFIG_AIR
+ 	.air = &fake_air0,
+ #endif
+@@ -11769,6 +11785,43 @@ static void test_ysf_cross_dt_rx(void)
+ #endif
+ 
+ #if CONFIG_P25 && CONFIG_NXDN && CONFIG_YSF
++#if CONFIG_APRS_RX
++static void test_air_after_fm_capture(void)
++{
++	static const uint8_t modes[] = { RADIO_MODE_P25, RADIO_MODE_NXDN, RADIO_MODE_YSF };
++	dmr_start(true);
++	req(RREQ_VFO_SET, 144390000);
++	req(RREQ_MODE, RADIO_MODE_FM);
++	aprs_cfg_t cfg;
++	aprs_get_cfg(&cfg);
++	cfg.region = APRS_REGION_CUSTOM;
++	cfg.freq_hz = 144390000;
++	cfg.rx_on = true;
++	aprs_set_cfg(&cfg, now);
++	for (unsigned i = 0; i < sizeof modes / sizeof modes[0]; i++) {
++		run(100);
++		CHECK(fm_capture && aprs_rx_listening());
++		req(RREQ_MODE, modes[i]);
++		CHECK(sm.view.ch.mode == modes[i] && fair[0].open && !fm_capture && !aprs_rx_listening());
++		req(RREQ_MODE, RADIO_MODE_FM);
++	}
++	cfg.rx_on = false;
++	aprs_set_cfg(&cfg, now);
++	run(100);
++#if RADIO_MDC_RX
++	chans[1].ani_type = CODEPLUG_ANI_MDC1200;
++	chans[1].ani_opts = CODEPLUG_ANI_DECODE;
++	req(RREQ_ZONE_POS, 0);
++	run(100);
++	CHECK(sm.view.ch.mode == RADIO_MODE_FM && fm_capture && sm.mdc_rx);
++	req(RREQ_MODE, RADIO_MODE_P25);
++	CHECK(fair[0].open && !fm_capture && !sm.mdc_rx);
++	req(RREQ_MODE, RADIO_MODE_FM);
++#endif
++	setup_codeplug();
++}
++#endif
++
+ static void test_air_interop(void)
+ {
+ 	static const struct { uint8_t mode, profile; const char *capture; } cases[] = {
+@@ -12109,6 +12162,9 @@ int main(int argc, char **argv)
+ 	test_ysf_cross_dt_rx();
+ #endif
+ #if CONFIG_P25 && CONFIG_NXDN && CONFIG_YSF
++#if CONFIG_APRS_RX
++	test_air_after_fm_capture();
++#endif
+ 	test_air_interop();
+ #endif
+ #if CONFIG_M17
