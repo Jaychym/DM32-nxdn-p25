@@ -1,0 +1,173 @@
+diff --git a/core/ui/ui_dual.c b/core/ui/ui_dual.c
+index 46ccb3f..7e594fa 100644
+--- a/core/ui/ui_dual.c
++++ b/core/ui/ui_dual.c
+@@ -47,7 +47,7 @@ static uint32_t off_ms;		// the UI stopped the watch (the radio view may still s
+ // quick settings show it (its changes for now included) while the receiver is on the other one
+ typedef struct {
+ 	bool valid;
+-	bool vfo, temporary, am, vox_on, tx_voice_lock;
++	bool vfo, temporary, am, vox_on, tx_voice_lock, tx_voice_clear;
+ 	uint16_t zone_index, zone_pos, zone_size, channel_number, tot_s;
+ 	char zone_name[CODEPLUG_NAME_LEN + 1];
+ 	channel_t ch;
+@@ -218,6 +218,7 @@ static void pane_fill(uint8_t i)
+ 	p->mode = shown_mode(&ch);
+ 	p->rx_hz = ch.rx_hz;
+ 	p->tx_voice_lock = s->valid && s->tx_voice_lock;
++	p->tx_voice_clear = s->valid && s->tx_voice_clear;
+ 	if (p->mode == RADIO_MODE_P25 || p->mode == RADIO_MODE_NXDN || p->mode == RADIO_MODE_YSF || p->mode == RADIO_MODE_M17)
+ 		return;	// no tone or slot: the engine's own squelch (the channel's settings say which)
+ 	sbuf_t b;
+@@ -263,7 +264,7 @@ static void snap_take(uint8_t i, const radio_view_t *v)
+ {
+ 	snap_t *s = &snap[i];
+ 	bool was = s->valid;
+-	bool lock = s->tx_voice_lock;
++	bool lock = s->tx_voice_lock, clear = s->tx_voice_clear;
+ 	uint8_t power = s->power;
+ 	static channel_t ch;
+ 	ch = s->ch;
+@@ -286,8 +287,10 @@ static void snap_take(uint8_t i, const radio_view_t *v)
+ 	s->power = v->power;
+ 	s->temp = v->temp;
+ 	s->squelch = v->squelch;
+-	if (v->state != RS_TX)
++	if (v->state != RS_TX) {
+ 		s->tx_voice_lock = ui_voice_lock_for_tx(v);
++		s->tx_voice_clear = ui_voice_clear_for_tx(v);
++	}
+ #if CONFIG_DMR
+ 	s->active = v->dmr.active;
+ 	s->rmo = v->dmr.rmo;
+@@ -314,7 +317,8 @@ static void snap_take(uint8_t i, const radio_view_t *v)
+ 	if (target != s->target_id || ts != s->ts)
+ 		refill[i] = true;
+ #endif
+-	if (!was || power != s->power || lock != s->tx_voice_lock || memcmp(&ch, &s->ch, sizeof ch) != 0)
++	if (!was || power != s->power || lock != s->tx_voice_lock || clear != s->tx_voice_clear ||
++	    memcmp(&ch, &s->ch, sizeof ch) != 0)
+ 		refill[i] = true;
+ }
+ 
+@@ -954,6 +958,7 @@ static bool find_again(ui_dual_t *d)
+ 	cp_serial = codeplug_serial();
+ 	for (uint8_t i = 0; i < 2; i++) {
+ 		snap[i].tx_voice_lock = d->pane[i].tx_voice_lock = false;
++		snap[i].tx_voice_clear = d->pane[i].tx_voice_clear = false;
+ 		if (ref[i].vfo)
+ 			continue;
+ 		ui_dual_ref_t r;
+diff --git a/core/ui/ui_screens.c b/core/ui/ui_screens.c
+index 622e638..f486faf 100644
+--- a/core/ui/ui_screens.c
++++ b/core/ui/ui_screens.c
+@@ -504,6 +504,29 @@ bool ui_voice_lock_for_tx(const radio_view_t *v)
+ 	}
+ }
+ 
++bool ui_voice_clear_for_tx(const radio_view_t *v)
++{
++#if CONFIG_DMR
++	return v->ch.mode == RADIO_MODE_DMR && v->dmr.active && v->dmr.codec &&
++	       !v->ch.rx_only && !v->aprs_tx && !v->tx_auto && !v->hotspot &&
++	       !v->dmr.privacy && v->dmr.tx_privacy == RDMR_PRIVACY_NONE;
++#else
++	(void)v;
++	return false;
++#endif
++}
++
++static int draw_clear_voice(const font_t *f, int x, int y, color_t color)
++{
++	int d = voice_lock_height(f) - 2;
++	int top = y + (f->h - d) / 2;
++	gfx_hline(x + 1, top, d - 2, color);
++	gfx_hline(x + 1, top + d - 1, d - 2, color);
++	gfx_vline(x, top + 1, d - 2, color);
++	gfx_vline(x + d - 1, top + 1, d - 2, color);
++	return x + d + f->w / 2;
++}
++
+ // Status strip (P2): state pill, mode, monitor, lock, unread messages, signal, battery.
+ // A titled screen (prefix and / or name) on a display under UI_TALL_PX high merges its title into the strip
+ // (wireframes 160x128 and 128x64): the pill shows only while not idle, the signal bars and the battery give way to the
+@@ -676,13 +699,20 @@ static int draw_top_as(const radio_view_t *v, radio_state_t st, const ui_state_t
+ 	if (v->aprs_tx)
+ 		mw = "FM";
+ 	int lx = gfx_text(f, x, ty, mw, sfg);
+-	bool voice_lock = ui_voice_lock_for_tx(v);
++	if (!titled && st == RS_IDLE && !v->hotspot && !v->aprs_tx && lx + f->w + voice_lock_width(f) <= rx) {
++		bool voice_lock = ui_voice_lock_for_tx(v), voice_clear = ui_voice_clear_for_tx(v);
+ #if CONFIG_DUAL_WATCH
+-	if (s->dual.on)
+-		voice_lock = s->home_compact_dual && s->dual.pane[s->dual.sel].tx_voice_lock;
++		if (s->dual.on) {
++			const ui_dual_pane_t *pane = &s->dual.pane[s->dual.sel];
++			voice_lock = pane->tx_voice_lock;
++			voice_clear = pane->tx_voice_clear;
++		}
+ #endif
+-	if (!titled && st == RS_IDLE && !v->hotspot && voice_lock && lx + f->w + voice_lock_width(f) <= rx)
+-		lx = draw_voice_lock(f, lx + f->w / 2, ty, swarn);
++		if (voice_lock)
++			lx = draw_voice_lock(f, lx + f->w / 2, ty, swarn);
++		else if (voice_clear)
++			lx = draw_clear_voice(f, lx + f->w / 2, ty, sfg);
++	}
+ #if CONFIG_DUAL_WATCH
+ 	if (s->dual.on && !v->aprs_tx && strip_fits(f, lx, rx, TR(TOP_CHIP_DUAL, "DUAL")))
+ 		lx = gfx_text(f, lx + f->w, ty, TR(TOP_CHIP_DUAL, "DUAL"), swarn);
+diff --git a/core/ui/ui_screens.h b/core/ui/ui_screens.h
+index e77ae4a..59b666e 100644
+--- a/core/ui/ui_screens.h
++++ b/core/ui/ui_screens.h
+@@ -48,6 +48,7 @@ typedef struct {
+ 
+ // A loaded privacy key for the visible channel, or the protection of an active voice transmission.
+ bool ui_voice_lock_for_tx(const radio_view_t *v);
++bool ui_voice_clear_for_tx(const radio_view_t *v);
+ 
+ #if CONFIG_DUAL_WATCH
+ // Dual watch (docs/ux/dual-watch.md): the two channels Home shows, A and B, each a channel of any zone or the VFO. Read
+@@ -65,6 +66,7 @@ typedef struct {
+ 	bool rx;		// a call or signal coming in on it now (on two receivers, both can)
+ 	bool heard;		// its audio is playing (with two calls at once, one of them)
+ 	bool tx_voice_lock;	// last tuned view showed a usable transmit privacy key
++	bool tx_voice_clear;	// last tuned view showed a DMR channel with privacy off
+ 	bool rx_voice_lock;	// current call supplied protected voice to the codec
+ 	bool rx_privacy_blocked;	// protected voice of the current call is withheld
+ 	bool busy;		// one receiver: a look in the wait after a call on the other pane found a signal here (not
+diff --git a/docs/user/09-dmr.md b/docs/user/09-dmr.md
+index a1bf392..4cc9fd1 100644
+--- a/docs/user/09-dmr.md
++++ b/docs/user/09-dmr.md
+@@ -300,6 +300,8 @@ VFO, open **Quick → AES key**. When the tile reads **AES-128** or **128**, its
+   traffic key refuses **PTT**.
+ - **\***, **6** turns privacy on for your calls ("Privacy on for now"). **Back** on Home turns it off again.
+ - Home and the transmit screen show a padlock for Basic Privacy, Enhanced Privacy or either AES type with a usable transmit key.
++  The Home strip shows a hollow circle on a voice-capable DMR channel with privacy off. If privacy is selected and its
++  key is unavailable, no privacy symbol appears.
+   The caller's name gets a padlock when the radio starts decoding protected voice. When the cipher withholds audio, the
+   call says **Encrypted: not played**.
+ 
+diff --git a/tests/host/uiFlowTest.c b/tests/host/uiFlowTest.c
+index 208412b..dfe8784 100644
+--- a/tests/host/uiFlowTest.c
++++ b/tests/host/uiFlowTest.c
+@@ -246,6 +246,7 @@ static const flow_t flows[] = {
+ 	{ "9 power one step", "", "quick 1 back", "power=8 screen=home", 3, false },
+ 	{ "9 squelch 2 steps (FM)", "down", "quick 2 up up back", "sq=7 screen=home", 5, false },
+ 	{ "10 privacy", "", "quick 6 back", "privacy=1 screen=home", 3, false },
++	{ "Clear DMR voice is marked on Home", "", "", "markafter=DMR", 0, false },
+ 	{ "Voice lock on Home with a cipher key", "cipher:ready", "", "markafter=DMR", 0, false },
+ 	{ "No voice lock with a missing cipher key", "cipher:missing", "", "nomarkafter=DMR hides=Priv", 0, false },
+ 	{ "Voice lock and ENC during a DMR over", "cipher:ready", "pttdown", "shows=ENC markbefore=TS1", 1, false },
+@@ -253,6 +254,7 @@ static const flow_t flows[] = {
+ 	{ "Basic privacy shows the TX lock", "quick 6 back", "pttdown", "shows=ENC markbefore=TS1", 1, false },
+ 	{ "Digi voice sent in the clear has no TX lock", "", "pttdown", "hides=ENC nomarkbefore=TS1", 1, false },
+ 	{ "DMR decrypted RX marks the caller", "", "rx:9991234,201,a", "markbefore=Joe hides=Encrypted:", 0, false },
++	{ "Encrypted DMR RX does not inherit the channel clear marker", "", "rx:9991234,201,e", "nomarkbefore=Joe shows=Encrypted:", 0, false },
+ 	{ "DMR encrypted RX without a usable cipher warns", "cipher:ready", "rx:9991234,201,e", "nomarkbefore=Joe shows=Encrypted:", 0, false },
+ 	{ "DMR clear RX ignores the transmit key", "cipher:ready", "rx:9991234,201,g", "nomarkbefore=Joe hides=Encrypted:", 0, false },
+ #if CONFIG_TONE_SCAN

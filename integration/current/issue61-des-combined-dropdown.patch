@@ -1,0 +1,226 @@
+diff --git a/docs/user/07-channels-zones-vfo.md b/docs/user/07-channels-zones-vfo.md
+index 0c6b7bc..fde34b7 100644
+--- a/docs/user/07-channels-zones-vfo.md
++++ b/docs/user/07-channels-zones-vfo.md
+@@ -165,7 +165,7 @@ save or discard your changes first.
+ 
+ On a build with legacy DES-OFB, use the codeplug editor for a conventional P25 memory channel. In **Radio** →
+ **Traffic keys**, add **P25 DES-OFB** with its hexadecimal key ID and 16 hexadecimal digits. In the channel
+-editor choose that key ID in **P25 DES-OFB**. Selecting AES-256 or DES-OFB applies one cipher to that channel.
++editor select the algorithm and key ID in **Encryption**.
+ The radio refuses PTT if the programmed DES key is unavailable. Use this mode for legacy interoperability.
+ 
+ 
+diff --git a/site/i18n/en.json b/site/i18n/en.json
+index a8bd652..13623d4 100644
+--- a/site/i18n/en.json
++++ b/site/i18n/en.json
+@@ -1802,7 +1802,7 @@
+  "editor.p25.tx_nac": "TX NAC (hex; blank: the RX NAC)",
+  "editor.p25.aes": "AES-256 encryption",
+  "editor.p25.aes_help": "Sends encrypted and plays calls encrypted with this key. Where the law forbids encryption (amateur bands in most countries), leave it off.",
+- "editor.p25.des_help": "Use a DES-OFB key on a legacy conventional P25 channel.",
++ "editor.p25.encryption": "Encryption",
+  "editor.p25.key_id": "Key ID (hex)",
+  "editor.p25.nac_any": "Leave blank for 293, the usual NAC. F7E receives every NAC.",
+  "editor.p25.unit_id": "Unit ID",
+diff --git a/site/i18n/es.json b/site/i18n/es.json
+index f4932ca..131191a 100644
+--- a/site/i18n/es.json
++++ b/site/i18n/es.json
+@@ -1802,7 +1802,7 @@
+  "editor.p25.tx_nac": "NAC de TX (hex; en blanco: el de RX)",
+  "editor.p25.aes": "Cifrado AES-256",
+  "editor.p25.aes_help": "Transmite cifrado y reproduce las llamadas cifradas con esta clave. Donde la ley prohíbe el cifrado (bandas de aficionados en casi todos los países), déjalo apagado.",
+- "editor.p25.des_help": "Usa una clave DES-OFB en un canal P25 convencional para equipos antiguos.",
++ "editor.p25.encryption": "Cifrado",
+  "editor.p25.key_id": "ID de clave (hex)",
+  "editor.p25.nac_any": "Déjelo en blanco para 293, el NAC habitual. F7E recibe todos los NAC.",
+  "editor.p25.unit_id": "ID de unidad",
+diff --git a/site/i18n/it.json b/site/i18n/it.json
+index 135c1f6..f07865b 100644
+--- a/site/i18n/it.json
++++ b/site/i18n/it.json
+@@ -1802,7 +1802,7 @@
+  "editor.p25.tx_nac": "NAC TX (esadecimale; vuoto: quello RX)",
+  "editor.p25.aes": "Cifratura AES-256",
+  "editor.p25.aes_help": "Trasmette cifrato e riproduce le chiamate cifrate con questa chiave. Dove la legge vieta la cifratura (bande radioamatoriali quasi ovunque), lasciala disattivata.",
+- "editor.p25.des_help": "Usa una chiave DES-OFB su un canale P25 convenzionale per apparati legacy.",
++ "editor.p25.encryption": "Cifratura",
+  "editor.p25.key_id": "ID chiave (hex)",
+  "editor.p25.nac_any": "Lascia vuoto per 293, il NAC usuale. F7E riceve ogni NAC.",
+  "editor.p25.unit_id": "ID unità",
+diff --git a/site/i18n/zh.json b/site/i18n/zh.json
+index b0cec91..2a3f8db 100644
+--- a/site/i18n/zh.json
++++ b/site/i18n/zh.json
+@@ -1802,7 +1802,7 @@
+  "editor.p25.tx_nac": "发射 NAC（十六进制；留空：同接收）",
+  "editor.p25.aes": "AES-256 加密",
+  "editor.p25.aes_help": "以加密方式发射，并播放用此密钥加密的呼叫。法律禁止加密的地方（大多数国家的业余频段）请保持关闭。",
+- "editor.p25.des_help": "在旧式 P25 常规信道上使用 DES-OFB 密钥。",
++ "editor.p25.encryption": "加密",
+  "editor.p25.key_id": "密钥 ID（十六进制）",
+  "editor.p25.nac_any": "留空则为常用 NAC 293。F7E 接收所有 NAC。",
+  "editor.p25.unit_id": "单元 ID",
+diff --git a/site/static/js/codeplug/mode_p25.js b/site/static/js/codeplug/mode_p25.js
+index e6612c6..fae49ac 100644
+--- a/site/static/js/codeplug/mode_p25.js
++++ b/site/static/js/codeplug/mode_p25.js
+@@ -75,8 +75,8 @@ export const p25Kind = {
+ 		// blank: the default NAC; the TX NAC's, the RX NAC
+ 		{ ...nacFieldDef("rxNac", "editor.p25.rx_nac"), blank: NAC_DEFAULT, help: "editor.p25.nac_any" },
+ 		{ ...nacFieldDef("txNac", "editor.p25.tx_nac"), blank: (p) => (p.rxNac === NAC_ANY ? NAC_DEFAULT : p.rxNac) },
+-		{ key: "aes", label: "editor.p25.aes", type: "bool", help: "editor.p25.aes_help", exclusive: "des" },
+-		{ key: "des", keyToken: "p25des", exclusive: "aes", label: "editor.keys.alg.p25des", type: "bool", help: "editor.p25.des_help" },
++		{ key: "aes", label: "editor.p25.encryption", type: "bool", help: "editor.p25.aes_help",
++			ciphers: [["aes", "p25"], ["des", "p25des"]] },
+ 		{ key: "keyId", label: "editor.p25.key_id", type: "hex", min: 0, max: 0xFFFF, digits: 4, format: (v) => v.toString(16).toUpperCase().padStart(4, "0") },
+ 	],
+ 	validate(c, p, problem) {
+diff --git a/site/static/js/editor/views.js b/site/static/js/editor/views.js
+index bdfc06d..2017412 100644
+--- a/site/static/js/editor/views.js
++++ b/site/static/js/editor/views.js
+@@ -179,7 +179,9 @@ export function bulkColumns(table, m, t, { rows = [], ...opts } = {}) {
+ 		options: () => aesOptions(m, t, alg, null, "editor.none"),
+ 		set: (r, id) => {
+ 			if (!dmr) {
++				if (token === "p25" && r.params?.des && id == null) return;
+ 				r.params = { ...r.params, aes: id != null, keyId: id ?? 0 };
++				if (token === "p25" && id != null) r.params.des = false;
+ 			} else if (id != null || r.dmrPrivacy === DMR_PRIV.aes || r.dmrAesKid) {
+ 				r.dmrPrivacy = id != null ? DMR_PRIV.aes : DMR_PRIV.off;
+ 				r.dmrPrivacyKey = id ?? 0;
+@@ -366,19 +368,36 @@ export function channelForm(m, t, { features = null } = {}) {
+ 				}
+ 				continue;
+ 			}
+-			const cipher = spec.keyToken ? KEY_ALGS.find((a) => a.token === spec.keyToken) : spec.key === "aes" ? alg : null;
+-			if (cipher) {
+-				const get = (r) => on(r) && r.params?.[spec.key] ? r.params.keyId : null;
+-				const hasFeature = !cipher.feature || features == null ||
+-					(Array.isArray(features) ? features : String(features).split(",")).includes(cipher.feature);
+-				kindFields.push(sel(`k${k.id}.${spec.key}`, `editor.keys.alg.${cipher.token}`,
+-					(r) => aesOptions(m, t, cipher, get(r), "editor.alias.off"), {
+-						show: (r) => on(r) && (hasFeature || r.params?.[spec.key]), get, help: t(spec.help),
+-						set: (r, id) => {
+-							if (!on(r) || (id == null && get(r) == null)) return;
+-							r.params = { ...r.params, [spec.key]: id != null, keyId: id ?? 0 };
+-							if (spec.exclusive) r.params[spec.exclusive] = false;
+-						},
++			if (spec.ciphers) {
++				const have = Array.isArray(features) ? features : String(features ?? "").split(",");
++				const ciphers = spec.ciphers.map(([flag, token]) => ({ flag, alg: KEY_ALGS.find((a) => a.token === token) }));
++				const get = (r) => {
++					const active = on(r) && ciphers.find(({ flag }) => r.params?.[flag]);
++					return active ? `${active.flag}:${r.params.keyId}` : null;
++				};
++				kindFields.push(sel(`k${k.id}.encryption`, spec.label, (r) => [
++					[null, t("editor.alias.off")],
++					...ciphers.flatMap(({ flag, alg }) => {
++						const current = r.params?.[flag] ? r.params.keyId : null;
++						if (alg.feature && features != null && !have.includes(alg.feature) && current == null) return [];
++						return aesOptions(m, t, alg, current, "editor.alias.off").slice(1)
++							.map(([id, text]) => [`${flag}:${id}`, `${t(`editor.keys.alg.${alg.token}`)} · ${text}`]);
++					}),
++				], {
++					show: on, get, help: t(spec.help),
++					set: (r, v) => {
++						if (!on(r)) return;
++						const [selected, id] = (v ?? "").split(":");
++						r.params = { ...r.params, keyId: id == null ? 0 : Number(id) };
++						for (const { flag } of ciphers) r.params[flag] = flag === selected;
++					},
++				}));
++			} else if (alg && spec.key === "aes") {
++				const get = (r) => on(r) && r.params?.aes ? r.params.keyId : null;
++				kindFields.push(sel(`k${k.id}.aes`, `editor.keys.alg.${alg.token}`,
++					(r) => aesOptions(m, t, alg, get(r), "editor.alias.off"), {
++						show: on, get, help: t(spec.help),
++						set: (r, id) => on(r) && (r.params = { ...r.params, aes: id != null, keyId: id ?? 0 }),
+ 					}));
+ 			} else {
+ 				kindFields.push(specField(spec, t, holder, `k${k.id}`));
+diff --git a/site/tests/channel-aes.test.mjs b/site/tests/channel-aes.test.mjs
+index f9d28c3..a49eb2f 100644
+--- a/site/tests/channel-aes.test.mjs
++++ b/site/tests/channel-aes.test.mjs
+@@ -18,7 +18,7 @@ test("channel AES picks matching IDs, including zero, and survives codeplug enco
+ 	model.keyring = [{ alg: 0x25, id: 7, key }, { alg: 0x84, id: 65535, key }, { alg: 3, id: 0, key }];
+ 	const fields = channelForm(model, (s) => s);
+ 	fields.find((f) => f.key === "dmrPrivacy").set(dmr, DMR_PRIV.aes);
+-	for (const [channel, name, id] of [[dmr, "dmrPrivacyKey", 7], [p25, "k2.aes", 65535], [nxdn, "k4.aes", 0]]) {
++	for (const [channel, name, id] of [[dmr, "dmrPrivacyKey", 7], [p25, "k2.encryption", "aes:65535"], [nxdn, "k4.aes", 0]]) {
+ 		const f = fields.find((field) => field.key === name);
+ 		assert.ok(f.show(channel));
+ 		assert.deepEqual(f.options(channel).map(([keyId]) => keyId), [null, id]);
+@@ -35,8 +35,8 @@ test("channel AES picks matching IDs, including zero, and survives codeplug enco
+ 	assert.equal(restored.channels[2].params.keyId, 0);
+ 
+ 	model.keyring = [];
+-	const field = fields.find((f) => f.key === "k2.aes");
+-	assert.deepEqual(field.options(p25).map(([id]) => id), [null, 65535]);
++	const field = fields.find((f) => f.key === "k2.encryption");
++	assert.deepEqual(field.options(p25).map(([id]) => id), [null, "aes:65535"]);
+ });
+ 
+ test("DMR Basic, Enhanced and Off persist independently, and exports redact keys", () => {
+@@ -114,16 +114,12 @@ test("P25 DES-OFB lists only DES keys and preserves the selected cipher on disk"
+ 	m.channels.push(p25);
+ 	m.keyring = [{ alg: 0x81, id: 0, key: "133457799BBCDFF1" }, { alg: 0x84, id: 5, key: "AB".repeat(32) }];
+ 	const fields = channelForm(m, (s) => s, { features: "P25,P25_DES" });
+-	const aes = fields.find((f) => f.key === "k2.aes");
+-	const des = fields.find((f) => f.key === "k2.des");
+-	assert.ok(des.show(p25));
+-	assert.deepEqual(des.options(p25).map(([id]) => id), [null, 0]);
+-	assert.deepEqual(aes.options(p25).map(([id]) => id), [null, 5]);
+-	aes.set(p25, 5);
+-	des.set(p25, 0);
+-	aes.set(p25, null);
+-	assert.equal(aes.get(p25), null);
+-	assert.equal(des.get(p25), 0);
++	const encryption = fields.find((f) => f.key === "k2.encryption");
++	assert.ok(encryption.show(p25));
++	assert.deepEqual(encryption.options(p25).map(([id]) => id), [null, "aes:5", "des:0"]);
++	encryption.set(p25, "aes:5");
++	encryption.set(p25, "des:0");
++	assert.equal(encryption.get(p25), "des:0");
+ 	const image = encode(m);
+ 	const restored = decode(image);
+ 	assert.equal(restored.channels[0].params.des, true);
+@@ -134,10 +130,10 @@ test("P25 DES-OFB lists only DES keys and preserves the selected cipher on disk"
+ 	const exported = image.clone();
+ 	withoutSecrets(exported.bytes);
+ 	assert.deepEqual(decode(exported).keyring, []);
+-	aes.set(p25, 5);
+-	assert.equal(des.get(p25), null);
+-	assert.equal(aes.get(p25), 5);
+-	const disabled = channelForm(m, (s) => s, { features: "P25" }).find((f) => f.key === "k2.des");
+-	assert.equal(Boolean(disabled.show(p25)), false);
+-	assert.ok(disabled.show(restored.channels[0]));
++	encryption.set(p25, "aes:5");
++	assert.equal(encryption.get(p25), "aes:5");
++	assert.equal(p25.params.des, false);
++	const disabled = channelForm(m, (s) => s, { features: "P25" }).find((f) => f.key === "k2.encryption");
++	assert.deepEqual(disabled.options(p25).map(([id]) => id), [null, "aes:5"]);
++	assert.ok(disabled.options(restored.channels[0]).some(([id]) => id === "des:0"));
+ });
+diff --git a/site/tests/editor.test.mjs b/site/tests/editor.test.mjs
+index d7829c0..3c72148 100644
+--- a/site/tests/editor.test.mjs
++++ b/site/tests/editor.test.mjs
+@@ -108,6 +108,13 @@ test("Bulk Edit AES selects installed keys of one scheme and clears only AES", (
+ 			f.set(r, null);
+ 			assert.equal(kind ? r.params.aes : r.dmrPrivacy === DMR_PRIV.aes, false);
+ 		}
++		if (kind === 2) {
++			rows[0].params = { aes: false, des: true, keyId: 17 };
++			f.set(rows[0], null);
++			assert.deepEqual(rows[0].params, { aes: false, des: true, keyId: 17 });
++			f.set(rows[0], n + 1);
++			assert.deepEqual(rows[0].params, { aes: true, des: false, keyId: n + 1 });
++		}
+ 		if (!kind) {
+ 			rows[0].dmrPrivacy = DMR_PRIV.basic;
+ 			rows[0].dmrPrivacyKey = 23;

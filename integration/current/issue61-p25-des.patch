@@ -1,0 +1,1232 @@
+diff --git a/boards/dm32/config.mk b/boards/dm32/config.mk
+index 9b3c9a8..18b4ef5 100644
+--- a/boards/dm32/config.mk
++++ b/boards/dm32/config.mk
+@@ -26,2 +26,4 @@ CONFIG_VOX ?= n
+ CONFIG_RX_EXT_ON ?= n
++# Conventional P25 DES-OFB is available when both of its dependencies are enabled.
++CONFIG_P25_DES ?= $(if $(and $(filter y,$(CONFIG_P25)),$(filter y,$(CONFIG_AIR_AES))),y,n)
+ # Keep two simultaneous TCP connections and omit optional IP services in the default DM-32UV image.
+diff --git a/config/features.mk b/config/features.mk
+index 15aeb11..b047612 100644
+--- a/config/features.mk
++++ b/config/features.mk
+@@ -337,2 +337,4 @@ CONFIG_MBE := $(CONFIG_IMBE)
+ CONFIG_AIR_AES ?= $(CONFIG_AIR)
++# Legacy single DES-OFB on conventional P25 Phase 1 memory channels.
++CONFIG_P25_DES ?= n
+ # diagnostics: debug link commands that open an air interface session and move raw symbols, for bench tests (needs an
+@@ -353,3 +355,3 @@ FEATURES := USB_SERIAL_REQUEST FM SUBTONE TONE_SCAN DMR DMR_PRIVACY DMR_TALKER_A
+ 	USB HOSTLINK USB_NETWORK NET_PPP HOTSPOT HOTSPOT_SPLIT DEBUGLINK CPS_OPENFW CPS_FAST VFO VFO_FM VFO_DMR DIAG BACKLIGHT_TEST FONT_XL FONT_AA FONT_BIG LANG_ES LANG_IT LANG_FR LANG_ZH LANG_DEFAULT_ES LANG_DEFAULT_IT LANG_DEFAULT_FR LANG_DEFAULT_ZH UI_COLOR UI_SETTINGS SCAN DUAL_WATCH BEEP FM_TX_TONES DTMF \
+-	RX_EXT RX_EXT_ON AIR_AES VOX REF_TRIM BATTERY_SAVE VIBRATE GPS AUDIO_PROBE STUB_ENTRY NAND_STORAGE CRASH_LOG CRASH_SCREEN CRASH_REPORT WATCHDOG FAULT_TRACE AM_RX BCAST_FM SPLASH_IMAGE APRS APRS_AFSK APRS_DMR APRS_RX APRS_IGATE GPS_SKY GPS_UTM KEY_ASSIGN CHANNEL_LIST CHANNEL_EDIT ZONE_EDIT CONTACT_EDIT VOLUME_BAR P25 P25_TRUNK NXDN YSF M17 AIR_RAW UI_KAWAII MDC1200
++	RX_EXT RX_EXT_ON AIR_AES VOX REF_TRIM BATTERY_SAVE VIBRATE GPS AUDIO_PROBE STUB_ENTRY NAND_STORAGE CRASH_LOG CRASH_SCREEN CRASH_REPORT WATCHDOG FAULT_TRACE AM_RX BCAST_FM SPLASH_IMAGE APRS APRS_AFSK APRS_DMR APRS_RX APRS_IGATE GPS_SKY GPS_UTM KEY_ASSIGN CHANNEL_LIST CHANNEL_EDIT ZONE_EDIT CONTACT_EDIT VOLUME_BAR P25 P25_TRUNK P25_DES NXDN YSF M17 AIR_RAW UI_KAWAII MDC1200
+ 
+@@ -428,2 +430,3 @@ $(if $(and $(call feature_on,AIR_RAW),$(if $(call feature_on,AIR),,x)),$(error C
+ $(if $(and $(call feature_on,AIR_AES),$(if $(call feature_on,AIR),,x)),$(error CONFIG_AIR_AES=y needs CONFIG_P25=y, CONFIG_NXDN=y or CONFIG_YSF=y (an air-framed mode)))
++$(if $(and $(call feature_on,P25_DES),$(if $(and $(call feature_on,P25),$(call feature_on,AIR_AES)),,x)),$(error CONFIG_P25_DES=y needs CONFIG_P25=y and CONFIG_AIR_AES=y))
+ $(if $(and $(call feature_on,P25_TRUNK),$(if $(call feature_on,P25),,x)),$(error CONFIG_P25_TRUNK=y needs CONFIG_P25=y))
+diff --git a/core/config.h b/core/config.h
+index 8c1064b..1293e60 100644
+--- a/core/config.h
++++ b/core/config.h
+@@ -347,2 +347,5 @@
+ #endif
++#ifndef CONFIG_P25_DES
++#define CONFIG_P25_DES			0
++#endif
+ // P25 trunked: the codec of its systems and channels (docs/spec/p25-codeplug.md 3), the control channel decoded, voice
+@@ -491,2 +494,5 @@
+ #endif
++#if CONFIG_P25_DES && (!CONFIG_P25 || !CONFIG_AIR_AES)
++#error "CONFIG_P25_DES needs CONFIG_P25 and CONFIG_AIR_AES"
++#endif
+ #if CONFIG_AIR_AES && !CONFIG_AIR
+diff --git a/core/crypto/des.c b/core/crypto/des.c
+new file mode 100644
+index 0000000..0734ea4
+--- /dev/null
++++ b/core/crypto/des.c
+@@ -0,0 +1,163 @@
++// SPDX-License-Identifier: MIT
++// Copyright (c) 2026 The RadioFoundry Authors
++#include "../config.h"
++#if CONFIG_P25_DES
++#include "des.h"
++
++// FIPS 46-3, pp. 10–16. Positions are one-based from the most significant bit.
++static const uint8_t ip[] = {
++	58,50,42,34,26,18,10,2, 60,52,44,36,28,20,12,4,
++	62,54,46,38,30,22,14,6, 64,56,48,40,32,24,16,8,
++	57,49,41,33,25,17,9,1, 59,51,43,35,27,19,11,3,
++	61,53,45,37,29,21,13,5, 63,55,47,39,31,23,15,7,
++};
++static const uint8_t fp[] = {
++	40,8,48,16,56,24,64,32, 39,7,47,15,55,23,63,31,
++	38,6,46,14,54,22,62,30, 37,5,45,13,53,21,61,29,
++	36,4,44,12,52,20,60,28, 35,3,43,11,51,19,59,27,
++	34,2,42,10,50,18,58,26, 33,1,41,9,49,17,57,25,
++};
++static const uint8_t expand[] = {
++	32,1,2,3,4,5, 4,5,6,7,8,9, 8,9,10,11,12,13, 12,13,14,15,16,17,
++	16,17,18,19,20,21, 20,21,22,23,24,25, 24,25,26,27,28,29, 28,29,30,31,32,1,
++};
++static const uint8_t p[] = {
++	16,7,20,21, 29,12,28,17, 1,15,23,26, 5,18,31,10,
++	2,8,24,14, 32,27,3,9, 19,13,30,6, 22,11,4,25,
++};
++static const uint8_t pc1[] = {
++	57,49,41,33,25,17,9, 1,58,50,42,34,26,18,
++	10,2,59,51,43,35,27, 19,11,3,60,52,44,36,
++	63,55,47,39,31,23,15, 7,62,54,46,38,30,22,
++	14,6,61,53,45,37,29, 21,13,5,28,20,12,4,
++};
++static const uint8_t pc2[] = {
++	14,17,11,24,1,5, 3,28,15,6,21,10, 23,19,12,4,26,8, 16,7,27,20,13,2,
++	41,52,31,37,47,55, 30,40,51,45,33,48, 44,49,39,56,34,53, 46,42,50,36,29,32,
++};
++static const uint8_t shift[] = { 1,1,2,2,2,2,2,2,1,2,2,2,2,2,2,1 };
++static const uint8_t s[8][4][16] = {
++	{
++		{14,4,13,1,2,15,11,8,3,10,6,12,5,9,0,7},
++		{0,15,7,4,14,2,13,1,10,6,12,11,9,5,3,8},
++		{4,1,14,8,13,6,2,11,15,12,9,7,3,10,5,0},
++		{15,12,8,2,4,9,1,7,5,11,3,14,10,0,6,13},
++	}, {
++		{15,1,8,14,6,11,3,4,9,7,2,13,12,0,5,10},
++		{3,13,4,7,15,2,8,14,12,0,1,10,6,9,11,5},
++		{0,14,7,11,10,4,13,1,5,8,12,6,9,3,2,15},
++		{13,8,10,1,3,15,4,2,11,6,7,12,0,5,14,9},
++	}, {
++		{10,0,9,14,6,3,15,5,1,13,12,7,11,4,2,8},
++		{13,7,0,9,3,4,6,10,2,8,5,14,12,11,15,1},
++		{13,6,4,9,8,15,3,0,11,1,2,12,5,10,14,7},
++		{1,10,13,0,6,9,8,7,4,15,14,3,11,5,2,12},
++	}, {
++		{7,13,14,3,0,6,9,10,1,2,8,5,11,12,4,15},
++		{13,8,11,5,6,15,0,3,4,7,2,12,1,10,14,9},
++		{10,6,9,0,12,11,7,13,15,1,3,14,5,2,8,4},
++		{3,15,0,6,10,1,13,8,9,4,5,11,12,7,2,14},
++	}, {
++		{2,12,4,1,7,10,11,6,8,5,3,15,13,0,14,9},
++		{14,11,2,12,4,7,13,1,5,0,15,10,3,9,8,6},
++		{4,2,1,11,10,13,7,8,15,9,12,5,6,3,0,14},
++		{11,8,12,7,1,14,2,13,6,15,0,9,10,4,5,3},
++	}, {
++		{12,1,10,15,9,2,6,8,0,13,3,4,14,7,5,11},
++		{10,15,4,2,7,12,9,5,6,1,13,14,0,11,3,8},
++		{9,14,15,5,2,8,12,3,7,0,4,10,1,13,11,6},
++		{4,3,2,12,9,5,15,10,11,14,1,7,6,0,8,13},
++	}, {
++		{4,11,2,14,15,0,8,13,3,12,9,7,5,10,6,1},
++		{13,0,11,7,4,9,1,10,14,3,5,12,2,15,8,6},
++		{1,4,11,13,12,3,7,14,10,15,6,8,0,5,9,2},
++		{6,11,13,8,1,4,10,7,9,5,0,15,14,2,3,12},
++	}, {
++		{13,2,8,4,6,15,11,1,10,9,3,14,5,0,12,7},
++		{1,15,13,8,10,3,7,4,12,5,6,11,0,14,9,2},
++		{7,11,4,1,9,12,14,2,0,6,10,13,15,3,5,8},
++		{2,1,14,7,4,10,8,13,15,12,9,0,3,5,6,11},
++	},
++};
++
++static uint64_t permute(uint64_t input, uint8_t bits, const uint8_t *positions, size_t n)
++{
++	uint64_t output = 0;
++	for (size_t i = 0; i < n; i++)
++		output = (output << 1) | ((input >> (bits - positions[i])) & 1u);
++	return output;
++}
++
++static uint64_t read64(const uint8_t b[8])
++{
++	uint64_t v = 0;
++	for (size_t i = 0; i < 8; i++)
++		v = (v << 8) | b[i];
++	return v;
++}
++
++static uint32_t rotate28(uint32_t v, uint8_t n)
++{
++	return ((v << n) | (v >> (28u - n))) & 0x0FFFFFFFu;
++}
++
++static uint64_t encrypt(uint64_t block, uint64_t key)
++{
++	uint32_t c = (uint32_t)(key >> 28), d = (uint32_t)key & 0x0FFFFFFFu;
++	uint64_t state = permute(block, 64, ip, sizeof ip);
++	uint32_t l = (uint32_t)(state >> 32), r = (uint32_t)state;
++
++	for (size_t round = 0; round < sizeof shift; round++) {
++		c = rotate28(c, shift[round]);
++		d = rotate28(d, shift[round]);
++		uint64_t subkey = permute(((uint64_t)c << 28) | d, 56, pc2, sizeof pc2);
++		uint64_t expanded = permute(r, 32, expand, sizeof expand) ^ subkey;
++		uint32_t substituted = 0;
++		for (uint8_t i = 0; i < 8; i++) {
++			uint8_t chunk = (uint8_t)((expanded >> (42u - 6u * i)) & 0x3Fu);
++			uint8_t row = (uint8_t)(((chunk >> 4) & 2u) | (chunk & 1u));
++			uint8_t col = (uint8_t)((chunk >> 1) & 15u);
++			substituted = (substituted << 4) | s[i][row][col];
++		}
++		uint32_t next = l ^ (uint32_t)permute(substituted, 32, p, sizeof p);
++		l = r;
++		r = next;
++	}
++	return permute(((uint64_t)r << 32) | l, 64, fp, sizeof fp);
++}
++
++void des_ofb_init(des_ofb_t *o, const uint8_t key[DES_KEY_BYTES], const uint8_t iv[DES_BLOCK_BYTES])
++{
++	o->key = permute(read64(key), 64, pc1, sizeof pc1);
++	o->feedback = read64(iv);
++	o->pos = DES_BLOCK_BYTES;
++}
++
++static void step(des_ofb_t *o)
++{
++	if (o->pos == DES_BLOCK_BYTES) {
++		o->feedback = encrypt(o->feedback, o->key);
++		o->pos = 0;
++	}
++}
++
++void des_ofb_xor(des_ofb_t *o, uint8_t *buf, size_t n)
++{
++	for (size_t i = 0; i < n; i++) {
++		step(o);
++		buf[i] ^= (uint8_t)(o->feedback >> (56u - 8u * o->pos));
++		o->pos++;
++	}
++}
++
++void des_ofb_skip(des_ofb_t *o, size_t n)
++{
++	while (n != 0) {
++		step(o);
++		size_t available = DES_BLOCK_BYTES - o->pos;
++		size_t take = n < available ? n : available;
++		o->pos += (uint8_t)take;
++		n -= take;
++	}
++}
++#endif
+diff --git a/core/crypto/des.h b/core/crypto/des.h
+new file mode 100644
+index 0000000..8f5446c
+--- /dev/null
++++ b/core/crypto/des.h
+@@ -0,0 +1,23 @@
++// SPDX-License-Identifier: MIT
++// Copyright (c) 2026 The RadioFoundry Authors
++#ifndef RFOUNDRY_DES_H
++#define RFOUNDRY_DES_H
++
++#include <stddef.h>
++#include <stdint.h>
++
++#define DES_KEY_BYTES 8u
++#define DES_BLOCK_BYTES 8u
++
++// Single DES in full-block OFB mode (FIPS 46-3, SP 800-38A).
++typedef struct {
++	uint64_t key;			// the 56 effective key bits, in PC-1 order
++	uint64_t feedback;		// the keystream block
++	uint8_t pos;			// octets already consumed in the block
++} des_ofb_t;
++
++void des_ofb_init(des_ofb_t *o, const uint8_t key[DES_KEY_BYTES], const uint8_t iv[DES_BLOCK_BYTES]);
++void des_ofb_xor(des_ofb_t *o, uint8_t *buf, size_t n);
++void des_ofb_skip(des_ofb_t *o, size_t n);
++
++#endif
+diff --git a/core/hostlink/build_info.c b/core/hostlink/build_info.c
+index 5dc04e2..afa9945 100644
+--- a/core/hostlink/build_info.c
++++ b/core/hostlink/build_info.c
+@@ -39,2 +39,7 @@ const char *build_start_now(void) { return lang_code(lang_find(0)); }
+ #endif
++#if CONFIG_P25_DES
++#define P25_DES_FEATURE	"P25_DES,"
++#else
++#define P25_DES_FEATURE	""
++#endif
+ 
+@@ -220,3 +225,3 @@ const char *build_modes_now(void)
+ {
+-	static char modes[32];	// "P25,P25_TRUNK,NXDN,YSF,M17," fits
++	static char modes[40];	// "P25,P25_TRUNK,P25_DES,NXDN,YSF,M17," fits
+ 	modes[0] = '\0';
+@@ -224,3 +229,3 @@ const char *build_modes_now(void)
+ 	if (radio_p25_fits())
+-		strcat(modes, P25_FEATURES);
++		strcat(modes, P25_FEATURES P25_DES_FEATURE);
+ #endif
+diff --git a/core/p25/p25.h b/core/p25/p25.h
+index 1da4310..4db717e 100644
+--- a/core/p25/p25.h
++++ b/core/p25/p25.h
+@@ -18,2 +18,12 @@
+ #include "p25_aes.h"
++#if CONFIG_P25_DES
++#include "crypto/des.h"
++#endif
++typedef union {
++	aes_ofb_t aes;
++#if CONFIG_P25_DES
++	des_ofb_t des;
++#endif
++} p25_ofb_t;
++uint8_t p25_cipher_key_bytes(uint8_t alg);
+ #endif
+@@ -54,2 +64,3 @@
+ #define P25_ALGID_CLEAR		0x80
++#define P25_ALGID_DES_OFB	0x81
+ 
+@@ -102,2 +113,3 @@ uint16_t p25_ldu_voice_sym(uint8_t n);
+ #define P25_LCF_UNIT		0x03
++#define P25_SERVICE_ENCRYPTED	0x40
+ #define P25_TGID_EVERYONE	0xFFFFu	// the talk group every radio takes
+@@ -157,3 +169,3 @@ typedef struct {
+ 	uint16_t kid;
+-	bool decrypt;		// encrypted with AES-256 and the key of this kid, with the indicator known: the call layer
++	bool decrypt;		// the algorithm, key id and message indicator are known: the call layer
+ 				// hands its voice on decrypted (CONFIG_AIR_AES)
+@@ -187,7 +199,8 @@ typedef struct {
+ #if CONFIG_AIR_AES
+-	const uint8_t *aes_key;	// the AES-256 key of calls with aes_kid (AES256_KEY_BYTES octets), NULL: none
+-	uint16_t aes_kid;
++	const uint8_t *enc_key;	// key for calls that match the algorithm and KID, or NULL
++	uint16_t enc_kid;
++	uint8_t enc_alg;
+ 	uint8_t mi[P25_MI_CIPHER_BYTES];	// the indicator of the voice superframe in hand
+ 	bool mi_valid;
+-	aes_ofb_t ofb;		// the keystream of the LDU in hand
++	p25_ofb_t ofb;		// the keystream of the LDU in hand
+ #endif
+@@ -198,5 +211,4 @@ void p25_call_rx_init(p25_call_rx_t *c, uint16_t nac, const p25_call_sink_t *sin
+ #if CONFIG_AIR_AES
+-// The key calls encrypted with AES-256 and this key id are decrypted with (key stays the caller's, valid while set);
+-// NULL: such calls stay silent
+-void p25_call_rx_set_key(p25_call_rx_t *c, const uint8_t *key, uint16_t kid);
++// The key for calls with this algorithm and key id, valid while set. NULL keeps them muted.
++void p25_call_rx_set_key(p25_call_rx_t *c, const uint8_t *key, uint16_t kid, uint8_t alg);
+ #endif
+@@ -216,6 +228,7 @@ typedef struct {
+ #if CONFIG_AIR_AES
+-	const uint8_t *aes_key;	// the call is encrypted with this key (NULL: clear)
+-	uint16_t aes_kid;
++	const uint8_t *enc_key;	// the call is encrypted with this key (NULL: clear)
++	uint16_t enc_kid;
++	uint8_t enc_alg;
+ 	uint8_t mi[P25_MI_CIPHER_BYTES];	// the indicator of the voice superframe in hand
+-	aes_ofb_t ofb;		// its keystream
++	p25_ofb_t ofb;		// its keystream
+ #endif
+@@ -225,6 +238,5 @@ void p25_call_tx_begin(p25_call_tx_t *t, uint16_t nac, const p25_lc_t *lc, uint8
+ #if CONFIG_AIR_AES
+-// The same for an encrypted call: algorithm AES-256 and key id kid in the header and in every LDU2, the voice frames
+-// encrypted with key (valid for the call) from the keystream of the indicator mi, which advances every superframe
++// An encrypted call uses a supported algorithm and key id in the HDU and in every LDU2. The key stays valid for the call.
+ void p25_call_tx_begin_enc(p25_call_tx_t *t, uint16_t nac, const p25_lc_t *lc, uint8_t ss, const uint8_t *key,
+-			   uint16_t kid, const uint8_t mi[P25_MI_CIPHER_BYTES]);
++			   uint16_t kid, uint8_t alg, const uint8_t mi[P25_MI_CIPHER_BYTES]);
+ #endif
+diff --git a/core/p25/p25_call.c b/core/p25/p25_call.c
+index e98cbf7..b62086d 100644
+--- a/core/p25/p25_call.c
++++ b/core/p25/p25_call.c
+@@ -27,6 +27,53 @@ static void call_start(p25_call_rx_t *c, const p25_rx_unit_t *u, bool late)
+ #if CONFIG_AIR_AES
+-// Whether this call's voice can be decrypted: AES-256 with the key id of the key we hold, and its indicator known
+-static bool aes_ready(const p25_call_rx_t *c)
++uint8_t p25_cipher_key_bytes(uint8_t alg)
+ {
+-	return c->aes_key != NULL && c->call.have_alg && c->call.algid == P25_ALGID_AES256 && c->call.kid == c->aes_kid &&
++	switch (alg) {
++	case P25_ALGID_AES256:
++		return AES256_KEY_BYTES;
++#if CONFIG_P25_DES
++	case P25_ALGID_DES_OFB:
++		return DES_KEY_BYTES;
++#endif
++	default:
++		return 0;
++	}
++}
++
++static void ofb_start(p25_ofb_t *o, uint8_t alg, const uint8_t *key, const uint8_t *mi, bool ldu2)
++{
++#if CONFIG_P25_DES
++	if (alg == P25_ALGID_DES_OFB) {
++		des_ofb_init(&o->des, key, mi);
++		// Skip the first OFB block and the header interval. LDU2 follows an LDU1 including its LSD.
++		des_ofb_skip(&o->des, DES_BLOCK_BYTES + P25_IMBE_BYTES +
++			     (ldu2 ? P25_VOICE_FRAMES * P25_IMBE_BYTES + 2u : 0u));
++		return;
++	}
++#else
++	(void)alg;
++#endif
++	p25_aes_start(&o->aes, key, mi, ldu2);
++}
++
++static void ofb_voice(p25_ofb_t *o, uint8_t alg, uint8_t voice[P25_IMBE_BYTES], bool after_lsd)
++{
++#if CONFIG_P25_DES
++	if (alg == P25_ALGID_DES_OFB) {
++		if (after_lsd)
++			des_ofb_skip(&o->des, 2);
++		des_ofb_xor(&o->des, voice, P25_IMBE_BYTES);
++		return;
++	}
++#else
++	(void)alg;
++#endif
++	if (after_lsd)
++		aes_ofb_skip(&o->aes, 2);
++	aes_ofb_xor(&o->aes, voice, P25_IMBE_BYTES);
++}
++
++// The received algorithm and key ID must match the configured key, with the MI already known.
++static bool decrypt_ready(const p25_call_rx_t *c)
++{
++	return c->enc_key != NULL && c->call.have_alg && c->call.algid == c->enc_alg && c->call.kid == c->enc_kid &&
+ 	       c->mi_valid;
+@@ -34,6 +81,7 @@ static bool aes_ready(const p25_call_rx_t *c)
+ 
+-void p25_call_rx_set_key(p25_call_rx_t *c, const uint8_t *key, uint16_t kid)
++void p25_call_rx_set_key(p25_call_rx_t *c, const uint8_t *key, uint16_t kid, uint8_t alg)
+ {
+-	c->aes_key = key;
+-	c->aes_kid = kid;
++	c->enc_key = p25_cipher_key_bytes(alg) ? key : NULL;
++	c->enc_kid = kid;
++	c->enc_alg = alg;
+ }
+@@ -87,3 +135,3 @@ static void on_unit(const p25_rx_unit_t *u, void *ctx)
+ #if CONFIG_AIR_AES
+-			if (c->call.algid == P25_ALGID_AES256)
++			if (p25_cipher_key_bytes(c->call.algid))
+ 				mi_take(c, buf);	// the first superframe's indicator
+@@ -109,2 +157,7 @@ static void on_unit(const p25_rx_unit_t *u, void *ctx)
+ 				c->call.have_lc = true;
++				if (!c->call.have_alg && (raw[2] & P25_SERVICE_ENCRYPTED)) {
++					// A late LDU1 can announce encryption but cannot identify the algorithm until LDU2.
++					c->call.algid = 0;
++					changed = true;
++				}
+ 			}
+@@ -128,3 +181,3 @@ static void on_unit(const p25_rx_unit_t *u, void *ctx)
+ #if CONFIG_AIR_AES
+-				if (es[9] == P25_ALGID_AES256) {
++				if (p25_cipher_key_bytes(es[9])) {
+ 					memcpy(next_mi, es, sizeof next_mi);
+@@ -146,4 +199,4 @@ static void on_unit(const p25_rx_unit_t *u, void *ctx)
+ #if CONFIG_AIR_AES
+-	if (c->call.decrypt != aes_ready(c)) {
+-		c->call.decrypt = aes_ready(c);
++	if (c->call.decrypt != decrypt_ready(c)) {
++		c->call.decrypt = decrypt_ready(c);
+ 		changed = true;
+@@ -162,3 +215,3 @@ static void on_unit(const p25_rx_unit_t *u, void *ctx)
+ #if CONFIG_AIR_AES
+-	bool aes = false;
++	bool encrypted = false;
+ #endif
+@@ -168,4 +221,4 @@ static void on_unit(const p25_rx_unit_t *u, void *ctx)
+ 			goto next_sync;
+-		p25_aes_start(&c->ofb, c->aes_key, c->mi, u->duid == P25_DUID_LDU2);
+-		aes = true;
++		ofb_start(&c->ofb, c->enc_alg, c->enc_key, c->mi, u->duid == P25_DUID_LDU2);
++		encrypted = true;
+ #else
+@@ -179,7 +232,4 @@ static void on_unit(const p25_rx_unit_t *u, void *ctx)
+ #if CONFIG_AIR_AES
+-		if (aes) {
+-			if (n == 8)
+-				aes_ofb_skip(&c->ofb, 2);	// low-speed data precedes the ninth voice interval
+-			aes_ofb_xor(&c->ofb, imbe, P25_IMBE_BYTES);
+-		}
++		if (encrypted)
++			ofb_voice(&c->ofb, c->enc_alg, imbe, n == P25_VOICE_FRAMES - 1);
+ #endif
+@@ -196,3 +246,3 @@ next_sync:
+ 		mi_take(c, next_mi);
+-	else if (aes && u->duid == P25_DUID_LDU2)
++	else if (encrypted && u->duid == P25_DUID_LDU2)
+ 		p25_aes_mi_next(c->mi);		// the next LDU1 and LDU2 use the next indicator
+@@ -228,7 +278,7 @@ static void tx_unit(p25_call_tx_t *t, uint8_t state)
+ #if CONFIG_AIR_AES
+-		if (t->aes_key != NULL) {
++		if (t->enc_key != NULL) {
+ 			memcpy(hdr, t->mi, P25_MI_CIPHER_BYTES);	// (the ninth octet of the indicator is 0)
+-			hdr[10] = P25_ALGID_AES256;
+-			hdr[11] = (uint8_t)(t->aes_kid >> 8);
+-			hdr[12] = (uint8_t)t->aes_kid;
++			hdr[10] = t->enc_alg;
++			hdr[11] = (uint8_t)(t->enc_kid >> 8);
++			hdr[12] = (uint8_t)t->enc_kid;
+ 		}
+@@ -251,4 +301,4 @@ static void tx_unit(p25_call_tx_t *t, uint8_t state)
+ #if CONFIG_AIR_AES
+-			if (t->aes_key != NULL)
+-				p25_aes_start(&t->ofb, t->aes_key, t->mi, false);
++			if (t->enc_key != NULL)
++				ofb_start(&t->ofb, t->enc_alg, t->enc_key, t->mi, false);
+ #endif
+@@ -259,9 +309,9 @@ static void tx_unit(p25_call_tx_t *t, uint8_t state)
+ #if CONFIG_AIR_AES
+-			if (t->aes_key != NULL) {
++			if (t->enc_key != NULL) {
+ 				memcpy(es, t->mi, P25_MI_CIPHER_BYTES);
+ 				p25_aes_mi_next(es);	// synchronization for the following superframe
+-				es[9] = P25_ALGID_AES256;
+-				es[10] = (uint8_t)(t->aes_kid >> 8);
+-				es[11] = (uint8_t)t->aes_kid;
+-				p25_aes_start(&t->ofb, t->aes_key, t->mi, true);
++				es[9] = t->enc_alg;
++				es[10] = (uint8_t)(t->enc_kid >> 8);
++				es[11] = (uint8_t)t->enc_kid;
++				ofb_start(&t->ofb, t->enc_alg, t->enc_key, t->mi, true);
+ 			}
+@@ -310,3 +360,3 @@ void p25_call_tx_sent(p25_call_tx_t *t, uint16_t n)
+ #if CONFIG_AIR_AES
+-		if (t->aes_key != NULL)
++		if (t->enc_key != NULL)
+ 			p25_aes_mi_next(t->mi);		// the next LDU1 and LDU2 use the next indicator
+@@ -323,7 +373,8 @@ void p25_call_tx_sent(p25_call_tx_t *t, uint16_t n)
+ void p25_call_tx_begin_enc(p25_call_tx_t *t, uint16_t nac, const p25_lc_t *lc, uint8_t ss, const uint8_t *key,
+-			   uint16_t kid, const uint8_t mi[P25_MI_CIPHER_BYTES])
++			   uint16_t kid, uint8_t alg, const uint8_t mi[P25_MI_CIPHER_BYTES])
+ {
+ 	memset(t, 0, sizeof *t);
+-	t->aes_key = key;
+-	t->aes_kid = kid;
++	t->enc_key = key;
++	t->enc_kid = kid;
++	t->enc_alg = alg;
+ 	memcpy(t->mi, mi, P25_MI_CIPHER_BYTES);
+@@ -333,2 +384,3 @@ void p25_call_tx_begin_enc(p25_call_tx_t *t, uint16_t nac, const p25_lc_t *lc, u
+ 	p25_lc_build(lc, t->lc);
++	t->lc[2] |= P25_SERVICE_ENCRYPTED;
+ 	tx_unit(t, TX_HDU);
+@@ -353,7 +405,4 @@ void p25_call_tx_voice(p25_call_tx_t *t, const uint8_t imbe[P25_IMBE_BYTES])
+ #if CONFIG_AIR_AES
+-	if (t->aes_key != NULL) {
+-		if (t->nvoice == 8)
+-			aes_ofb_skip(&t->ofb, 2);
+-		aes_ofb_xor(&t->ofb, framed, sizeof framed);	// the frame's 88 bits, including sync, before their FEC
+-	}
++	if (t->enc_key != NULL)
++		ofb_voice(&t->ofb, t->enc_alg, framed, t->nvoice == P25_VOICE_FRAMES - 1);
+ #endif
+diff --git a/core/p25/p25_codeplug.c b/core/p25/p25_codeplug.c
+index 92ffd7a..f6bc15e 100644
+--- a/core/p25/p25_codeplug.c
++++ b/core/p25/p25_codeplug.c
+@@ -45,4 +45,6 @@ void p25_conv_decode(const uint8_t *b, int len, p25_conv_t *out)
+ 	out->tx_nac = tx;
+-	out->aes = len >= 6 && (b[5] & P25_CP_ENC_AES) != 0;
+-	out->kid = out->aes ? rd16(b, len, 6) : 0u;
++	bool enc = len >= 6 && (b[5] & P25_CP_ENC_AES) != 0;
++	out->des = enc && (b[5] & P25_CP_ENC_DES) != 0;
++	out->aes = enc && !out->des;
++	out->kid = out->aes || out->des ? rd16(b, len, 6) : 0u;
+ }
+@@ -55,4 +57,4 @@ void p25_conv_encode(const p25_conv_t *c, uint8_t out[P25_CP_CONV_LEN])
+ 	wr16(&out[3], c->tx_nac == tx_dflt ? 0u : (uint16_t)(P25_CP_NAC_SET | (c->tx_nac & 0x0FFFu)));
+-	out[5] = c->aes ? P25_CP_ENC_AES : 0u;
+-	wr16(&out[6], c->aes ? c->kid : 0u);
++	out[5] = c->des ? P25_CP_ENC_AES | P25_CP_ENC_DES : c->aes ? P25_CP_ENC_AES : 0u;
++	wr16(&out[6], c->aes || c->des ? c->kid : 0u);
+ }
+diff --git a/core/p25/p25_codeplug.h b/core/p25/p25_codeplug.h
+index 0cb7c87..be7e3f1 100644
+--- a/core/p25/p25_codeplug.h
++++ b/core/p25/p25_codeplug.h
+@@ -31,2 +31,3 @@
+ 					// the key id (LE) of a key of the keyring (codeplug_traffic_key, system 0xFF). Absent bytes: clear
++#define P25_CP_ENC_DES		0x02u	// with bit 0 set so legacy firmware will still require a key
+ enum { P25_SQUELCH_NORMAL, P25_SQUELCH_SELECTIVE };
+@@ -37,2 +38,3 @@ typedef struct {
+ 	bool aes;		// AES-256 on this channel
++	bool des;		// DES-OFB on this channel, superseding the legacy AES flag
+ 	uint16_t kid;		// its key id
+diff --git a/core/p25/p25_engine.c b/core/p25/p25_engine.c
+index 9de2704..806a7f6 100644
+--- a/core/p25/p25_engine.c
++++ b/core/p25/p25_engine.c
+@@ -177,3 +177,3 @@ bool p25_engine_begin(p25_engine_t *e, const hal_air_t *air, const p25_engine_cf
+ #if CONFIG_AIR_AES
+-	p25_call_rx_set_key(&e->rx, cfg->aes_key, cfg->aes_kid);
++	p25_call_rx_set_key(&e->rx, cfg->enc_key, cfg->enc_kid, cfg->enc_alg);
+ #endif
+@@ -208,3 +208,3 @@ void p25_engine_set(p25_engine_t *e, const p25_engine_cfg_t *cfg)
+ #if CONFIG_AIR_AES
+-	p25_call_rx_set_key(&e->rx, cfg->aes_key, cfg->aes_kid);
++	p25_call_rx_set_key(&e->rx, cfg->enc_key, cfg->enc_kid, cfg->enc_alg);
+ #endif
+@@ -225,4 +225,4 @@ bool p25_engine_tx_prepare(p25_engine_t *e)
+ 		e->tx_stop = e->tx_ended = false;
++		if (e->cfg.enc_tx) {
+ #if CONFIG_AIR_AES
+-		if (e->cfg.aes_tx) {
+ 			uint8_t mi[P25_MI_CIPHER_BYTES];
+@@ -230,9 +230,13 @@ bool p25_engine_tx_prepare(p25_engine_t *e)
+ 			// Encryption asked for and not possible: nothing goes out, in the clear least of all
+-			if (e->cfg.aes_key == NULL || !e->hooks.tx_mi || !e->hooks.tx_mi(mi, e->ctx))
++			if (e->cfg.enc_key == NULL || !p25_cipher_key_bytes(e->cfg.enc_alg) ||
++			    !e->hooks.tx_mi || !e->hooks.tx_mi(mi, e->ctx) || !p25_aes_mi_valid(mi))
+ 				return false;
+ 			p25_call_tx_begin_enc(&e->tx, e->cfg.tx_nac, &lc, e->cfg.talkaround ? P25_SS_TALKAROUND : P25_SS_UNKNOWN,
+-					      e->cfg.aes_key, e->cfg.aes_kid, mi);
+-		} else
++					      e->cfg.enc_key, e->cfg.enc_kid, e->cfg.enc_alg, mi);
++#else
++			return false;
+ #endif
+-		p25_call_tx_begin(&e->tx, e->cfg.tx_nac, &lc, e->cfg.talkaround ? P25_SS_TALKAROUND : P25_SS_UNKNOWN);
++		} else {
++			p25_call_tx_begin(&e->tx, e->cfg.tx_nac, &lc, e->cfg.talkaround ? P25_SS_TALKAROUND : P25_SS_UNKNOWN);
++		}
+ 	}
+diff --git a/core/p25/p25_engine.h b/core/p25/p25_engine.h
+index cb2caa0..159c930 100644
+--- a/core/p25/p25_engine.h
++++ b/core/p25/p25_engine.h
+@@ -24,3 +24,3 @@ typedef struct {
+ #if CONFIG_AIR_AES
+-	// An encrypted transmission is about to start (cfg.aes_tx), from the task that starts it: a fresh message
++	// An encrypted transmission is about to start (cfg.enc_tx), from the task that starts it: a fresh message
+ 	// indicator, one never used before with the key. False: none can be made, PTT is refused
+@@ -46,6 +46,7 @@ typedef struct {
+ 	const uint8_t *silence;	// a voice frame of silence (P25_IMBE_BYTES), from the vocoder
++bool enc_tx;		// refuse PTT if this channel requires encryption and cannot encrypt
+ #if CONFIG_AIR_AES
+-	const uint8_t *aes_key;	// this channel's AES-256 key (AES256_KEY_BYTES octets, valid while the engine runs), or NULL
+-	uint16_t aes_kid;	// its key id: calls encrypted with another one stay silent
+-	bool aes_tx;		// what we send is encrypted with it. Without the key PTT is refused: never clear instead
++	const uint8_t *enc_key;	// this channel's traffic key, valid while the engine runs, or NULL
++	uint16_t enc_kid;
++	uint8_t enc_alg;
+ #endif
+diff --git a/core/radio/radio_p25.c b/core/radio/radio_p25.c
+index 8a896a7..6883b05 100644
+--- a/core/radio/radio_p25.c
++++ b/core/radio/radio_p25.c
+@@ -58,3 +58,3 @@ typedef struct {
+ #if CONFIG_AIR_AES
+-	uint8_t aes_key[AES256_KEY_BYTES];	// the channel's key (the engine's cfg.aes_key points here)
++	uint8_t enc_key[AES256_KEY_BYTES];	// the channel's key (the engine's cfg.enc_key points here)
+ #endif
+@@ -222,5 +222,6 @@ static void params_channel(const channel_t *ch, uint16_t number, uint32_t own_id
+ 		cfg->tx_nac = cc.conv.tx_nac;
++		cfg->enc_tx = cc.conv.aes || cc.conv.des;
+ #if CONFIG_AIR_AES
+-		cfg->aes_tx = cc.conv.aes;
+-		cfg->aes_kid = cc.conv.kid;
++		cfg->enc_alg = cc.conv.des ? P25_ALGID_DES_OFB : P25_ALGID_AES256;
++		cfg->enc_kid = cc.conv.kid;
+ #endif
+@@ -234,5 +235,6 @@ static void params_channel(const channel_t *ch, uint16_t number, uint32_t own_id
+ 	}
++	cfg->enc_tx = number == 0 && (ch->vfo_digital & VFO_DIG_P25_AES) != 0;
+ #if CONFIG_AIR_AES
+-	cfg->aes_tx = number == 0 && (ch->vfo_digital & VFO_DIG_P25_AES) != 0;
+-	cfg->aes_kid = ch->vfo_p25_kid;
++	cfg->enc_alg = P25_ALGID_AES256;
++	cfg->enc_kid = ch->vfo_p25_kid;
+ #endif
+@@ -613,13 +615,13 @@ void radio_p25_trunk_burst_drop(void)
+ #if CONFIG_AIR_AES
+-// The channel's AES-256 key from the keyring (system 0xFF, algorithm P25_ALGID_AES256, the channel's key id) into the
+-// memory the engine runs in. Not in the keyring, or not 32 octets: the engine gets none, so calls with that key id stay
+-// silent and, when the channel sends encrypted, PTT is refused. Radio task (it reads the codeplug)
++// A traffic key must match the configured algorithm, key id and size. If it is unavailable,
++// the engine mutes the call on receive and refuses encrypted PTT.
+ static void load_key(p25_mem_t *m, p25_engine_cfg_t *cfg)
+ {
+-	cfg->aes_key = NULL;
+-	if (!cfg->aes_tx)
+-		return;
+-	if (codeplug_traffic_key(CODEPLUG_SYSTEM_NONE, P25_ALGID_AES256, cfg->aes_kid, m->aes_key, AES256_KEY_BYTES) ==
+-	    (int)AES256_KEY_BYTES)
+-		cfg->aes_key = m->aes_key;
++	uint8_t bytes = p25_cipher_key_bytes(cfg->enc_alg);
++
++	cfg->enc_key = NULL;
++	memset(m->enc_key, 0, sizeof m->enc_key);	// the nonce generator reads a full AES-sized seed
++	if (cfg->enc_tx && bytes &&
++	    codeplug_traffic_key(CODEPLUG_SYSTEM_NONE, cfg->enc_alg, cfg->enc_kid, m->enc_key, bytes) == bytes)
++		cfg->enc_key = m->enc_key;
+ }
+@@ -633,5 +635,5 @@ static bool tx_mi(uint8_t mi[P25_MI_CIPHER_BYTES], void *ctx)
+ 	(void)ctx;
+-	if (m == NULL || m->eng.cfg.aes_key == NULL)
++	if (m == NULL || m->eng.cfg.enc_key == NULL)
+ 		return false;
+-	air_nonce(m->eng.cfg.aes_key, hal_millis(), n);
++	air_nonce(m->eng.cfg.enc_key, hal_millis(), n);
+ 	memcpy(mi, n, P25_MI_CIPHER_BYTES);
+@@ -819,3 +821,3 @@ static void settings_view(radio_p25_view_t *n)
+ #if CONFIG_AIR_AES
+-	n->tx_aes_ready = mem != NULL && mem->eng.cfg.aes_tx && mem->eng.cfg.aes_key != NULL;
++	n->tx_encrypted_ready = mem != NULL && mem->eng.cfg.enc_tx && mem->eng.cfg.enc_key != NULL;
+ #endif
+@@ -857,4 +859,6 @@ bool radio_p25_poll(radio_p25_view_t *v)
+ 	}
+-	if (ev.rx.have_alg && ev.rx.algid != P25_ALGID_CLEAR)
++	if ((ev.rx.have_alg || ev.rx_active) && ev.rx.algid != P25_ALGID_CLEAR) {
+ 		n.flags |= RADIO_P25_ENC;
++		n.enc_alg = ev.rx.algid;
++	}
+ 	if (ev.rx.late)
+diff --git a/core/radio/radio_p25.h b/core/radio/radio_p25.h
+index 9f22156..167a35a 100644
+--- a/core/radio/radio_p25.h
++++ b/core/radio/radio_p25.h
+@@ -64,3 +64,4 @@ typedef struct {
+ 	uint8_t tx;		// air_tx_state_t of the engine
+-	bool tx_aes_ready;	// an active AES voice configuration has its key
++	bool tx_encrypted_ready;	// an active encrypted voice configuration has its key
++	uint8_t enc_alg;	// air algorithm id of the received call
+ 	uint16_t nac;
+diff --git a/core/ui/ui_menus.c b/core/ui/ui_menus.c
+index d123c5a..83538c5 100644
+--- a/core/ui/ui_menus.c
++++ b/core/ui/ui_menus.c
+@@ -3069,2 +3069,7 @@ static void ced_build(void)
+ 			continue;
++#if CONFIG_P25
++		// DES-OFB is provisioned in the CPS and preserved during edits on the radio.
++		if (r == CE_AES && p25 && ced_air.p25.des)
++			continue;
++#endif
+ 		if ((r == CE_DMR_PRIVACY || r == CE_DMR_KEY) &&
+diff --git a/core/ui/ui_screens.c b/core/ui/ui_screens.c
+index a56cc89..622e638 100644
+--- a/core/ui/ui_screens.c
++++ b/core/ui/ui_screens.c
+@@ -20,2 +20,5 @@
+ #endif
++#if CONFIG_P25
++#include "p25/p25.h"
++#endif
+ #if CONFIG_DMR_TRUNK
+@@ -490,3 +493,3 @@ bool ui_voice_lock_for_tx(const radio_view_t *v)
+ 	case RADIO_MODE_P25:
+-		return (v->p25.flags & RADIO_P25_ON) && v->p25.tx_aes_ready &&
++		return (v->p25.flags & RADIO_P25_ON) && v->p25.tx_encrypted_ready &&
+ 		       (v->state != RS_TX || v->p25.tx == AIR_TX_ON || v->p25.tx == AIR_TX_ENDING);
+@@ -2331,3 +2334,3 @@ static void draw_dmr_call(const radio_view_t *v, const ui_state_t *s)
+ typedef struct {
+-	bool played, enc, unit;
++	bool played, enc, unit, des;
+ 	uint32_t src, dst;
+@@ -2342,2 +2345,3 @@ static bool air_call(const radio_view_t *v, air_call_t *c)
+ 		c->enc = (p->flags & RADIO_P25_ENC) != 0;
++		c->des = p->enc_alg == P25_ALGID_DES_OFB;
+ 		c->unit = (p->flags & RADIO_P25_UNIT) != 0;
+@@ -2353,2 +2357,3 @@ static bool air_call(const radio_view_t *v, air_call_t *c)
+ 		c->enc = (n->flags & RADIO_NXDN_ENC) != 0;
++		c->des = false;
+ 		c->unit = (n->flags & RADIO_NXDN_UNIT) != 0;
+@@ -2382,3 +2387,3 @@ static void air_call_line(const air_call_t *c, const font_t *f, int y)
+ 		if (c->enc)
+-			sb_str(&b, "AES ");
++			sb_str(&b, c->des ? "DES-OFB " : "AES ");
+ 		if (with_id) {
+diff --git a/docs/build-config.md b/docs/build-config.md
+index 368d487..c61646a 100644
+--- a/docs/build-config.md
++++ b/docs/build-config.md
+@@ -146,2 +146,3 @@ below are for an STM32F4 radio.
+ | `CONFIG_AIR_AES` | `CONFIG_AIR` | AES-256 voice encryption of the air modes: a P25 or NXDN channel names a key of the radio's keyring (`core/crypto`, [air-encryption.md](spec/air-encryption.md)). Needs P25 or NXDN |
++| `CONFIG_P25_DES` | Board default, otherwise `n` | Legacy DES-OFB voice in conventional P25 memory channels. Needs P25 and AIR_AES. Set the channel's key in the CPS |
+ | `CONFIG_AIR_RAW` | n | diagnostics: debug link commands that open an air interface session and move raw symbols and tap samples, for bench tests (`docs/spec/debuglink.md`). Needs P25 or NXDN (an air-framed mode) and DEBUGLINK |
+diff --git a/docs/spec/air-encryption.md b/docs/spec/air-encryption.md
+index f1b9055..777ad2f 100644
+--- a/docs/spec/air-encryption.md
++++ b/docs/spec/air-encryption.md
+@@ -32,3 +32,3 @@ modes). Not checked against another maker's radio on air: section 6 lists what t
+ |---|---|
+-| Algorithm id | `0x84` (AES-256), in the header (HDU) and in every LDU2's encryption sync |
++| Algorithm id | `0x84` (AES-256) or `0x81` (DES-OFB), in the header (HDU) and in every LDU2's encryption sync |
+ | Key id | 16 bits, in the same places |
+@@ -68,2 +68,21 @@ Bytes 5-7 of the P25 conventional parameter block ([p25-codeplug.md](p25-codeplu
+ 
++### 2.5 Legacy DES-OFB (`CONFIG_P25_DES`)
++
++A conventional P25 Phase 1 memory channel in the CPS can use single DES-OFB and an eight-octet traffic key of
++algorithm `0x81`. This is for interoperability with legacy systems. NIST withdrew single DES because its
++56 effective key bits provide insufficient protection for modern use. The IV is the first eight octets of
++the message indicator. Discard the first eight keystream octets, then use the same voice and low-speed-data
++intervals as the AES layout above. The two LDUs start their first voice frames at keystream octets 19 and 120
++(zero-based). The HDU and LDU2 carry the selected algorithm and KID, and the LDU1 marks the call encrypted.
++
++The channel's parameter block sets both bits 0 and 1 in byte 5. Firmware that understands the selector refuses
++PTT if its DES-OFB feature or the exact typed key is unavailable. The legacy encryption bit remains set for
++older readers that implement the AES guard. Use current firmware and CPS for DES channels, since older
++versions interpret that bit as AES-256 and cannot read the DES selection. AES and clear channel encodings are
++unchanged. Changing the NAC or destination on the radio preserves the CPS selection.
++
++Host vectors compare voice frames before and after the low-speed-data intervals in both LDUs against OpenSSL
++DES-OFB. Loopback tests exercise encrypted RX and TX across superframes, matching key IDs and disabled builds.
++Over-the-air interoperability with a second radio is unverified.
++
+ ## 3. NXDN (`CODEPLUG_KIND_NXDN`)
+diff --git a/docs/spec/p25-codeplug.md b/docs/spec/p25-codeplug.md
+index 9a2824d..531e192 100644
+--- a/docs/spec/p25-codeplug.md
++++ b/docs/spec/p25-codeplug.md
+@@ -37,3 +37,3 @@ The tag ([channel-modes.md](channel-modes.md) 2): no system, flag bit 0 transmit
+ | 3 | 2 | TX NAC: the same encoding; clear = the RX NAC, 0x293 when the RX NAC is any |
+-| 5 | 1 | Bit 0: AES-256 on ([air-encryption.md](air-encryption.md) 2): the channel sends encrypted and plays calls encrypted with its key. Bits 1-7: 0 |
++| 5 | 1 | Bit 0 requires encryption. Bit 1 selects DES-OFB when bit 0 is set. Bit 0 alone selects AES-256 ([air-encryption.md](air-encryption.md) 2). Bits 2-7 reserved |
+ | 6 | 2 | Key ID of the key in the radio's keyring (little endian); read only with bit 0 of byte 5 set |
+diff --git a/docs/user/07-channels-zones-vfo.md b/docs/user/07-channels-zones-vfo.md
+index af40329..0c6b7bc 100644
+--- a/docs/user/07-channels-zones-vfo.md
++++ b/docs/user/07-channels-zones-vfo.md
+@@ -165,2 +165,8 @@ save or discard your changes first.
+ 
++On a build with legacy DES-OFB, use the codeplug editor for a conventional P25 memory channel. In **Radio** →
++**Traffic keys**, add **P25 DES-OFB** with its hexadecimal key ID and 16 hexadecimal digits. In the channel
++editor choose that key ID in **P25 DES-OFB**. Selecting AES-256 or DES-OFB applies one cipher to that channel.
++The radio refuses PTT if the programmed DES key is unavailable. Use this mode for legacy interoperability.
++
++
+ ### Text entry
+diff --git a/site/i18n/en.json b/site/i18n/en.json
+index 118a56c..083f3a7 100644
+--- a/site/i18n/en.json
++++ b/site/i18n/en.json
+@@ -1801,2 +1801,3 @@
+  "editor.p25.aes_help": "Sends encrypted and plays calls encrypted with this key. Where the law forbids encryption (amateur bands in most countries), leave it off.",
++ "editor.p25.des_help": "Use a DES-OFB key on a legacy conventional P25 channel.",
+  "editor.p25.key_id": "Key ID (hex)",
+@@ -2051,2 +2052,3 @@
+  "editor.keys.alg.p25": "P25 AES-256",
++ "editor.keys.alg.p25des": "P25 DES-OFB",
+  "editor.keys.alg.nxdn": "NXDN AES-256",
+diff --git a/site/i18n/es.json b/site/i18n/es.json
+index 71c0e45..12efdd4 100644
+--- a/site/i18n/es.json
++++ b/site/i18n/es.json
+@@ -1801,2 +1801,3 @@
+  "editor.p25.aes_help": "Transmite cifrado y reproduce las llamadas cifradas con esta clave. Donde la ley prohíbe el cifrado (bandas de aficionados en casi todos los países), déjalo apagado.",
++ "editor.p25.des_help": "Usa una clave DES-OFB en un canal P25 convencional para equipos antiguos.",
+  "editor.p25.key_id": "ID de clave (hex)",
+@@ -2051,2 +2052,3 @@
+  "editor.keys.alg.p25": "P25 AES-256",
++ "editor.keys.alg.p25des": "P25 DES-OFB",
+  "editor.keys.alg.nxdn": "NXDN AES-256",
+diff --git a/site/i18n/it.json b/site/i18n/it.json
+index 7c217e6..9f8165b 100644
+--- a/site/i18n/it.json
++++ b/site/i18n/it.json
+@@ -1801,2 +1801,3 @@
+  "editor.p25.aes_help": "Trasmette cifrato e riproduce le chiamate cifrate con questa chiave. Dove la legge vieta la cifratura (bande radioamatoriali quasi ovunque), lasciala disattivata.",
++ "editor.p25.des_help": "Usa una chiave DES-OFB su un canale P25 convenzionale per apparati legacy.",
+  "editor.p25.key_id": "ID chiave (hex)",
+@@ -2051,2 +2052,3 @@
+  "editor.keys.alg.p25": "P25 AES-256",
++ "editor.keys.alg.p25des": "P25 DES-OFB",
+  "editor.keys.alg.nxdn": "NXDN AES-256",
+diff --git a/site/i18n/zh.json b/site/i18n/zh.json
+index 17e0ebb..e0d4bf7 100644
+--- a/site/i18n/zh.json
++++ b/site/i18n/zh.json
+@@ -1801,2 +1801,3 @@
+  "editor.p25.aes_help": "以加密方式发射，并播放用此密钥加密的呼叫。法律禁止加密的地方（大多数国家的业余频段）请保持关闭。",
++ "editor.p25.des_help": "在旧式 P25 常规信道上使用 DES-OFB 密钥。",
+  "editor.p25.key_id": "密钥 ID（十六进制）",
+@@ -2051,2 +2052,3 @@
+  "editor.keys.alg.p25": "P25 AES-256",
++ "editor.keys.alg.p25des": "P25 DES-OFB",
+  "editor.keys.alg.nxdn": "NXDN AES-256",
+diff --git a/site/static/js/codeplug/channelmodes.js b/site/static/js/codeplug/channelmodes.js
+index 39384ad..87979a9 100644
+--- a/site/static/js/codeplug/channelmodes.js
++++ b/site/static/js/codeplug/channelmodes.js
+@@ -516,2 +516,3 @@ export const KEY_ALGS = [
+ 	{ alg: 0x84, token: "p25", idMax: 0xFFFF, hex: true },
++	{ alg: 0x81, token: "p25des", idMax: 0xFFFF, hex: true, bytes: 8, feature: "P25_DES" },
+ 	{ alg: 3, token: "nxdn", idMax: 63, hex: false },
+diff --git a/site/static/js/codeplug/mode_p25.js b/site/static/js/codeplug/mode_p25.js
+index f01076d..e6612c6 100644
+--- a/site/static/js/codeplug/mode_p25.js
++++ b/site/static/js/codeplug/mode_p25.js
+@@ -34,5 +34,7 @@ export function decodeConv(b) {
+ 	if (tx === NAC_ANY || tx === NAC_REPEAT_ANY) tx = txDflt;
+-	// AES-256 (docs/spec/air-encryption.md): byte 5 bit 0 and the key id after it; blocks without them are clear
+-	const aes = b != null && b.length >= 6 && (b[5] & 1) !== 0;
+-	return { squelch: sq === 1 ? 1 : 0, rxNac: rx, txNac: tx, aes, keyId: aes ? u16(b, 6) : 0 };
++	// Bit 0 requires encryption. Bit 1 selects DES-OFB, preserving older readers' existing encryption guard.
++	const enc = (u8(b, 5) & 1) !== 0;
++	const des = enc && (u8(b, 5) & 2) !== 0;
++	return { squelch: sq === 1 ? 1 : 0, rxNac: rx, txNac: tx, aes: enc && !des, keyId: enc ? u16(b, 6) : 0,
++		...(des ? { des } : {}) };
+ }
+@@ -44,4 +46,4 @@ export function encodeConv(p, prev = null) {
+ 	put16(v, 3, nacOut(p.txNac, p.rxNac === NAC_ANY ? NAC_DEFAULT : p.rxNac));
+-	v[5] = (v[5] & ~1) | (p.aes ? 1 : 0);
+-	put16(v, 6, p.aes ? p.keyId & 0xFFFF : 0);
++	v[5] = (v[5] & ~3) | (p.des ? 3 : p.aes ? 1 : 0);
++	put16(v, 6, p.aes || p.des ? p.keyId & 0xFFFF : 0);
+ 	return v;
+@@ -75,3 +77,4 @@ export const p25Kind = {
+ 		{ ...nacFieldDef("txNac", "editor.p25.tx_nac"), blank: (p) => (p.rxNac === NAC_ANY ? NAC_DEFAULT : p.rxNac) },
+-		{ key: "aes", label: "editor.p25.aes", type: "bool", help: "editor.p25.aes_help" },
++		{ key: "aes", label: "editor.p25.aes", type: "bool", help: "editor.p25.aes_help", exclusive: "des" },
++		{ key: "des", keyToken: "p25des", exclusive: "aes", label: "editor.keys.alg.p25des", type: "bool", help: "editor.p25.des_help" },
+ 		{ key: "keyId", label: "editor.p25.key_id", type: "hex", min: 0, max: 0xFFFF, digits: 4, format: (v) => v.toString(16).toUpperCase().padStart(4, "0") },
+diff --git a/site/static/js/editor/modesview.js b/site/static/js/editor/modesview.js
+index d3e47a5..e414158 100644
+--- a/site/static/js/editor/modesview.js
++++ b/site/static/js/editor/modesview.js
+@@ -286,3 +286,3 @@ export function keyringPart(api, features) {
+ 	const have = Array.isArray(features) ? features : String(features ?? "").split(",");
+-	const algs = KEY_ALGS.filter((a) => offered.includes(a.token.toUpperCase()) ||
++	const algs = KEY_ALGS.filter((a) => offered.includes(a.token.toUpperCase()) || (a.feature && have.includes(a.feature)) ||
+ 		((a.token === "dmr" || a.token === "dmr128" || a.token === "arc4") && (have.includes("DMR") || m.channels.some((c) => c.mode === "dmr" && !c.kind))));
+@@ -313,3 +313,3 @@ export function keyringPart(api, features) {
+ 	});
+-	const pick = h("select", { "aria-label": t("editor.keys.title") }, ...KEY_ALGS.map((a) => h("option", { value: String(a.alg) }, t(`editor.keys.alg.${a.token}`))));
++	const pick = h("select", { "aria-label": t("editor.keys.title") }, ...KEY_ALGS.filter((a) => !a.feature || features == null || have.includes(a.feature)).map((a) => h("option", { value: String(a.alg) }, t(`editor.keys.alg.${a.token}`))));
+ 	return [
+diff --git a/site/static/js/editor/views.js b/site/static/js/editor/views.js
+index a4d07c3..250ff18 100644
+--- a/site/static/js/editor/views.js
++++ b/site/static/js/editor/views.js
+@@ -358,8 +358,15 @@ export function channelForm(m, t, { features = null } = {}) {
+ 			if (alg && spec.key === "keyId") continue;
+-			if (alg && spec.key === "aes") {
+-				const get = (r) => on(r) && r.params?.aes ? r.params.keyId : null;
+-				kindFields.push(sel(`k${k.id}.aes`, `editor.keys.alg.${alg.token}`,
+-					(r) => aesOptions(m, t, alg, get(r), "editor.alias.off"), {
+-						show: on, get, help: t(spec.help),
+-						set: (r, id) => on(r) && (r.params = { ...r.params, aes: id != null, keyId: id ?? 0 }),
++			const cipher = spec.keyToken ? KEY_ALGS.find((a) => a.token === spec.keyToken) : spec.key === "aes" ? alg : null;
++			if (cipher) {
++				const get = (r) => on(r) && r.params?.[spec.key] ? r.params.keyId : null;
++				const hasFeature = !cipher.feature || features == null ||
++					(Array.isArray(features) ? features : String(features).split(",")).includes(cipher.feature);
++				kindFields.push(sel(`k${k.id}.${spec.key}`, `editor.keys.alg.${cipher.token}`,
++					(r) => aesOptions(m, t, cipher, get(r), "editor.alias.off"), {
++						show: (r) => on(r) && (hasFeature || r.params?.[spec.key]), get, help: t(spec.help),
++						set: (r, id) => {
++							if (!on(r) || (id == null && get(r) == null)) return;
++							r.params = { ...r.params, [spec.key]: id != null, keyId: id ?? 0 };
++							if (spec.exclusive) r.params[spec.exclusive] = false;
++						},
+ 					}));
+diff --git a/site/tests/channel-aes.test.mjs b/site/tests/channel-aes.test.mjs
+index 3ecd5f1..f9d28c3 100644
+--- a/site/tests/channel-aes.test.mjs
++++ b/site/tests/channel-aes.test.mjs
+@@ -108 +108,36 @@ test("DMR AES-128 and AES-256 can use the same ID independently", () => {
+ });
++
++test("P25 DES-OFB lists only DES keys and preserves the selected cipher on disk", () => {
++	const m = empty();
++	const p25 = newChannel({ name: "P25", rxHz: 433000000, txHz: 433000000 });
++	setKind(m, p25, 2);
++	m.channels.push(p25);
++	m.keyring = [{ alg: 0x81, id: 0, key: "133457799BBCDFF1" }, { alg: 0x84, id: 5, key: "AB".repeat(32) }];
++	const fields = channelForm(m, (s) => s, { features: "P25,P25_DES" });
++	const aes = fields.find((f) => f.key === "k2.aes");
++	const des = fields.find((f) => f.key === "k2.des");
++	assert.ok(des.show(p25));
++	assert.deepEqual(des.options(p25).map(([id]) => id), [null, 0]);
++	assert.deepEqual(aes.options(p25).map(([id]) => id), [null, 5]);
++	aes.set(p25, 5);
++	des.set(p25, 0);
++	aes.set(p25, null);
++	assert.equal(aes.get(p25), null);
++	assert.equal(des.get(p25), 0);
++	const image = encode(m);
++	const restored = decode(image);
++	assert.equal(restored.channels[0].params.des, true);
++	assert.equal(restored.channels[0].params.aes, false);
++	assert.equal(restored.channels[0].params.keyId, 0);
++	assert.ok(restored.keyring.some((k) => k.alg === 0x81 && k.key === "133457799BBCDFF1"));
++	assert.equal(validKeyHex(0x81, "AB".repeat(32)), false);
++	const exported = image.clone();
++	withoutSecrets(exported.bytes);
++	assert.deepEqual(decode(exported).keyring, []);
++	aes.set(p25, 5);
++	assert.equal(des.get(p25), null);
++	assert.equal(aes.get(p25), 5);
++	const disabled = channelForm(m, (s) => s, { features: "P25" }).find((f) => f.key === "k2.des");
++	assert.equal(Boolean(disabled.show(p25)), false);
++	assert.ok(disabled.show(restored.channels[0]));
++});
+diff --git a/site/tests/modes.test.mjs b/site/tests/modes.test.mjs
+index f2b9bf8..fd981f2 100644
+--- a/site/tests/modes.test.mjs
++++ b/site/tests/modes.test.mjs
+@@ -50,2 +50,10 @@ test("vectors: P25 conventional block, unit ID record", () => {
+ 	}
++	for (const l of vectors("p25des")) {
++		const [b, kid] = l.split(/ +/);
++		const d = decodeConv(bytes(b));
++		assert.equal(d.des, true, l);
++		assert.equal(d.aes, false, l);
++		assert.equal(d.keyId, parseInt(kid, 16), l);
++		assert.equal(hexOf(encodeConv(d)), b, l);
++	}
+ 	for (const l of vectors("p25aesenc")) {
+diff --git a/tests/hil/features.toml b/tests/hil/features.toml
+index 00a9f1c..7b323b7 100644
+--- a/tests/hil/features.toml
++++ b/tests/hil/features.toml
+@@ -113,2 +113,7 @@ source = ["core/crypto", "core/p25/p25_aes.c", "core/p25/p25_aes.h", "core/nxdn/
+ 
++[feature.p25_des]
++switch = "P25_DES"
++spec = "docs/spec/air-encryption.md"
++source = ["core/crypto/des.c", "core/p25/p25_call.c", "core/radio/radio_p25.c"]
++
+ [feature.dmr_voice]
+diff --git a/tests/host/Makefile b/tests/host/Makefile
+index 2d21ff2..08c8f26 100644
+--- a/tests/host/Makefile
++++ b/tests/host/Makefile
+@@ -123,2 +123,7 @@ p25EngineTestAes: p25EngineTest.c $(CORE)/p25/p25_engine.c $(CORE)/p25/p25_engin
+ 
++# Legacy DES-OFB with the existing AES-256 path still enabled.
++TESTS += p25EngineTestDes
++p25EngineTestDes: p25EngineTest.c $(CORE)/p25/p25_engine.c $(CORE)/p25/p25_engine.h $(CORE)/air/air_session.c $(CORE)/air/air_framer.c $(P25) $(FEC) $(CORE)/crypto/des.c $(CORE)/crypto/des.h
++	$(CC) $(CFLAGS) -I$(ROOT)/hal -Wshadow -DCONFIG_P25=1 -DCONFIG_AIR_AES=1 -DCONFIG_P25_DES=1 -o $@ $(filter %.c,$^)
++
+ # NXDN frames, their FEC and calls through the framer (core/nxdn); the engine on two made-up providers
+diff --git a/tests/host/p25CodeplugTest.c b/tests/host/p25CodeplugTest.c
+index 3b00f31..84ed136 100644
+--- a/tests/host/p25CodeplugTest.c
++++ b/tests/host/p25CodeplugTest.c
+@@ -103,5 +103,13 @@ static void test_vectors(void)
+ 			p25_conv_decode(b, unhex(w[1], b, sizeof b), &c);
+-			CHECK(c.aes == (h(w[2]) != 0) && c.kid == h(w[3]));
++			CHECK(!c.des && c.aes == (h(w[2]) != 0) && c.kid == h(w[3]));
++		} else if (strcmp(w[0], "p25des") == 0) {
++			p25_conv_t c;
++			uint8_t e[P25_CP_CONV_LEN];
++			int len = unhex(w[1], b, sizeof b);
++			p25_conv_decode(b, len, &c);
++			CHECK(c.des && !c.aes && c.kid == h(w[2]));
++			p25_conv_encode(&c, e);
++			CHECK(len == P25_CP_CONV_LEN && memcmp(e, b, sizeof e) == 0);
+ 		} else if (strcmp(w[0], "p25aesenc") == 0) {
+-			p25_conv_t c = { (uint16_t)h(w[1]), (uint16_t)h(w[2]), (uint8_t)h(w[3]), h(w[4]) != 0, (uint16_t)h(w[5]) };
++			p25_conv_t c = { (uint16_t)h(w[1]), (uint16_t)h(w[2]), (uint8_t)h(w[3]), h(w[4]) != 0, false, (uint16_t)h(w[5]) };
+ 			uint8_t e[P25_CP_CONV_LEN];
+@@ -110,3 +118,3 @@ static void test_vectors(void)
+ 		} else if (strcmp(w[0], "p25enc") == 0) {
+-			p25_conv_t c = { (uint16_t)h(w[1]), (uint16_t)h(w[2]), (uint8_t)h(w[3]), false, 0 };
++			p25_conv_t c = { (uint16_t)h(w[1]), (uint16_t)h(w[2]), (uint8_t)h(w[3]), false, false, 0 };
+ 			uint8_t e[P25_CP_CONV_LEN];
+@@ -166,3 +174,3 @@ static void test_conv_load(void)
+ 	CHECK(codeplug_set_channel(10, &c));
+-	p25_conv_t pc = { 0x34, 0x293, P25_SQUELCH_SELECTIVE, false, 0 };
++	p25_conv_t pc = { 0x34, 0x293, P25_SQUELCH_SELECTIVE, false, false, 0 };
+ 	uint8_t blk[P25_CP_CONV_LEN];
+@@ -229,3 +237,3 @@ static void test_conv_save(void)
+ 	c.contact = 0;
+-	p25_conv_t pc = { 0x2A0, 0x2A1, P25_SQUELCH_SELECTIVE, false, 0 };
++	p25_conv_t pc = { 0x2A0, 0x2A1, P25_SQUELCH_SELECTIVE, false, false, 0 };
+ 	// Over a plain channel with a stale tag of another kind at the number: the tag is replaced
+@@ -271,3 +279,3 @@ static void test_conv_save(void)
+ 	r.mode = RADIO_MODE_P25;
+-	p25_conv_t ed = { 0x123, 0x124, P25_SQUELCH_NORMAL, false, 0 };
++	p25_conv_t ed = { 0x123, 0x124, P25_SQUELCH_NORMAL, false, false, 0 };
+ 	CHECK(p25_conv_save(33, &r, &ed));
+diff --git a/tests/host/p25EngineTest.c b/tests/host/p25EngineTest.c
+index 8703b1b..cba2be3 100644
+--- a/tests/host/p25EngineTest.c
++++ b/tests/host/p25EngineTest.c
+@@ -423,7 +423,9 @@ static void testAes(void)
+ 	p25_engine_cfg_t tx = { .rx_nac = 0x293, .tx_nac = 0x293, .unit_id = 1001, .silence = silence,
+-				.tx_lc = { .lcf = P25_LCF_GROUP, .tgid = 77 }, .aes_key = keyA, .aes_kid = 5, .aes_tx = true };
++				.tx_lc = { .lcf = P25_LCF_GROUP, .tgid = 77 }, .enc_key = keyA,
++				.enc_alg = P25_ALGID_AES256, .enc_kid = 5, .enc_tx = true };
+ 	p25_engine_cfg_t rx = { .rx_nac = 0x293, .tx_nac = 0x293, .unit_id = 2002, .silence = silence,
+-				.aes_key = keyA, .aes_kid = 5 };
++				.enc_key = keyA, .enc_alg = P25_ALGID_AES256, .enc_kid = 5 };
+ 	uint16_t n;
+ 
++	mi_calls = 0;
+ 	for (uint8_t i = 0; i < AES256_KEY_BYTES; i++) {
+@@ -450,3 +452,3 @@ static void testAes(void)
+ 	// 2. A receiver with another key, or another key id, or none: the call is known, its voice is not handed on
+-	rx.aes_key = keyB;
++	rx.enc_key = keyB;
+ 	begin(0, &tx, &hooks_aes);
+@@ -456,4 +458,4 @@ static void testAes(void)
+ 	CHECK(heard_in_order() == 0, "wrong key: no frame equals what was sent");
+-	rx.aes_key = keyA;
+-	rx.aes_kid = 6;
++	rx.enc_key = keyA;
++	rx.enc_kid = 6;
+ 	begin(0, &tx, &hooks_aes);
+@@ -462,4 +464,4 @@ static void testAes(void)
+ 	CHECK(r[1].starts == 0 && r[1].nvoice == 0, "other key id: silent, not even a start (%u starts, %u frames)", r[1].starts, r[1].nvoice);
+-	rx.aes_key = NULL;
+-	rx.aes_kid = 5;
++	rx.enc_key = NULL;
++	rx.enc_kid = 5;
+ 	begin(0, &tx, &hooks_aes);
+@@ -470,10 +472,10 @@ static void testAes(void)
+ 	// 3. Encryption asked for and no key: PTT is refused, nothing goes out in the clear
+-	tx.aes_key = NULL;
++	tx.enc_key = NULL;
+ 	begin(0, &tx, &hooks_aes);
+ 	CHECK(!p25_engine_tx_prepare(&r[0].e), "aes_tx without a key: no transmission");
+-	tx.aes_key = keyA;
+-	tx.aes_tx = false;
++	tx.enc_key = keyA;
++	tx.enc_tx = false;
+ 	begin(0, &tx, &hooks_aes);
+ 	begin(1, &rx, &hooks);
+-	rx.aes_key = keyA;
++	rx.enc_key = keyA;
+ 	p25_engine_set(&r[1].e, &rx);
+@@ -481,3 +483,3 @@ static void testAes(void)
+ 	CHECK(r[1].call.algid == P25_ALGID_CLEAR && r[1].nvoice > 0 && heard_in_order() == r[0].enc_made, "a clear call is still heard clear");
+-	tx.aes_tx = true;
++	tx.enc_tx = true;
+ 
+@@ -521,2 +523,87 @@ static void testAes(void)
+ 
++#if CONFIG_P25_DES
++static void testDes(void)
++{
++	static const uint8_t key[DES_KEY_BYTES] = { 0x13, 0x34, 0x57, 0x79, 0x9B, 0xBC, 0xDF, 0xF1 };
++	static const uint8_t iv[P25_MI_CIPHER_BYTES] = { 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF };
++	// OpenSSL enc -des-ofb -provider legacy -K 133457799BBCDFF1 -iv 0123456789ABCDEF, zero input.
++	// Voice frames are at offsets 19, 109, 120 and 210. The LDU2 sync bit is XORed into the final octet.
++	static const uint8_t expected[2][2][P25_IMBE_BYTES] = {
++		{ { 0x64, 0x51, 0x6A, 0x6E, 0x36, 0xF6, 0x8C, 0x7A, 0xEB, 0x67, 0x37 },
++		  { 0x7A, 0x5E, 0x6E, 0xDE, 0x49, 0x42, 0x5A, 0xB1, 0x4C, 0x7A, 0x03 } },
++		{ { 0x4E, 0x34, 0x99, 0x5D, 0x84, 0xB8, 0x95, 0x80, 0x63, 0xF1, 0x76 },
++		  { 0x7F, 0xBC, 0x81, 0xC4, 0xF5, 0x0F, 0x5A, 0x5F, 0x4E, 0x1F, 0x17 } },
++	};
++	const p25_lc_t lc = { .lcf = P25_LCF_GROUP, .tgid = 77 };
++	static const uint8_t zero[P25_IMBE_BYTES];
++	uint8_t hdu[P25_HDR_BYTES], es[P25_ES_BYTES], imbe[P25_IMBE_BYTES], mi[P25_MI_CIPHER_BYTES];
++	p25_call_tx_t call;
++	uint16_t first;
++
++	p25_call_tx_begin_enc(&call, 0x293, &lc, P25_SS_UNKNOWN, key, 0x4321, P25_ALGID_DES_OFB, iv);
++	CHECK(p25_hdu_get(call.unit, hdu) == 0 && memcmp(hdu, iv, sizeof iv) == 0 && hdu[8] == 0 &&
++	      hdu[10] == P25_ALGID_DES_OFB && hdu[11] == 0x43 && hdu[12] == 0x21, "DES header");
++	p25_call_tx_sent(&call, p25_call_tx_ready(&call, &first));
++	for (unsigned ldu = 0; ldu < 2; ldu++) {
++		for (unsigned n = 0; n < P25_VOICE_FRAMES; n++)
++			p25_call_tx_voice(&call, zero);
++		for (unsigned n = 0; n < P25_VOICE_FRAMES; n += P25_VOICE_FRAMES - 1) {
++			CHECK(p25_ldu_voice_get(call.unit, n, imbe) == 0 &&
++			      memcmp(imbe, expected[ldu][n != 0], sizeof imbe) == 0,
++			      "DES on-air vector LDU%u frame %u", ldu + 1, n);
++		}
++		if (ldu == 0) {
++			uint8_t link[P25_LC_BYTES];
++			CHECK(p25_ldu_lc_get(call.unit, link) == 0 && (link[2] & P25_SERVICE_ENCRYPTED), "DES link control protection flag");
++			p25_call_tx_sent(&call, p25_call_tx_ready(&call, &first));
++		}
++	}
++	memcpy(mi, iv, sizeof mi);
++	p25_aes_mi_next(mi);
++	CHECK(p25_ldu_es_get(call.unit, es) == 0 && memcmp(es, mi, sizeof mi) == 0 && es[8] == 0 &&
++	      es[9] == P25_ALGID_DES_OFB && es[10] == 0x43 && es[11] == 0x21, "DES LDU2 announces next MI and key");
++
++	p25_engine_cfg_t tx = {
++		.rx_nac = 0x293, .tx_nac = 0x293, .unit_id = 1001, .silence = silence, .tx_lc = lc,
++		.enc_key = key, .enc_alg = P25_ALGID_DES_OFB, .enc_kid = 5, .enc_tx = true,
++	};
++	p25_engine_cfg_t rx = tx;
++	rx.enc_tx = false;
++	begin(0, &tx, &hooks_aes);
++	begin(1, &rx, &hooks);
++	over(100, 0, 0);
++	CHECK(r[1].call.algid == P25_ALGID_DES_OFB && r[1].call.decrypt &&
++	      r[1].nvoice >= 90 && heard_in_order() == r[0].enc_made, "DES loopback across superframes");
++
++	rx.enc_alg = P25_ALGID_AES256;
++	rx.enc_key = keyA;
++	begin(0, &tx, &hooks_aes);
++	begin(1, &rx, &hooks);
++	over(30, 0, 0);
++	CHECK(r[1].starts == 0 && r[1].nvoice == 0, "DES stays muted against an AES key with the same key ID");
++	tx.enc_key = NULL;
++	begin(0, &tx, &hooks_aes);
++	CHECK(!p25_engine_tx_prepare(&r[0].e), "DES with no key refuses PTT");
++}
++#endif
++
++static void testDesDisabled(void)
++{
++#if !CONFIG_P25_DES
++	static const uint8_t key[8] = { 1 };
++	p25_engine_cfg_t tx = {
++		.rx_nac = 0x293, .tx_nac = 0x293, .unit_id = 1001, .silence = silence, .enc_tx = true,
++	};
++#if CONFIG_AIR_AES
++	tx.enc_alg = P25_ALGID_DES_OFB;
++	tx.enc_key = key;
++	begin(0, &tx, &hooks_aes);
++#else
++	(void)key;
++	begin(0, &tx, &hooks);
++#endif
++	CHECK(!p25_engine_tx_prepare(&r[0].e), "unavailable encryption refuses PTT");
++#endif
++}
++
+ int main(void)
+@@ -525,2 +612,6 @@ int main(void)
+ 	testSquelch();
++	testDesDisabled();
++#if CONFIG_P25_DES
++	testDes();
++#endif
+ #if CONFIG_AIR_AES
+diff --git a/tests/host/radioCoreTest.c b/tests/host/radioCoreTest.c
+index a1d758f..d6e6515 100644
+--- a/tests/host/radioCoreTest.c
++++ b/tests/host/radioCoreTest.c
+@@ -6666,5 +6666,6 @@ static void far_begin(uint16_t nac, uint32_t unit, bool unit_call, uint32_t dst)
+ #if CONFIG_AIR_AES
+-	c.aes_key = far_key;
+-	c.aes_kid = far_kid;
+-	c.aes_tx = far_key != NULL;
++	c.enc_alg = P25_ALGID_AES256;
++	c.enc_key = far_key;
++	c.enc_kid = far_kid;
++	c.enc_tx = far_key != NULL;
+ #endif
+@@ -7511,3 +7512,3 @@ static void test_p25_aes(void)
+ 	CHECK(sm.view.channel_number == 3 && radio_p25_running());
+-	CHECK(v->tx_aes_ready);
++	CHECK(v->tx_encrypted_ready);
+ 	p25VoiceGetStats(&vs);
+@@ -7547,3 +7548,3 @@ static void test_p25_aes(void)
+ 	CHECK(sm.view.state == RS_TX && hw.keyed);
+-	CHECK(v->tx_aes_ready && v->tx == AIR_TX_ON);
++	CHECK(v->tx_encrypted_ready && v->tx == AIR_TX_ON);
+ 	run(1000);
+@@ -7570,3 +7571,3 @@ static void test_p25_aes(void)
+ 	CHECK(sm.view.state == RS_TX_DENIED && sm.view.tx_deny == TXDENY_REFUSED && !hw.keyed);
+-	CHECK(!v->tx_aes_ready);
++	CHECK(!v->tx_encrypted_ready);
+ 	req(RREQ_PTT, 0);
+diff --git a/tests/vectors/channel-modes.txt b/tests/vectors/channel-modes.txt
+index dbad89d..c17bea3 100644
+--- a/tests/vectors/channel-modes.txt
++++ b/tests/vectors/channel-modes.txt
+@@ -47,2 +47,5 @@ p25aesenc 34 34 1 1 1 0134800000010100
+ p25aesenc 293 293 0 0 1234 0000000000000000
++# p25des <block> <key id>: DES-OFB sets the legacy encryption bit and a second algorithm bit
++p25des 0000000000033412 1234
++p25des 0000000000030000 0
+ #

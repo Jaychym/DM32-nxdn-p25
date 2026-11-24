@@ -122,6 +122,15 @@ PATCHES = (
 	'issue61-p25-talkgroup.patch',
 	'issue33-dmr-dial.patch',
 	'issue50-tone-search.patch',
+	'issue53-home-display.patch',
+	'issue47-dmr-aes128.patch',
+	'issue53-lrrp-position.patch',
+	'issue61-p25-des.patch',
+	'issue53-flasher-startup.patch',
+	'issue41-nxdn-scrambler.patch',
+	'issue61-des-combined-dropdown.patch',
+	'issue53-clear-voice.patch',
+	'issue53-zh-glyphs.patch',
 )
 
 

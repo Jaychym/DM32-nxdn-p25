@@ -1,0 +1,2252 @@
+diff --git a/boards/dm32/config.mk b/boards/dm32/config.mk
+index 18b4ef5..865efa2 100644
+--- a/boards/dm32/config.mk
++++ b/boards/dm32/config.mk
+@@ -26,6 +26,7 @@ CONFIG_VOX ?= n
+ CONFIG_RX_EXT_ON ?= n
+ # Conventional P25 DES-OFB is available when both of its dependencies are enabled.
+ CONFIG_P25_DES ?= $(if $(and $(filter y,$(CONFIG_P25)),$(filter y,$(CONFIG_AIR_AES))),y,n)
++CONFIG_NXDN_SCRAMBLER ?= $(CONFIG_NXDN)
+ # Keep two simultaneous TCP connections and omit optional IP services in the default DM-32UV image.
+ TCP_CONNS ?= 2
+ CONFIG_NET_WEBCTL ?= n
+diff --git a/config/features.mk b/config/features.mk
+index b047612..74e8a53 100644
+--- a/config/features.mk
++++ b/config/features.mk
+@@ -313,6 +313,8 @@ CONFIG_P25 ?= $(CONFIG_DMR)
+ # on the air interface, and the NXDN channel mode. Voice frames go to and from the vocoder the board already hosts for
+ # DMR, through the DMR voice path; nothing of the vocoder is in it. Needs DMR
+ CONFIG_NXDN ?= $(CONFIG_DMR)
++# Conventional NXDN voice scrambling with keys maintained in the codeplug.
++CONFIG_NXDN_SCRAMBLER ?= n
+ # YSF (Yaesu System Fusion) conventional voice and data (core/ysf, docs/spec/ysf.md): C4FM 9600 bit/s, the frame
+ # layer and its engine on the air interface, and the YSF channel mode (core/radio/radio_ysf.c). Voice frames go to and
+ # from the vocoder the board already hosts for DMR, through the DMR voice path; nothing of the vocoder is in it.
+@@ -353,7 +355,7 @@ CONFIG_GPS_UTM ?= $(CONFIG_GPS_SKY)
+ 
+ FEATURES := USB_SERIAL_REQUEST FM SUBTONE TONE_SCAN DMR DMR_PRIVACY DMR_TALKER_ALIAS DMR_GPS DMR_SMS DMR_TMS DMR_ARS DMR_LRRP DMR_SIGNALING DMR_EMERGENCY DMR_ROAMING DMR_TRUNK DMR_TRUNK_TX DMR_TRUNK_SUPL DMR_TRUNK_GW VOICE_CAPTURE DMR_IP_GATEWAY ZONE_SHARE DMR_UDP_COMPRESS NET_TCP NET_KISS NET_HTTP NET_HTTP_GZIP NET_WEBCTL NET_RIGCTL NET_APRSIS NET_USRP MDNS TFTP TFTP_IDDB IDDB_COMPACT DMR_CONTROL_STATION SNMP SFR SFR_DUALPATH_RX SFR_CWID TASK_STACKS \
+ 	USB HOSTLINK USB_NETWORK NET_PPP HOTSPOT HOTSPOT_SPLIT DEBUGLINK CPS_OPENFW CPS_FAST VFO VFO_FM VFO_DMR DIAG BACKLIGHT_TEST FONT_XL FONT_AA FONT_BIG LANG_ES LANG_IT LANG_FR LANG_ZH LANG_DEFAULT_ES LANG_DEFAULT_IT LANG_DEFAULT_FR LANG_DEFAULT_ZH UI_COLOR UI_SETTINGS SCAN DUAL_WATCH BEEP FM_TX_TONES DTMF \
+-	RX_EXT RX_EXT_ON AIR_AES VOX REF_TRIM BATTERY_SAVE VIBRATE GPS AUDIO_PROBE STUB_ENTRY NAND_STORAGE CRASH_LOG CRASH_SCREEN CRASH_REPORT WATCHDOG FAULT_TRACE AM_RX BCAST_FM SPLASH_IMAGE APRS APRS_AFSK APRS_DMR APRS_RX APRS_IGATE GPS_SKY GPS_UTM KEY_ASSIGN CHANNEL_LIST CHANNEL_EDIT ZONE_EDIT CONTACT_EDIT VOLUME_BAR P25 P25_TRUNK P25_DES NXDN YSF M17 AIR_RAW UI_KAWAII MDC1200
++	RX_EXT RX_EXT_ON AIR_AES VOX REF_TRIM BATTERY_SAVE VIBRATE GPS AUDIO_PROBE STUB_ENTRY NAND_STORAGE CRASH_LOG CRASH_SCREEN CRASH_REPORT WATCHDOG FAULT_TRACE AM_RX BCAST_FM SPLASH_IMAGE APRS APRS_AFSK APRS_DMR APRS_RX APRS_IGATE GPS_SKY GPS_UTM KEY_ASSIGN CHANNEL_LIST CHANNEL_EDIT ZONE_EDIT CONTACT_EDIT VOLUME_BAR P25 P25_TRUNK P25_DES NXDN NXDN_SCRAMBLER YSF M17 AIR_RAW UI_KAWAII MDC1200
+ 
+ # The panel's width in pixels: the display class the board's board.toml names (hardware.gallery = "160x128", the width
+ # first). Empty when it names none, which counts as a narrow panel
+@@ -432,6 +434,7 @@ $(if $(and $(call feature_on,P25_DES),$(if $(and $(call feature_on,P25),$(call f
+ $(if $(and $(call feature_on,P25_TRUNK),$(if $(call feature_on,P25),,x)),$(error CONFIG_P25_TRUNK=y needs CONFIG_P25=y))
+ $(if $(and $(call feature_on,P25),$(if $(call feature_on,DMR),,x)),$(error CONFIG_P25=y needs CONFIG_DMR=y (its talk groups are the codeplug's contacts)))
+ $(if $(and $(call feature_on,NXDN),$(if $(call feature_on,DMR),,x)),$(error CONFIG_NXDN=y needs CONFIG_DMR=y (its voice is the DMR vocoder's)))
++$(if $(and $(call feature_on,NXDN_SCRAMBLER),$(if $(call feature_on,NXDN),,x)),$(error CONFIG_NXDN_SCRAMBLER=y needs CONFIG_NXDN=y))
+ $(if $(and $(call feature_on,YSF),$(if $(call feature_on,DMR),,x)),$(error CONFIG_YSF=y needs CONFIG_DMR=y (its voice is the DMR vocoder's)))
+ $(if $(and $(call feature_on,M17),$(if $(call feature_on,AIR),,x)),$(error CONFIG_M17=y needs CONFIG_P25=y, CONFIG_NXDN=y or CONFIG_YSF=y (the air interface it runs on)))
+ $(if $(and $(call feature_on,AIR_RAW),$(if $(call feature_on,DEBUGLINK),,x)),$(error CONFIG_AIR_RAW=y needs CONFIG_DEBUGLINK=y))
+diff --git a/core/codeplug/codeplug_modes.h b/core/codeplug/codeplug_modes.h
+index 7992b4f..cf6cd4f 100644
+--- a/core/codeplug/codeplug_modes.h
++++ b/core/codeplug/codeplug_modes.h
+@@ -57,7 +57,8 @@ bool radio_m17_fits(void);
+ 	X(4, NXDN, "NXDN", CODEPLUG_RUNS_NXDN)	/* NXDN conventional: the radio core runs it (core/radio/radio_nxdn.c) */ \
+ 	X(5, AM, "AM", CONFIG_AM_RX)	/* AM, receive only, on any frequency the receiver tunes; a board whose receiver can't parks it (radio_sm.c) */ \
+ 	X(6, YSF, "YSF", CODEPLUG_RUNS_YSF)	/* YSF conventional: the radio core runs it (core/radio/radio_ysf.c) */ \
+-	X(7, M17, "M17", CODEPLUG_RUNS_M17)	/* M17 stream mode voice: the radio core runs it (core/radio/radio_m17.c) */
++	X(7, M17, "M17", CODEPLUG_RUNS_M17)	/* M17 stream mode voice: the radio core runs it (core/radio/radio_m17.c) */ \
++	X(8, NXDN_SCRAMBLER, "NXDN-S", CONFIG_NXDN_SCRAMBLER && CODEPLUG_RUNS_NXDN)	/* conventional NXDN, 15-bit voice scrambler */
+ 
+ // System types: the first byte of a system record
+ #define CODEPLUG_SYSTEM_TYPES(X) \
+diff --git a/core/config.h b/core/config.h
+index 1293e60..65f00fc 100644
+--- a/core/config.h
++++ b/core/config.h
+@@ -330,6 +330,9 @@
+ #ifndef CONFIG_NXDN
+ #define CONFIG_NXDN			0
+ #endif
++#ifndef CONFIG_NXDN_SCRAMBLER
++#define CONFIG_NXDN_SCRAMBLER		0
++#endif
+ // YSF conventional voice and data (core/ysf, docs/spec/ysf.md)
+ #ifndef CONFIG_YSF
+ #define CONFIG_YSF			0
+diff --git a/core/hostlink/build_info.c b/core/hostlink/build_info.c
+index afa9945..3c2c756 100644
+--- a/core/hostlink/build_info.c
++++ b/core/hostlink/build_info.c
+@@ -223,15 +223,19 @@ static const char features[] =
+ // P25, NXDN and YSF run where the board's air interface carries them: the Codeplug Editor offers their channels only there
+ const char *build_modes_now(void)
+ {
+-	static char modes[40];	// "P25,P25_TRUNK,P25_DES,NXDN,YSF,M17," fits
++	static char modes[64];
+ 	modes[0] = '\0';
+ #if CONFIG_P25
+ 	if (radio_p25_fits())
+ 		strcat(modes, P25_FEATURES P25_DES_FEATURE);
+ #endif
+ #if CONFIG_NXDN
+-	if (radio_nxdn_fits())
++	if (radio_nxdn_fits()) {
+ 		strcat(modes, "NXDN,");
++#if CONFIG_NXDN_SCRAMBLER
++		strcat(modes, "NXDN_SCRAMBLER,");
++#endif
++	}
+ #endif
+ #if CONFIG_YSF
+ 	if (radio_ysf_fits())
+diff --git a/core/nxdn/nxdn.h b/core/nxdn/nxdn.h
+index 383b66c..025d8d6 100644
+--- a/core/nxdn/nxdn.h
++++ b/core/nxdn/nxdn.h
+@@ -238,6 +238,9 @@ typedef struct {
+ 	uint8_t sf_parts;		// bit k: part k is in
+ 	int8_t sf_next;			// the part expected next, -1 none
+ 	nxdn_call_stats_t stats;
++#if CONFIG_NXDN_SCRAMBLER
++	uint16_t scramble_key;	// the seed of this call; 0 means unavailable
++#endif
+ #if CONFIG_AIR_AES
+ 	const uint8_t *aes_key;		// the AES-256 key of calls with aes_kid (32 octets), NULL: none
+ 	uint8_t aes_kid;
+@@ -271,6 +274,9 @@ typedef struct {
+ 	uint8_t msg[NXDN_LCAC_BYTES];	// VCALL, as FACCH1 and SACCH carry it; a burst's SR and long CAC message
+ 	uint8_t rel[NXDN_FACCH1_BYTES];	// TX_REL
+ 	uint8_t frame[NXDN_FRAME_BYTES];
++#if CONFIG_NXDN_SCRAMBLER
++	uint16_t scramble_key;	// the seed of this transmission; 0 means clear or AES
++#endif
+ #if CONFIG_AIR_AES
+ 	const uint8_t *aes_key;		// the call is encrypted with this key (NULL: clear)
+ 	uint8_t iv[8];
+@@ -293,7 +299,8 @@ uint16_t nxdn_call_tx_ready(const nxdn_call_tx_t *t, uint16_t *first);
+ const uint8_t *nxdn_call_tx_syms(const nxdn_call_tx_t *t);
+ void nxdn_call_tx_sent(nxdn_call_tx_t *t, uint16_t n);
+ bool nxdn_call_tx_wants_voice(const nxdn_call_tx_t *t);
+-void nxdn_call_tx_voice(nxdn_call_tx_t *t, const uint8_t ehr[NXDN_EHR_BYTES]);
++// False if the frame was not accepted. The caller may retry with silence.
++bool nxdn_call_tx_voice(nxdn_call_tx_t *t, const uint8_t ehr[NXDN_EHR_BYTES]);
+ // The operator let go: the frame in hand is filled with silence (one without voice yet is not sent), then the
+ // release frame
+ void nxdn_call_tx_end(nxdn_call_tx_t *t, const uint8_t silence[NXDN_EHR_BYTES]);
+diff --git a/core/nxdn/nxdn_call.c b/core/nxdn/nxdn_call.c
+index ea5521f..39a65a6 100644
+--- a/core/nxdn/nxdn_call.c
++++ b/core/nxdn/nxdn_call.c
+@@ -6,6 +6,9 @@
+ // TS 1-B's (Basic Operation) where the text says so, else TS 1-A's.
+ 
+ #include "nxdn.h"
++#if CONFIG_NXDN_SCRAMBLER
++#include "nxdn_scramble.h"
++#endif
+ #if CONFIG_AIR_AES
+ #include "nxdn_aes.h"
+ #endif
+@@ -32,6 +35,9 @@ static void call_start(nxdn_call_rx_t *c, const nxdn_rx_frame_t *f, bool late)
+ 	c->call.ran = f->sacch_errs >= 0 ? NXDN_SR_RAN(f->sacch[0]) : c->rx.ran;
+ 	c->call.rssi_dbm = f->rssi_dbm;
+ 	c->active = true;
++#if CONFIG_NXDN_SCRAMBLER
++	c->scramble_key = 0;
++#endif
+ #if CONFIG_AIR_AES
+ 	c->anchored = c->next_iv_valid = c->sync_next = false;
+ 	c->vch_n = 0;
+@@ -54,12 +60,15 @@ static void call_end(nxdn_call_rx_t *c)
+ 
+ // Voice that can be played: the call's VCALL is in (a late entry waits for a whole superframe of SACCH, TS 1-B
+ // 4.1.6), clear (TS 1-B 4.1.7: encrypted voice is noise without the key) and half rate (the vocoder's)
+-static bool playable(const nxdn_call_t *call)
++static bool playable(const nxdn_call_rx_t *c)
+ {
++	const nxdn_call_t *call = &c->call;
+ 	uint8_t mode = call->vcall.voice_opt & 7;
+-
+-	return call->have_vcall && ((call->vcall.cipher == NXDN_CIPHER_NONE && !call->iv) || call->decrypt) &&
+-	       (mode == NXDN_VOICE_4800_EHR || mode == NXDN_VOICE_9600_EHR);
++	bool clear = (call->vcall.cipher == NXDN_CIPHER_NONE && !call->iv) || call->decrypt;
++#if CONFIG_NXDN_SCRAMBLER
++	clear = clear || (call->vcall.cipher == NXDN_CIPHER_SCRAMBLE && c->scramble_key != 0 && !call->iv);
++#endif
++	return call->have_vcall && clear && (mode == NXDN_VOICE_4800_EHR || mode == NXDN_VOICE_9600_EHR);
+ }
+ 
+ #if CONFIG_AIR_AES
+@@ -225,11 +234,18 @@ static void on_frame(const nxdn_rx_frame_t *f, void *ctx)
+ 
+ 		if (opt == NXDN_STEAL_BOTH || (opt == NXDN_STEAL_FIRST && n < 2) || (opt == NXDN_STEAL_SECOND && n >= 2))
+ 			continue;
+-		if (!c->active || !playable(&c->call)) {
++		if (!c->active || !playable(c)) {
+ 			c->stats.voice_held++;
+ 			continue;
+ 		}
+ 		nxdn_vch_get(f->hard, n, ehr);
++#if CONFIG_NXDN_SCRAMBLER
++		if (c->call.vcall.cipher == NXDN_CIPHER_SCRAMBLE &&
++		    (!sf || f->sacch_errs < 0 || !nxdn_scramble_vch(c->scramble_key, NXDN_SR_PART(f->sacch[0]), n, ehr))) {
++			c->stats.voice_held++;
++			continue;
++		}
++#endif
+ #if CONFIG_AIR_AES
+ 		if (c->call.decrypt)
+ 			nxdn_aes_vch(c->aes_key, c->call.iv_val, c->vch_n + n, ehr);
+@@ -451,10 +467,20 @@ bool nxdn_call_tx_wants_voice(const nxdn_call_tx_t *t)
+ 	return t->state == TX_SF && !facch_frame(t) && t->nvoice < NXDN_VOICE_FRAMES;
+ }
+ 
+-void nxdn_call_tx_voice(nxdn_call_tx_t *t, const uint8_t ehr[NXDN_EHR_BYTES])
++bool nxdn_call_tx_voice(nxdn_call_tx_t *t, const uint8_t ehr[NXDN_EHR_BYTES])
+ {
+ 	if (!nxdn_call_tx_wants_voice(t))
+-		return;
++		return false;
++#if CONFIG_NXDN_SCRAMBLER
++	if (t->scramble_key != 0) {
++		uint8_t scrambled[NXDN_EHR_BYTES];
++
++		memcpy(scrambled, ehr, sizeof scrambled);
++		if (!nxdn_scramble_vch(t->scramble_key, t->sf_frame, t->nvoice, scrambled))
++			return false;
++		nxdn_vch_put(t->frame, t->nvoice, scrambled);
++	} else
++#endif
+ #if CONFIG_AIR_AES
+ 	if (t->aes_key != NULL) {
+ 		uint8_t enc[NXDN_EHR_BYTES];
+@@ -467,6 +493,7 @@ void nxdn_call_tx_voice(nxdn_call_tx_t *t, const uint8_t ehr[NXDN_EHR_BYTES])
+ 	nxdn_vch_put(t->frame, t->nvoice, ehr);
+ 	t->nvoice++;
+ 	t->ready = NXDN_VCH_SYM(t->nvoice);
++	return true;
+ }
+ 
+ void nxdn_call_tx_end(nxdn_call_tx_t *t, const uint8_t silence[NXDN_EHR_BYTES])
+@@ -477,8 +504,8 @@ void nxdn_call_tx_end(nxdn_call_tx_t *t, const uint8_t silence[NXDN_EHR_BYTES])
+ 		tx_frame(t, TX_END);
+ 		return;
+ 	}
+-	while (nxdn_call_tx_wants_voice(t))
+-		nxdn_call_tx_voice(t, silence);
++	while (nxdn_call_tx_voice(t, silence))
++		;
+ }
+ 
+ void nxdn_call_tx_burst(nxdn_call_tx_t *t, const uint8_t *msg, uint8_t ran)
+diff --git a/core/nxdn/nxdn_codeplug.c b/core/nxdn/nxdn_codeplug.c
+index d613a68..823ae9a 100644
+--- a/core/nxdn/nxdn_codeplug.c
++++ b/core/nxdn/nxdn_codeplug.c
+@@ -7,6 +7,10 @@
+ #include "nxdn/nxdn_codeplug.h"
+ #include "codeplug/codeplug_tag.h"
+ #include "codeplug/codeplug_records.h"
++#if CONFIG_NXDN_SCRAMBLER
++#include "codeplug/codeplug_kv.h"
++#include "nxdn/nxdn.h"
++#endif
+ 
+ #if CONFIG_NXDN
+ 
+@@ -27,6 +31,7 @@ void nxdn_conv_decode(const uint8_t *b, int len, nxdn_conv_t *out)
+ 	else
+ 		out->tx_ran = rx != 0 ? rx : (uint8_t)NXDN_CP_TX_RAN_DEFAULT;
+ 	out->aes = len >= 4 && (b[3] & NXDN_CP_ENC_AES) != 0;
++	out->scramble = false;
+ 	out->kid = out->aes && len >= 5 ? (uint8_t)(b[4] & NXDN_CP_KID_MAX) : 0u;
+ 	// Trunking (bytes 5-11, nxdn-trunking.md 3): a shorter block is conventional
+ 	uint8_t t = len >= 6 ? b[5] : 0u;
+@@ -104,12 +109,20 @@ bool nxdn_conv_load(uint16_t number, const channel_t *ch, nxdn_conv_cfg_t *out)
+ 	const int cap = (int)(sizeof b - CODEPLUG_TAG_HEAD_MAX);
+ 	int len;
+ 
+-	if (ch->kind != CODEPLUG_KIND_NXDN)
++	if (!nxdn_cp_kind(ch->kind))
+ 		return false;
+ 	len = codeplug_tag_params(number, ch, b, (uint16_t)cap);
+ 	if (len < 0)
+ 		return false;
+ 	nxdn_conv_decode(b, len < cap ? len : cap, &out->conv);
++	if (ch->kind == CODEPLUG_KIND_NXDN_SCRAMBLER) {
++		out->conv.scramble = true;
++		out->conv.aes = false;
++		// A malformed scramble tag stays scrambled with an unavailable key. It never selects clear TX.
++		out->conv.kid = len >= (int)NXDN_CP_CONV_LEN && b[3] == NXDN_CP_ENC_SCRAMBLER &&
++				b[4] <= NXDN_CP_KID_MAX && !out->conv.trunk ? b[4] : UINT8_MAX;
++		out->conv.trunk = out->conv.trunk_all = false;
++	}
+ 	out->unit_id = unit_ok(ch->dmr_id) ? (uint16_t)ch->dmr_id : nxdn_radio_unit_id();
+ 	talk_target(ch, &out->target, &out->target_unit);
+ 	return true;
+@@ -119,17 +132,24 @@ bool nxdn_conv_save(uint16_t number, const channel_t *ch, const nxdn_conv_t *con
+ {
+ 	channel_t c = *ch;
+ 	uint8_t blk[NXDN_CP_SAVE_LEN];
++	if (conv->scramble && (!CONFIG_NXDN_SCRAMBLER || conv->aes || conv->trunk || conv->kid > NXDN_CP_KID_MAX))
++		return false;
+ 	// A channel of the kind already keeps the system it names
+-	uint8_t system = ch->kind == CODEPLUG_KIND_NXDN ? ch->system : CODEPLUG_SYSTEM_NONE;
+-	codeplug_tag_t t = { .kind = CODEPLUG_KIND_NXDN, .system = system, .flags = ch->rx_only ? 0u : CODEPLUG_TAG_TX };
++	uint8_t kind = conv->scramble ? CODEPLUG_KIND_NXDN_SCRAMBLER : CODEPLUG_KIND_NXDN;
++	uint8_t system = kind == CODEPLUG_KIND_NXDN && nxdn_cp_kind(ch->kind) ? ch->system : CODEPLUG_SYSTEM_NONE;
++	codeplug_tag_t t = { .kind = kind, .system = system, .flags = ch->rx_only ? 0u : CODEPLUG_TAG_TX };
+ 
+ 	// The safe stand-in: DMR, receive only (the tag carries transmit allowed). Under a tag that says the base record
+ 	// is a channel of its own, codeplug_set_channel keeps that channel's mode instead
+-	c.kind = CODEPLUG_KIND_NXDN;
++	c.kind = kind;
+ 	c.system = system;
+ 	c.mode = RADIO_MODE_DMR;
+ 	c.rx_only = true;
+ 	nxdn_conv_encode(conv, blk);
++	if (conv->scramble) {
++		blk[3] = NXDN_CP_ENC_SCRAMBLER;
++		blk[4] = conv->kid;
++	}
+ 	blk[5] = (uint8_t)((conv->trunk ? NXDN_CP_TRUNK : 0u) | (conv->trunk && conv->trunk_all ? NXDN_CP_TRUNK_ALL : 0u));
+ 	// A tag of the kind that followed the record keeps its fallback, its other flags and what it stores after this
+ 	// block (an editor's or a later firmware's); else a new one
+@@ -137,4 +157,29 @@ bool nxdn_conv_save(uint16_t number, const channel_t *ch, const nxdn_conv_t *con
+ 						     codeplug_tag_write(number, c.name, &t, blk, sizeof blk));
+ }
+ 
++#if CONFIG_NXDN_SCRAMBLER
++void nxdn_scrambler_keyring(uint16_t keys[NXDN_CP_KID_MAX + 1u])
++{
++	uint8_t rec[CODEPLUG_TRAFFIC_HDR + 2u];
++	codeplug_kv_cursor_t c;
++	uint16_t key;
++	int len;
++
++	memset(keys, 0, sizeof(*keys) * (NXDN_CP_KID_MAX + 1u));
++	codeplug_kv_begin(&c, CODEPLUG_KEY_TRAFFIC, CODEPLUG_KEY_TRAFFIC + 0x3FFu);
++	while ((len = codeplug_kv_next(&c, &key, rec, sizeof rec)) >= 0) {
++		if (len != (int)sizeof rec || rec[0] != CODEPLUG_SYSTEM_NONE || rec[1] != NXDN_CIPHER_SCRAMBLE ||
++		    rec[3] != 0u || rec[2] > NXDN_CP_KID_MAX)
++			continue;
++		uint16_t id = rec[2];
++		uint16_t seed = (uint16_t)(rec[5] | rec[6] << 8);
++		// Ambiguous duplicate IDs fail closed. The editor rejects duplicate algorithm/ID pairs.
++		keys[id] = keys[id] || seed == 0u || seed > NXDN_CP_SEED_MAX ? UINT16_MAX : seed;
++	}
++	for (size_t i = 0; i <= NXDN_CP_KID_MAX; i++)
++		if (keys[i] == UINT16_MAX)
++			keys[i] = 0u;
++}
++#endif
++
+ #endif	// CONFIG_NXDN
+diff --git a/core/nxdn/nxdn_codeplug.h b/core/nxdn/nxdn_codeplug.h
+index 3310d97..734ed04 100644
+--- a/core/nxdn/nxdn_codeplug.h
++++ b/core/nxdn/nxdn_codeplug.h
+@@ -9,6 +9,7 @@
+ #include <stdint.h>
+ #include <stdbool.h>
+ #include "codeplug/codeplug.h"
++#include "codeplug/codeplug_modes.h"
+ 
+ #define NXDN_CP_RAN_MAX		63u
+ #define NXDN_CP_TX_RAN_SET	0x80u	// a stored TX RAN holds a value (clear: the default)
+@@ -25,6 +26,8 @@
+ #define NXDN_CP_ENC_AES		0x01u	// byte 3: AES-256 (docs/spec/air-encryption.md): sent encrypted, heard decrypted; byte 4
+ 					// the key id (6 bits) of a key of the keyring (codeplug_traffic_key, system 0xFF)
+ #define NXDN_CP_KID_MAX		63u
++#define NXDN_CP_ENC_SCRAMBLER	0x02u	// kind 8 only: byte 3 selects scrambling, byte 4 is the key ID
++#define NXDN_CP_SEED_MAX		32767u
+ #define NXDN_CP_TRUNK		0x01u	// byte 5: Type-C trunked, the RX frequency is the control channel (nxdn-trunking.md)
+ #define NXDN_CP_TRUNK_ALL	0x02u	// ... every group call of the site is followed
+ #define NXDN_CP_SPACING_UNIT	125u	// bytes 10-11: the channel plan's spacing in 125 Hz
+@@ -35,6 +38,7 @@ typedef struct {
+ 	uint8_t tx_ran;
+ 	uint8_t squelch;	// NXDN_SQUELCH_*
+ 	bool aes;		// AES-256 on this channel
++	bool scramble;		// NXDN voice scrambling (a separate channel kind)
+ 	uint8_t kid;		// its key id (0-63)
+ 	bool trunk;		// Type-C trunked: the RX frequency is the site's control channel
+ 	bool trunk_all;		// ... every group followed, else the channel's group (and calls to us)
+@@ -42,6 +46,14 @@ typedef struct {
+ 	uint32_t plan_spacing_hz;
+ } nxdn_conv_t;
+ 
++static inline bool nxdn_cp_kind(uint8_t kind)
++{
++	return kind == CODEPLUG_KIND_NXDN || kind == CODEPLUG_KIND_NXDN_SCRAMBLER;
++}
++
++// Snapshot the installed two-byte seeds before starting the modem. Zero marks an unavailable key.
++void nxdn_scrambler_keyring(uint16_t keys[NXDN_CP_KID_MAX + 1u]);
++
+ // Decode len bytes of a block (a short one, or none, takes the defaults); never fails: a value out of range is read as
+ // its default
+ void nxdn_conv_decode(const uint8_t *b, int len, nxdn_conv_t *out);
+diff --git a/core/nxdn/nxdn_engine.c b/core/nxdn/nxdn_engine.c
+index aeaee71..c294221 100644
+--- a/core/nxdn/nxdn_engine.c
++++ b/core/nxdn/nxdn_engine.c
+@@ -3,6 +3,9 @@
+ // Copyright (c) 2026 lyra XE1POC (changes)
+ // NXDN conventional voice on a channel (nxdn_engine.h).
+ #include "nxdn_engine.h"
++#if CONFIG_NXDN_SCRAMBLER
++#include "nxdn_scramble.h"
++#endif
+ #if CONFIG_AIR_AES
+ #include "nxdn_aes.h"
+ #endif
+@@ -41,9 +44,30 @@ static bool clear(const nxdn_call_t *c)
+ 	return (c->vcall.cipher == NXDN_CIPHER_NONE && !c->iv) || c->decrypt;	// clear, or decrypted by the call layer
+ }
+ 
++#if CONFIG_NXDN_SCRAMBLER
++static uint16_t scramble_key(const nxdn_engine_t *e, uint8_t id)
++{
++	if (id > 63u || e->hooks.scramble_key == NULL)
++		return 0;
++	uint16_t seed = e->hooks.scramble_key(id, e->ctx);
++
++	return seed <= 32767u ? seed : 0;
++}
++#endif
++
+ static void rx_fields(nxdn_engine_t *e, const nxdn_call_t *c, bool start)
+ {
+-	bool play = wanted(e, c) && clear(c);
++	bool readable = clear(c);
++#if CONFIG_NXDN_SCRAMBLER
++	if (!e->cfg.trunk && c->have_vcall && c->vcall.cipher == NXDN_CIPHER_SCRAMBLE && !c->iv) {
++		if (start || !e->view.rx.have_vcall || c->vcall.cipher != e->view.rx.vcall.cipher ||
++		    c->vcall.key_id != e->view.rx.vcall.key_id)
++			e->rx.scramble_key = scramble_key(e, c->vcall.key_id);
++		readable = e->rx.scramble_key != 0;
++	} else
++		e->rx.scramble_key = 0;
++#endif
++	bool play = wanted(e, c) && readable;
+ 
+ 	view_begin(e);
+ 	e->view.rx = *c;
+@@ -133,14 +157,15 @@ static void tx_fill(void *ctx)
+ 			uint8_t ehr[NXDN_EHR_BYTES];
+ 
+ 			// (not done and nothing ready: a frame waits for its next voice frame)
+-			if (e->hooks.tx_voice && e->hooks.tx_voice(ehr, e->ctx)) {
+-				nxdn_call_tx_voice(&e->tx, ehr);
+-			} else if (!e->hooks.tx_voice ||
++			if (e->hooks.tx_voice && e->hooks.tx_voice(ehr, e->ctx) && nxdn_call_tx_voice(&e->tx, ehr))
++				continue;
++			if (!e->hooks.tx_voice ||
+ 				   (air_session_tx_state(&e->session) != AIR_TX_PRIMING && air_session_tx_queued(&e->session) < lead)) {
+ 				// (before the transmitter is on nothing is lost by waiting: the preamble and header are queued)
+ 				if (e->hooks.tx_voice)
+ 					e->view.tx_filler++;
+-				nxdn_call_tx_voice(&e->tx, e->cfg.silence);
++				if (!nxdn_call_tx_voice(&e->tx, e->cfg.silence))
++					return;
+ 			} else {
+ 				return;
+ 			}
+@@ -231,6 +256,25 @@ bool nxdn_engine_tx_prepare(nxdn_engine_t *e)
+ 		};
+ 
+ 		e->tx_stop = e->tx_ended = false;
++#if CONFIG_NXDN_SCRAMBLER
++		if (e->cfg.scramble_tx) {
++			uint16_t key = scramble_key(e, e->cfg.scramble_kid);
++			uint8_t silence[NXDN_EHR_BYTES];
++
++			memcpy(silence, e->cfg.silence, sizeof silence);
++			if (e->cfg.trunk || !nxdn_scramble_vch(key, 0, 0, silence))
++				return false;
++#if CONFIG_AIR_AES
++			if (e->cfg.aes_tx)
++				return false;
++#endif
++			v.cipher = NXDN_CIPHER_SCRAMBLE;
++			v.key_id = e->cfg.scramble_kid;
++			nxdn_call_tx_begin(&e->tx, &v, e->cfg.tx_ran, NXDN_DIR_INBOUND, e->cfg.rate9600);
++			e->tx.scramble_key = key;
++			return air_session_tx_prime(&e->session);
++		}
++#endif
+ #if CONFIG_AIR_AES
+ 		if (e->cfg.aes_tx) {
+ 			uint8_t iv[NXDN_IV_BYTES];
+diff --git a/core/nxdn/nxdn_engine.h b/core/nxdn/nxdn_engine.h
+index aa0d652..461f1f4 100644
+--- a/core/nxdn/nxdn_engine.h
++++ b/core/nxdn/nxdn_engine.h
+@@ -25,6 +25,10 @@ typedef struct {
+ 	// Transmit, from the provider's task: the next 72-bit voice frame with its FEC, false when none is ready. NULL:
+ 	// every frame is `silence`
+ 	bool (*tx_voice)(uint8_t ehr[NXDN_EHR_BYTES], void *ctx);
++#if CONFIG_NXDN_SCRAMBLER
++	// Seed for this key ID, or 0 when unavailable. Valid IDs are 0–63; seeds are 1–32767.
++	uint16_t (*scramble_key)(uint8_t id, void *ctx);
++#endif
+ #if CONFIG_AIR_AES
+ 	// An encrypted transmission is about to start (cfg.aes_tx), from the task that starts it: an IV that no
+ 	// transmission with the key has had before (NXDN_IV_BYTES). False: none can be made, PTT is refused
+@@ -45,6 +49,10 @@ typedef struct {
+ 	bool emergency;
+ 	bool trunk;		// a trunked traffic channel: what we send is RTCH, not RDCH
+ 	const uint8_t *silence;	// a voice frame of silence (NXDN_EHR_BYTES), from the vocoder
++#if CONFIG_NXDN_SCRAMBLER
++	uint8_t scramble_kid;	// the key ID advertised in a scrambled transmission
++	bool scramble_tx;	// refuse PTT if the key is missing or the channel is trunked
++#endif
+ #if CONFIG_AIR_AES
+ 	const uint8_t *aes_key;	// this channel's AES-256 key (32 octets, valid while the engine runs), or NULL
+ 	uint8_t aes_kid;	// its key id (6 bits): calls encrypted with another one stay silent
+diff --git a/core/nxdn/nxdn_scramble.c b/core/nxdn/nxdn_scramble.c
+new file mode 100644
+index 0000000..b5ff210
+--- /dev/null
++++ b/core/nxdn/nxdn_scramble.c
+@@ -0,0 +1,44 @@
++// SPDX-License-Identifier: MIT
++// Copyright (c) 2026 The RadioFoundry Authors
++#include "config.h"
++#if CONFIG_NXDN_SCRAMBLER
++#include "nxdn_scramble.h"
++#include "dmr/ambe/ambeFec.h"
++
++// S0 is the output; S0 XOR S1 feeds S14 (TS 1-D figure 5.3-1).
++static uint16_t step(uint16_t state)
++{
++	return (uint16_t)((state >> 1) | (((state ^ (state >> 1)) & 1u) << 14));
++}
++
++bool nxdn_scramble_vch(uint16_t key, uint8_t frame, uint8_t vch, uint8_t ehr[9])
++{
++	uint8_t bits[AMBE_PARAM_BITS];
++	ambe_fec_result_t result;
++
++	if (!ehr || !key || key > 0x7fff || frame > 3 || vch > 3)
++		return false;
++	ambeFecDecode(ehr, bits, &result);
++	if (result.c0_failed || !nxdn_scramble_ehr(key, frame, vch, bits))
++		return false;
++	ambeFecEncode(bits, ehr);
++	return true;
++}
++
++bool nxdn_scramble_ehr(uint16_t key, uint8_t frame, uint8_t vch, uint8_t bits[49])
++{
++	uint16_t state = key;
++	unsigned offset;
++
++	if (!bits || key == 0 || key > 0x7fff || frame > 3 || vch > 3)
++		return false;
++	offset = (unsigned)(frame * 4u + vch) * 49u;
++	while (offset--)
++		state = step(state);
++	for (unsigned i = 0; i < 49; i++) {
++		bits[i] ^= (uint8_t)(state & 1u);
++		state = step(state);
++	}
++	return true;
++}
++#endif
+diff --git a/core/nxdn/nxdn_scramble.h b/core/nxdn/nxdn_scramble.h
+new file mode 100644
+index 0000000..34414e9
+--- /dev/null
++++ b/core/nxdn/nxdn_scramble.h
+@@ -0,0 +1,17 @@
++// SPDX-License-Identifier: MIT
++// Copyright (c) 2026 The RadioFoundry Authors
++// NXDN TS 1-D 5.3.1 and 5.4.4.1: scramble the 49 vocoder bits of one EHR VCH.
++#ifndef RFOUNDRY_NXDN_SCRAMBLE_H
++#define RFOUNDRY_NXDN_SCRAMBLE_H
++
++#include <stdbool.h>
++#include <stdint.h>
++
++// frame and vch are positions 0..3 in the superframe, including positions occupied by FACCH1.
++// bits are 49 unpacked bits, in vocoder order. Invalid arguments leave them untouched.
++bool nxdn_scramble_ehr(uint16_t key, uint8_t frame, uint8_t vch, uint8_t bits[49]);
++
++// Transform an EHR frame around its FEC. Returns false for an uncorrectable frame or invalid key/position.
++bool nxdn_scramble_vch(uint16_t key, uint8_t frame, uint8_t vch, uint8_t ehr[9]);
++
++#endif
+diff --git a/core/radio/radio_nxdn.c b/core/radio/radio_nxdn.c
+index 0b58d73..982941a 100644
+--- a/core/radio/radio_nxdn.c
++++ b/core/radio/radio_nxdn.c
+@@ -16,6 +16,9 @@
+ #include "codeplug/codeplug_modes.h"
+ #include "dmr/ambe/ambeVoice.h"
+ #include "dmr/call/dmr_call.h"
++#if CONFIG_NXDN_SCRAMBLER
++#include "codeplug/codeplug_kv.h"
++#endif
+ #if CONFIG_AIR_AES
+ #include "codeplug/codeplug_tag.h"
+ #include "codeplug/codeplug_records.h"
+@@ -47,6 +50,14 @@ static radio_nxdn_settings_t set;
+ static radio_nxdn_settings_t quick;
+ static uint8_t quick_mask;
+ static nxdn_engine_t *eng;		// while running
++#if CONFIG_NXDN_SCRAMBLER
++// Published by the radio task; the provider reads one seed without accessing flash.
++static struct {
++	uint16_t seed[NXDN_CP_KID_MAX + 1u];
++	uint8_t serial;
++} scramble_keys[2];
++static volatile uint8_t scramble_slot;
++#endif
+ static radio_nxdn_stats_t stats;
+ static nxdn_call_stats_t call_base;	// the call layer's counters already counted (they restart with the engine)
+ static air_session_stats_t air_base;
+@@ -132,7 +143,7 @@ bool radio_nxdn_fits(void)
+ 
+ bool radio_nxdn_take(channel_t *ch)
+ {
+-	if (ch->kind != CODEPLUG_KIND_NXDN || !radio_nxdn_fits() || radio_listen_band(ch->rx_hz))
++	if (!nxdn_cp_kind(ch->kind) || !codeplug_kind_built(ch->kind) || radio_listen_band(ch->rx_hz))
+ 		return false;
+ 	ch->mode = RADIO_MODE_NXDN;
+ 	ch->bw = RADIO_BW_12K5;
+@@ -253,12 +264,20 @@ static void params_channel(const channel_t *ch, uint16_t number, nxdn_engine_cfg
+ 
+ 	memset(c, 0, sizeof(*c));
+ 	c->silence = dmr_ambe_silence;
++#if CONFIG_NXDN_SCRAMBLER
++	c->scramble_tx = ch->kind == CODEPLUG_KIND_NXDN_SCRAMBLER;
++	c->scramble_kid = UINT8_MAX;
++#endif
+ 	if (number != 0 && nxdn_conv_load(number, ch, &cc)) {
+ 		// Selective: the channel's group, all and unit calls to us; a channel that calls a unit or all keeps the
+ 		// last two
+ 		c->rate9600 = cc.conv.rate9600;
+ 		c->rx_ran = cc.conv.rx_ran;
+ 		c->tx_ran = cc.conv.tx_ran;
++#if CONFIG_NXDN_SCRAMBLER
++		if (c->scramble_tx)
++			c->scramble_kid = cc.conv.kid;
++#endif
+ #if CONFIG_AIR_AES
+ 		c->aes_tx = cc.conv.aes;
+ 		c->aes_kid = cc.conv.kid;
+@@ -323,7 +342,36 @@ static bool v_tx(uint8_t ehr[NXDN_EHR_BYTES], void *ctx)
+ 	return s->next(ehr, s->ctx);
+ }
+ 
+-static const nxdn_engine_hooks_t voice_hooks = { .rx_start = v_start, .rx_voice = v_voice, .rx_end = v_end, .tx_voice = v_tx };
++#if CONFIG_NXDN_SCRAMBLER
++static void scramble_refresh(void)
++{
++	uint8_t slot = (uint8_t)(scramble_slot ^ 1u);
++	uint8_t serial = codeplug_kv_serial();
++	nxdn_scrambler_keyring(scramble_keys[slot].seed);
++	if (serial == codeplug_kv_serial()) {
++		scramble_keys[slot].serial = serial;
++		__atomic_signal_fence(__ATOMIC_RELEASE);
++		scramble_slot = slot;
++	}
++}
++
++static uint16_t v_key(uint8_t id, void *ctx)
++{
++	(void)ctx;
++	uint8_t slot = scramble_slot;
++	__atomic_signal_fence(__ATOMIC_ACQUIRE);
++	uint8_t serial = scramble_keys[slot].serial;
++	uint16_t seed = id <= NXDN_CP_KID_MAX ? scramble_keys[slot].seed[id] : 0u;
++	return serial == codeplug_kv_serial() && slot == scramble_slot ? seed : 0u;
++}
++#endif
++
++static const nxdn_engine_hooks_t voice_hooks = {
++	.rx_start = v_start, .rx_voice = v_voice, .rx_end = v_end, .tx_voice = v_tx,
++#if CONFIG_NXDN_SCRAMBLER
++	.scramble_key = v_key,
++#endif
++};
+ 
+ #if CONFIG_AIR_AES
+ // The channel's AES-256 key from the keyring (system 0xFF, algorithm NXDN_CIPHER_AES, the channel's key id) into the
+@@ -450,6 +498,9 @@ bool radio_nxdn_begin(const channel_t *ch, uint16_t number)
+ 		stats.begin_fails++;
+ 		return false;
+ 	}
++#if CONFIG_NXDN_SCRAMBLER
++	scramble_refresh();
++#endif
+ 	ambeVoiceStart();	// before the engine: its first call may come at once
+ #if CONFIG_AIR_AES
+ 	nxdn_engine_hooks_t hooks = voice_hooks;
+@@ -621,6 +672,10 @@ bool radio_nxdn_poll(radio_nxdn_view_t *v)
+ 		n.flags = 0;
+ 		n.tx = AIR_TX_IDLE;
+ 	} else {
++#if CONFIG_NXDN_SCRAMBLER
++		if (scramble_keys[scramble_slot].serial != codeplug_kv_serial())
++			scramble_refresh();
++#endif
+ 		nxdn_engine_view(eng, &ev);
+ 		count(&ev);
+ 		if (trunked)
+diff --git a/core/ui/lang/es.po b/core/ui/lang/es.po
+index a99df6c..32e0b38 100644
+--- a/core/ui/lang/es.po
++++ b/core/ui/lang/es.po
+@@ -2292,6 +2292,11 @@ msgctxt "CHAN_LABEL_AES_KEY"
+ msgid "AES-256 key"
+ msgstr "Clave AES-256"
+ 
++#: core/ui/ui_menus.c
++msgctxt "CHAN_LABEL_NXDN_SCRAMBLER"
++msgid "NXDN scrambler"
++msgstr "Scrambler NXDN"
++
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_ROW_TUNE_TO"
+ msgid "Tune to this ch"
+diff --git a/core/ui/lang/fr.po b/core/ui/lang/fr.po
+index 120f5e7..e32cb27 100644
+--- a/core/ui/lang/fr.po
++++ b/core/ui/lang/fr.po
+@@ -2292,6 +2292,11 @@ msgctxt "CHAN_LABEL_AES_KEY"
+ msgid "AES-256 key"
+ msgstr ""
+ 
++#: core/ui/ui_menus.c
++msgctxt "CHAN_LABEL_NXDN_SCRAMBLER"
++msgid "NXDN scrambler"
++msgstr "Brouillage NXDN"
++
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_ROW_TUNE_TO"
+ msgid "Tune to this ch"
+diff --git a/core/ui/lang/it.po b/core/ui/lang/it.po
+index 2eb6553..dd46a1f 100644
+--- a/core/ui/lang/it.po
++++ b/core/ui/lang/it.po
+@@ -2292,6 +2292,11 @@ msgctxt "CHAN_LABEL_AES_KEY"
+ msgid "AES-256 key"
+ msgstr ""
+ 
++#: core/ui/ui_menus.c
++msgctxt "CHAN_LABEL_NXDN_SCRAMBLER"
++msgid "NXDN scrambler"
++msgstr "Scrambler NXDN"
++
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_ROW_TUNE_TO"
+ msgid "Tune to this ch"
+diff --git a/core/ui/lang/zh.po b/core/ui/lang/zh.po
+index b440c86..8108266 100644
+--- a/core/ui/lang/zh.po
++++ b/core/ui/lang/zh.po
+@@ -2294,6 +2294,11 @@ msgctxt "CHAN_LABEL_AES_KEY"
+ msgid "AES-256 key"
+ msgstr ""
+ 
++#: core/ui/ui_menus.c
++msgctxt "CHAN_LABEL_NXDN_SCRAMBLER"
++msgid "NXDN scrambler"
++msgstr "NXDN 加码"
++
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_ROW_TUNE_TO"
+ msgid "Tune to this ch"
+diff --git a/core/ui/ui_dual.c b/core/ui/ui_dual.c
+index 378cd63..46ccb3f 100644
+--- a/core/ui/ui_dual.c
++++ b/core/ui/ui_dual.c
+@@ -177,7 +177,7 @@ static uint8_t shown_mode(const channel_t *c)
+ 	if (!codeplug_kind_built(c->kind))
+ 		return c->mode;
+ 	// The kinds a build runs: P25 (trunked too), NXDN and YSF
+-	return c->kind == CODEPLUG_KIND_NXDN ? RADIO_MODE_NXDN :
++	return c->kind == CODEPLUG_KIND_NXDN || c->kind == CODEPLUG_KIND_NXDN_SCRAMBLER ? RADIO_MODE_NXDN :
+ 	       c->kind == CODEPLUG_KIND_YSF ? RADIO_MODE_YSF : c->kind == CODEPLUG_KIND_M17 ? RADIO_MODE_M17 : RADIO_MODE_P25;
+ }
+ 
+diff --git a/core/ui/ui_menus.c b/core/ui/ui_menus.c
+index 83538c5..a74e83d 100644
+--- a/core/ui/ui_menus.c
++++ b/core/ui/ui_menus.c
+@@ -22,6 +22,10 @@
+ #include "p25/p25_aes.h"
+ #include "nxdn/nxdn.h"
+ #endif
++#if CONFIG_NXDN_SCRAMBLER && !CONFIG_AIR_AES
++#include "codeplug/codeplug_records.h"
++#include "nxdn/nxdn.h"
++#endif
+ #if CONFIG_P25
+ #include "p25/p25_codeplug.h"
+ #endif
+@@ -1318,7 +1322,9 @@ static bool ced_is_p25(const channel_t *ch)
+ // The same for NXDN
+ static bool ced_is_nxdn(const channel_t *ch)
+ {
+-	return CONFIG_NXDN && (ch->kind == CODEPLUG_KIND_NXDN || (ch->kind == CODEPLUG_KIND_NONE && ch->mode == RADIO_MODE_NXDN));
++	return CONFIG_NXDN && (ch->kind == CODEPLUG_KIND_NXDN ||
++		(CONFIG_NXDN_SCRAMBLER && ch->kind == CODEPLUG_KIND_NXDN_SCRAMBLER) ||
++		(ch->kind == CODEPLUG_KIND_NONE && ch->mode == RADIO_MODE_NXDN));
+ }
+ 
+ // The same for YSF
+@@ -2536,7 +2542,7 @@ enum { CE_NAME, CE_NUMBER, CE_MODE, CE_CODE, CE_RATE, CE_DEST, CE_TRUNK, CE_RX,
+        CE_BURST,
+        CE_ANI, CE_ANI_SEND, CE_ANI_ID, CE_ANI_DECODE,	// an FM channel's signaling ID (MDC-1200): its type, when it is sent, the ID, decode
+        CE_CC, CE_TS, CE_CONTACT, CE_LIST, CE_ID, CE_DMO, CE_BEEP, CE_ALIAS1, CE_ALIAS2, CE_TOT, CE_SCAN, CE_ECO,
+-       CE_DMR_PRIVACY, CE_DMR_KEY, CE_AES,
++       CE_DMR_PRIVACY, CE_DMR_KEY, CE_AES, CE_NXDN_SCRAMBLER,
+        CE_ZONES, CE_GO, CE_SHARE, CE_SAVE, CE_SAVE_NEW, CE_COUNT, CE_NONE = 0xFF };
+ 
+ static channel_t ced_ch;		// what the screen shows (the working copy when editing)
+@@ -2550,6 +2556,19 @@ static ui_air_conv_t ced_air;		// a P25, NXDN or YSF channel's own settings, rea
+ static ui_air_conv_t ced_air_orig;	// as stored
+ #endif
+ #endif
++#if CONFIG_NXDN_SCRAMBLER
++static bool ced_scramble_keys;
++
++static int32_t ced_scramble_id(void)
++{
++	return ced_air.nxdn.scramble ? ced_air.nxdn.kid : -1;
++}
++
++static int32_t ced_scramble_step(int32_t current, int dir)
++{
++	return codeplug_key_step(NXDN_CIPHER_SCRAMBLE, 2, current, dir, 0, NXDN_CP_KID_MAX);
++}
++#endif
+ #if CONFIG_AIR_AES
+ // The key selector carries only IDs. P25 and NXDN may use key ID zero.
+ static int32_t ced_aes_id(void)
+@@ -2588,6 +2607,9 @@ static void ced_aes_set(int32_t id)
+ #endif
+ #if CONFIG_NXDN
+ 	if (ced_is_nxdn(&ced_ch)) {
++		if (id < 0 && ced_air.nxdn.scramble)
++			return;
++		ced_air.nxdn.scramble = false;
+ 		ced_air.nxdn.aes = id >= 0;
+ 		ced_air.nxdn.kid = id >= 0 ? (uint8_t)id : 0;
+ 		return;
+@@ -2664,7 +2686,9 @@ static bool ced_air_changed(uint8_t r)
+ 		return r == CE_CODE ? a->nxdn.rx_ran != b->nxdn.rx_ran || a->nxdn.tx_ran != b->nxdn.tx_ran :
+ 		       r == CE_RATE ? a->nxdn.rate9600 != b->nxdn.rate9600 :
+ 		       r == CE_TRUNK ? a->nxdn.trunk != b->nxdn.trunk || a->nxdn.trunk_all != b->nxdn.trunk_all :
+-		       r == CE_AES && (a->nxdn.aes != b->nxdn.aes || a->nxdn.kid != b->nxdn.kid);
++		       r == CE_NXDN_SCRAMBLER ? a->nxdn.scramble != b->nxdn.scramble ||
++			       (a->nxdn.scramble && a->nxdn.kid != b->nxdn.kid) :
++		       r == CE_AES && (a->nxdn.aes != b->nxdn.aes || (a->nxdn.aes && a->nxdn.kid != b->nxdn.kid));
+ #endif
+ #if CONFIG_YSF
+ 	if (ced_is_ysf(&ced_ch))
+@@ -2697,7 +2721,7 @@ static bool ced_changed(uint8_t r)
+ 	if (r >= CE_ZONES)
+ 		return false;
+ #if CONFIG_P25 || CONFIG_NXDN || CONFIG_YSF
+-	if (r == CE_CODE || r == CE_RATE || r == CE_DEST || r == CE_TRUNK ||
++	if (r == CE_CODE || r == CE_RATE || r == CE_DEST || r == CE_TRUNK || r == CE_NXDN_SCRAMBLER ||
+ 	    (r == CE_AES && (ced_is_p25(&ced_ch) || ced_is_nxdn(&ced_ch))))
+ 		return ced_air_changed(r);
+ #endif
+@@ -2794,6 +2818,10 @@ static void ced_air_read(uint16_t number, const channel_t *ch)
+ 		} else {
+ 			c->rate9600 = true;
+ 			c->rx_ran = c->tx_ran = NXDN_CP_TX_RAN_DEFAULT;
++			if (ch->kind == CODEPLUG_KIND_NXDN_SCRAMBLER) {
++				c->scramble = true;
++				c->kid = UINT8_MAX;
++			}
+ 		}
+ 	}
+ #endif
+@@ -3000,7 +3028,8 @@ static void ced_cm_set(channel_t *c, uint8_t m)
+ 	// A stored P25, NXDN or YSF channel stepped to its own mode again (the rate, the deviation) keeps its tag's
+ 	// system, fallback and flags: the save rewrites only its block
+ 	if ((m == CM_P25 && ced_orig.kind == CODEPLUG_KIND_P25) ||
+-	    ((m == CM_NXDN_4800 || m == CM_NXDN_9600) && ced_orig.kind == CODEPLUG_KIND_NXDN) ||
++	    ((m == CM_NXDN_4800 || m == CM_NXDN_9600) &&
++	     (ced_orig.kind == CODEPLUG_KIND_NXDN || ced_orig.kind == CODEPLUG_KIND_NXDN_SCRAMBLER)) ||
+ 	    ((m == CM_YSF_WIDE || m == CM_YSF_NARROW) && ced_orig.kind == CODEPLUG_KIND_YSF) ||
+ 	    (m == CM_M17 && ced_orig.kind == CODEPLUG_KIND_M17)) {
+ 		c->kind = ced_orig.kind;
+@@ -3071,6 +3100,18 @@ static void ced_build(void)
+ 		// DES-OFB is provisioned in the CPS and preserved during edits on the radio.
+ 		if (r == CE_AES && p25 && ced_air.p25.des)
+ 			continue;
++#endif
++		if (r == CE_NXDN_SCRAMBLER) {
++#if CONFIG_NXDN_SCRAMBLER
++			if (into || !nxdn || ced_air.nxdn.trunk || (!ced_scramble_keys && !ced_air.nxdn.scramble))
++				continue;
++#else
++			continue;
++#endif
++		}
++#if CONFIG_NXDN_SCRAMBLER
++		if (r == CE_TRUNK && nxdn && ced_air.nxdn.scramble)
++			continue;
+ #endif
+ 		if ((r == CE_DMR_PRIVACY || r == CE_DMR_KEY) &&
+ 		    (!CONFIG_DMR_PRIVACY || !dmr || ced_ch.kind != CODEPLUG_KIND_NONE || into ||
+@@ -3114,6 +3155,9 @@ static void ced_build(void)
+ static void chinfo_enter(void)
+ {
+ 	ced_num = ui_frame()->arg;
++#if CONFIG_NXDN_SCRAMBLER
++	ced_scramble_keys = ced_scramble_step(-1, 1) >= 0;
++#endif
+ #if CONFIG_CHANNEL_EDIT
+ 	ced_edit = CE_NONE;
+ 	ced_new = ced_from_current;
+@@ -3321,7 +3365,7 @@ static void chinfo_item(uint16_t i, ui_item_t *it)
+ 		TRN(CHAN_LABEL_TALKER_ALIAS_TS2, "Talker alias TS2"), TRN(CHAN_LABEL_TX_TIMEOUT, "TX time-out"),
+ 		TRN(WORD_SCAN, "Scan"), TRN(LABEL_BATTERY_SAVER, "Battery saver"),
+ 		TRN(CHAN_LABEL_DMR_PRIVACY, "Privacy"), TRN(CHAN_LABEL_DMR_KEY, "Key ID"),
+-		TRN(CHAN_LABEL_AES_KEY, "AES-256 key"), TRN(TITLE_ZONES, "Zones"),
++		TRN(CHAN_LABEL_AES_KEY, "AES-256 key"), TRN(CHAN_LABEL_NXDN_SCRAMBLER, "NXDN scrambler"), TRN(TITLE_ZONES, "Zones"),
+ 		TRN(CHAN_ROW_TUNE_TO, "Tune to this ch"), TRN(SHARE_ROW_CHANNEL_TO, GLYPH_SHARE " Share channel to..."),
+ 		TRN(ROW_SAVE, "Save"), TRN(CHAN_ROW_SAVE_AS_NEW, "Save as new channel") };
+ 	const channel_t *ch = &ced_ch;
+@@ -3455,6 +3499,20 @@ static void chinfo_item(uint16_t i, ui_item_t *it)
+ 			sb_u32(&b, (uint32_t)id, 1);
+ 		break;
+ 	}
++#endif
++#if CONFIG_NXDN_SCRAMBLER
++	case CE_NXDN_SCRAMBLER: {
++		int32_t id = ced_scramble_id();
++		if (editing)
++			id = ced_val_or(id);
++		if (id < 0)
++			sb_str(&b, TR(VALUE_OFF, "Off"));
++		else if (id > (int32_t)NXDN_CP_KID_MAX)
++			sb_str(&b, "--");
++		else
++			sb_u32(&b, (uint32_t)id, 1);
++		break;
++	}
+ #endif
+ 	case CE_RX:
+ 		sb_freq(&b, ch->rx_hz);
+@@ -3666,7 +3724,7 @@ static bool ced_write(uint16_t num, bool as_new)
+ 		if (ced_ch.kind != ced_orig.kind || ced_ch.mode != ced_orig.mode)
+ 			return ui_svc_write_channel_air_own(num, &ced_ch, ced_src, &ced_air);
+ 		if (ced_air_changed(CE_CODE) || ced_air_changed(CE_RATE) || ced_air_changed(CE_DEST) || ced_air_changed(CE_TRUNK) ||
+-		    ced_air_changed(CE_AES))
++		    ced_air_changed(CE_AES) || ced_air_changed(CE_NXDN_SCRAMBLER))
+ 			return ui_svc_write_channel_air(num, &ced_ch, ced_src, &ced_air);
+ 	}
+ #endif
+@@ -3770,6 +3828,11 @@ static void ced_spin(int dir)
+ 	case CE_AES:
+ 		ced_val = ced_aes_step(ced_val, dir);
+ 		break;
++#endif
++#if CONFIG_NXDN_SCRAMBLER
++	case CE_NXDN_SCRAMBLER:
++		ced_val = ced_scramble_step(ced_val, dir);
++		break;
+ #endif
+ 	case CE_POWER: {
+ 		int32_t n = board.power_count + 1;	// the levels, then the radio's
+@@ -3971,6 +4034,15 @@ static void ced_commit(void)
+ 	case CE_AES:
+ 		ced_aes_set(ced_val);
+ 		break;
++#endif
++#if CONFIG_NXDN_SCRAMBLER
++	case CE_NXDN_SCRAMBLER:
++		if (ced_val >= 0 || ced_air.nxdn.scramble) {
++			ced_air.nxdn.scramble = ced_val >= 0;
++			ced_air.nxdn.aes = false;
++			ced_air.nxdn.kid = ced_val >= 0 ? (uint8_t)ced_val : 0;
++		}
++		break;
+ #endif
+ 	case CE_RX:
+ 	case CE_TX: {
+@@ -4147,6 +4219,12 @@ static void chinfo_select(uint16_t i, bool hold)
+ 		if (ced_val < 0 && ced_aes_step(-1, 1) < 0)
+ 			ui_toast(TR(CHAN_TOAST_NO_AES_KEY, "Load AES-256 keys with the CPS"));
+ 		break;
++#endif
++#if CONFIG_NXDN_SCRAMBLER
++	case CE_NXDN_SCRAMBLER:
++		ced_edit = r;
++		ced_val = ced_scramble_id();
++		break;
+ #endif
+ 	case CE_RX:
+ 	case CE_TX:
+diff --git a/core/ui/ui_svc_storage.c b/core/ui/ui_svc_storage.c
+index 874547b..0a58103 100644
+--- a/core/ui/ui_svc_storage.c
++++ b/core/ui/ui_svc_storage.c
+@@ -1221,10 +1221,10 @@ static bool air_quick_save(bool *ok, bool *missing)
+ 	}
+ #endif
+ #if CONFIG_NXDN
+-	if (job_ch.kind == CODEPLUG_KIND_NXDN ||
++	if (nxdn_cp_kind(job_ch.kind) ||
+ 	    (job_ch.kind == CODEPLUG_KIND_NONE && job_ch.mode == RADIO_MODE_NXDN)) {
+ 		nxdn_conv_t conv;
+-		if (job_ch.kind == CODEPLUG_KIND_NXDN) {
++		if (nxdn_cp_kind(job_ch.kind)) {
+ 			nxdn_conv_cfg_t cc;
+ 			if (!nxdn_conv_load(job.channel, &job_ch, &cc))
+ 				return true;
+@@ -1391,7 +1391,7 @@ static bool air_conv_save(uint16_t number, uint16_t from, const channel_t *ch, c
+ 	p25 = plain ? ch->mode == RADIO_MODE_P25 : ch->kind == CODEPLUG_KIND_P25;
+ #endif
+ #if CONFIG_NXDN
+-	nxdn = plain ? ch->mode == RADIO_MODE_NXDN : ch->kind == CODEPLUG_KIND_NXDN;
++	nxdn = plain ? ch->mode == RADIO_MODE_NXDN : nxdn_cp_kind(ch->kind);
+ #endif
+ #if CONFIG_YSF
+ 	ysf = plain ? ch->mode == RADIO_MODE_YSF : ch->kind == CODEPLUG_KIND_YSF;
+diff --git a/docs/build-config.md b/docs/build-config.md
+index c61646a..49b6a35 100644
+--- a/docs/build-config.md
++++ b/docs/build-config.md
+@@ -142,6 +142,7 @@ below are for an STM32F4 radio.
+ | `CONFIG_P25` | = DMR | P25 Phase 1 conventional voice (`docs/spec/p25.md`), the one switch for all of it: the air interface (symbols with time stamps between a board's modem hardware and the core, the framer, the soft modem, the shared FEC; `docs/spec/air-interface.md`), the engine and the P25 channel mode in the radio core, which runs it in memory the DMR vocoder lends where the platform has it, the full-rate voice decoder and encoder in integers on the MBE core (`core/mbe`), and the codec of P25 channels in the codeplug (`core/p25/p25_codeplug.c`, `docs/spec/p25-codeplug.md`). Needs `DMR` (talk groups are the codeplug's contacts) and a board with `board_t.air` to run: a board without one lists it in `BOARD_NOT_WRITTEN` |
+ | `CONFIG_P25_TRUNK` | = P25 | P25 trunked: the codec of its systems and channels (`docs/spec/p25-codeplug.md` 3), the control channel's signaling decoded, its control channel hunted and held, voice channel grants for the chosen talk groups followed, and where the system allows transmit: registration, affiliation, voice requests and transmit on the granted channel (`docs/spec/p25-trunking.md`). The radio core runs it on a trunked channel. Host tested, and run on a radio against a control channel the SDR bench plays, not on a live system. Needs P25 |
+ | `CONFIG_NXDN` | = DMR | NXDN conventional voice at 4800 and 9600 bit/s (`docs/spec/nxdn.md`): the frame codec, receive, the call layer and its engine, and the air interface under them. The radio core's NXDN mode (the VFO's mode tile, a temporary mode change, the debug link), RAM settings, the home screen; NXDN conventional channels in the codeplug (`docs/spec/nxdn-codeplug.md`); voice through the DMR side's vocoder path. Needs `DMR`. With P25 on and no lending vocoder it shares P25's engine memory |
++| `CONFIG_NXDN_SCRAMBLER` | n, on in the DM‑32 build | Conventional NXDN 15-bit voice scrambler (TS 1-D), including keyring and channel programming. Needs `NXDN` |
+ | `CONFIG_M17` | n | M17 stream mode voice (`docs/spec/m17.md`): the frames and their FEC, the engine on the air interface, the M17 channel mode in the radio core (the VFO's mode tile, the channel editor's Mode row, a stored M17 channel), M17 channels in the codeplug, and its voice codec, Codec 2 at 3200 bit/s (`core/codec2`, LGPL-2.1, vendored). No RAM of its own where the vocoder lends its code window (the HR_C7000 platform): the engine, the codec's state (about 31 KB) and its stack live there while M17 runs, and DMR voice is reloaded after. Codec 2 is floating point: real time on a core without an FPU is not measured. Needs `P25`, `NXDN` or `YSF` (the air interface it runs on). Off unless built with `CONFIG_M17=y` |
+ | `CONFIG_AIR_AES` | `CONFIG_AIR` | AES-256 voice encryption of the air modes: a P25 or NXDN channel names a key of the radio's keyring (`core/crypto`, [air-encryption.md](spec/air-encryption.md)). Needs P25 or NXDN |
+ | `CONFIG_P25_DES` | Board default, otherwise `n` | Legacy DES-OFB voice in conventional P25 memory channels. Needs P25 and AIR_AES. Set the channel's key in the CPS |
+diff --git a/docs/spec/channel-modes.md b/docs/spec/channel-modes.md
+index 8cff9b4..8857336 100644
+--- a/docs/spec/channel-modes.md
++++ b/docs/spec/channel-modes.md
+@@ -154,6 +154,7 @@ Ids are only appended and never reused. A kind and a system type that belong tog
+ | 5 | AM, receive only, on any frequency the receiver tunes | AM | `CONFIG_AM_RX`; a board whose receiver does not do AM parks the channel | [airband-and-broadcast.md](airband-and-broadcast.md) 3.1 |
+ | 6 | YSF conventional | YSF | `CONFIG_YSF` and a board whose air interface carries YSF (`radio_ysf_fits`) | [ysf-codeplug.md](ysf-codeplug.md) |
+ | 7 | M17 stream mode voice | M17 | `CONFIG_M17` and a board whose air interface carries M17 (`radio_m17_fits`) | [m17.md](m17.md) 5 |
++| 8 | NXDN conventional voice scrambler | NXDN-S | `CONFIG_NXDN_SCRAMBLER` and a board whose air interface carries NXDN | [nxdn-codeplug.md](nxdn-codeplug.md) |
+ 
+ | System type | Name | Short | Built when | Spec |
+ |---|---|---|---|---|
+diff --git a/docs/spec/nxdn-codeplug.md b/docs/spec/nxdn-codeplug.md
+index d4da962..017fcf9 100644
+--- a/docs/spec/nxdn-codeplug.md
++++ b/docs/spec/nxdn-codeplug.md
+@@ -12,6 +12,7 @@ channel of kind 4 where the build has `CONFIG_NXDN` and the board's air interfac
+ | Id | Kind | System type |
+ |---|---|---|
+ | 4 | NXDN conventional | none |
++| 8 | NXDN conventional voice scrambler | none |
+ 
+ ## 1. Radio-wide record (kind 4)
+ 
+@@ -35,7 +36,6 @@ The tag ([channel-modes.md](channel-modes.md) 2): no system, flag bit 0 transmit
+ | 2 | 1 | TX RAN: bit 7 set = bits 5-0 hold it (0 to 63); clear = the RX RAN, 1 when the RX RAN is 0. Bit 6: 0, set reads as clear |
+ | 3 | 1 | Bit 0: AES-256 on ([air-encryption.md](air-encryption.md) 3): the channel sends encrypted and plays calls encrypted with its key. Bits 1-7: 0 |
+ | 4 | 1 | Key ID, 0 to 63, of the key in the radio's keyring; read only with bit 0 of byte 3 set |
+-
+ | 5-11 | 7 | Type-C trunking: trunked, follow every group, the channel plan ([nxdn-trunking.md](nxdn-trunking.md) 4). Shorter blocks are conventional; the radio writes octet 5 and keeps 6-11 |
+ 
+ A zeroed block, or none, is 9600 bit/s, RAN squelch, every RAN received and RAN 1 sent; with the tag's flag bit 0
+@@ -85,5 +85,17 @@ record keeps its own mode. A copy takes its source's tag first. A plain channel
+ 
+ ## 3. Sharing
+ 
+-A zone share carries an NXDN channel's tag as it is ([zone-share.md](zone-share.md) 4.2): the block is 3 octets, inside
+-the share's limit of 64.
++A zone share carries an NXDN channel's tag as it is ([zone-share.md](zone-share.md) 4.2). The key itself stays in the
++radio's keyring. Provision the same key on the receiving radio before transmitting.
++
++## 4. 15-bit voice scrambler (kind 8)
++
++Kind 8 uses the same rate, squelch and RAN bytes (0–2) as kind 4. Byte 3 is 0x02 and byte 4 is the key ID 0–63.
++This is conventional voice only. An absent or malformed block, a Type-C flag, or a missing key blocks transmission.
++Kind 4's AES-256 and Type-C fields retain their existing meanings. The kind 8 tag uses a DMR receive-only base record.
++Firmware without `CONFIG_NXDN_SCRAMBLER` parks kind 8 and refuses PTT. Readers without tag support see receive-only DMR.
++
++The keyring's traffic record uses system 0xFF, algorithm 1, a key ID 0–63 and a two-byte little-endian seed 1–32767.
++IDs are unique within the algorithm. Conventional RX chooses the key announced in the call; TX uses the channel's
++selected key. Clear conventional voice and AES-256 retain their own receive paths. See [nxdn.md](nxdn.md) for the call
++protocol.
+diff --git a/docs/user/04-programming.md b/docs/user/04-programming.md
+index ec85205..5f019af 100644
+--- a/docs/user/04-programming.md
++++ b/docs/user/04-programming.md
+@@ -122,8 +122,8 @@ Per system:
+ When the codeplug holds keys, **Save** as a codeplug file asks whether to include them;
+ they are left out unless you tick **Include the keys in this file**. Anyone with a file that holds them can read them.
+ qdmr files hold neither systems nor channel modes: a channel of another mode goes into one as a receive-only DMR
+-channel, and comes back from one as that. CSV carries a conventional NXDN channel's mode, rate, squelch and RANs, but
+-not its AES setting, systems or the other channel modes. Keep a codeplug file for them.
++channel, and comes back from one as that. CSV carries a conventional NXDN channel's mode, rate, squelch, RANs and
++scrambler key ID. Keep a codeplug file for the AES setting, systems and other channel modes. The keyring is separate.
+ 
+ ### P25 and NXDN
+ 
+@@ -152,6 +152,16 @@ channel.
+ In CSV, use **Mode** `NXDN 4800` or `NXDN 9600` (`NXDN` alone means 9600 bit/s). The optional **NXDN Squelch**,
+ **RX RAN** and **TX RAN** columns carry those settings; a blank one keeps the channel's value.
+ 
++For conventional 15-bit voice scrambling, add an **NXDN scrambler** key in **Radio → Keyring**. Enter a decimal seed
++from 1 to 32767 and assign a key ID from 0 to 63. Choose **NXDN Scrambler** in the channel's **Mode**, set its rate
++and RANs, then select the matching key ID and write the codeplug. On the radio, a saved conventional NXDN channel
++can select an installed key from **Channels → [channel] → NXDN scrambler**. Hold **OK** to save. Both radios need
++the same seed and key ID. A scrambled memory with a missing key refuses PTT.
++
++In CSV, use `NXDN 4800 Scrambler` or `NXDN 9600 Scrambler` and **NXDN Scrambler Key ID**. The export sets the base
++**RX Only** on scrambled rows for older editors and carries the transmit setting in **NXDN Scrambler TX**. The CSV
++omits the seed. The 15-bit option interoperates with basic voice scrambling and provides limited privacy.
++
+ **YSF channel:** the editor does not offer YSF yet, so a YSF channel comes from the radio (the VFO) or a zone shared by another radio. Its settings on the radio:
+ 
+ | Field | Meaning |
+diff --git a/site/i18n/en.json b/site/i18n/en.json
+index 083f3a7..11b1bd0 100644
+--- a/site/i18n/en.json
++++ b/site/i18n/en.json
+@@ -1666,6 +1666,7 @@
+  "editor.mode_name.P25": "P25",
+  "editor.mode_name.P25_TRUNK": "P25 Trunking",
+  "editor.mode_name.NXDN": "NXDN",
++ "editor.mode_name.NXDN_SCRAMBLER": "NXDN Scrambler",
+  "editor.mode_name.AM": "AM (receive only)",
+  "editor.modes.add": "Add System",
+  "editor.modes.add_title": "New {type} system",
+@@ -1837,6 +1838,7 @@
+  "editor.nxdn.tx_ran": "TX RAN (blank: the RX RAN)",
+  "editor.nxdn.aes": "AES-256 encryption",
+  "editor.nxdn.aes_help": "Sends encrypted and plays calls encrypted with this key. Where the law forbids encryption (amateur bands in most countries), leave it off.",
++ "editor.nxdn.scrambler_help": "Select the matching key ID from the Radio tab. A missing key blocks transmission.",
+  "editor.nxdn.key_id": "Key ID (0-63)",
+  "editor.nxdn.ran_any": "0 receives every RAN.",
+  "editor.nxdn.unit_id": "NXDN unit ID",
+@@ -2045,6 +2047,7 @@
+  "editor.problem.mode_no_secret": "The system needs its key and has none: the radio can't use it.",
+  "editor.problem.mode_secret_bad": "The system's key is not valid.",
+  "editor.problem.key_bad": "The key length does not match its algorithm.",
++ "editor.problem.nxdn_scrambler_key_missing": "The NXDN scrambler key is missing. This channel cannot transmit.",
+  "editor.problem.key_id_range": "A key ID goes up to {max}.",
+  "editor.problem.key_duplicate": "Two keys have the same algorithm and key ID.",
+  "editor.keys.title": "Traffic keys",
+@@ -2052,6 +2055,7 @@
+  "editor.keys.alg.p25": "P25 AES-256",
+  "editor.keys.alg.p25des": "P25 DES-OFB",
+  "editor.keys.alg.nxdn": "NXDN AES-256",
++ "editor.keys.alg.nxdn_scrambler": "NXDN scrambler",
+  "editor.col.dmr_privacy": "Privacy",
+  "editor.keys.alg.arc4": "DMR Enhanced Privacy (ARC4-40)",
+  "editor.keys.alg.dmr": "DMR AES-256",
+@@ -2061,6 +2065,7 @@
+  "editor.keys.show": "Show",
+  "editor.keys.add": "Add key",
+  "editor.keys.bad": "Enter {n} hexadecimal digits.",
++ "editor.keys.bad_seed": "Enter a decimal seed from 1 to 32767.",
+  "editor.problem.mode_fallback_stale": "The fallback channel {number} was changed or deleted: the radio ignores it.",
+  "editor.problem.mode_fallback_kind": "The fallback channel must be a plain FM or DMR channel.",
+  "editor.problem.mode_same_identity": "The same system as {other}: a share or the radio may take either.",
+diff --git a/site/i18n/es.json b/site/i18n/es.json
+index 12efdd4..f55b223 100644
+--- a/site/i18n/es.json
++++ b/site/i18n/es.json
+@@ -1666,6 +1666,7 @@
+  "editor.mode_name.P25": "P25",
+  "editor.mode_name.P25_TRUNK": "P25 troncalizado",
+  "editor.mode_name.NXDN": "NXDN",
++ "editor.mode_name.NXDN_SCRAMBLER": "Scrambler NXDN",
+  "editor.mode_name.AM": "AM (solo recepción)",
+  "editor.modes.add": "Añadir sistema",
+  "editor.modes.add_title": "Nuevo sistema {type}",
+@@ -1837,6 +1838,7 @@
+  "editor.nxdn.tx_ran": "RAN de TX (en blanco: el RAN de RX)",
+  "editor.nxdn.aes": "Cifrado AES-256",
+  "editor.nxdn.aes_help": "Transmite cifrado y reproduce las llamadas cifradas con esta clave. Donde la ley prohíbe el cifrado (bandas de aficionados en casi todos los países), déjalo apagado.",
++ "editor.nxdn.scrambler_help": "Selecciona el ID de clave correspondiente en la pestaña Radio. Sin la clave se bloquea la transmisión.",
+  "editor.nxdn.key_id": "ID de clave (0-63)",
+  "editor.nxdn.ran_any": "0 recibe todos los RAN.",
+  "editor.nxdn.unit_id": "ID de unidad NXDN",
+@@ -2045,6 +2047,7 @@
+  "editor.problem.mode_no_secret": "El sistema necesita su clave y no la tiene: la radio no puede usarlo.",
+  "editor.problem.mode_secret_bad": "La clave del sistema no es válida.",
+  "editor.problem.key_bad": "La longitud de la clave no coincide con su algoritmo.",
++ "editor.problem.nxdn_scrambler_key_missing": "Falta la clave del scrambler NXDN. Este canal no puede transmitir.",
+  "editor.problem.key_id_range": "Un ID de clave llega hasta {max}.",
+  "editor.problem.key_duplicate": "Dos claves tienen el mismo algoritmo y el mismo ID.",
+  "editor.keys.title": "Claves de tráfico",
+@@ -2052,6 +2055,7 @@
+  "editor.keys.alg.p25": "P25 AES-256",
+  "editor.keys.alg.p25des": "P25 DES-OFB",
+  "editor.keys.alg.nxdn": "NXDN AES-256",
++ "editor.keys.alg.nxdn_scrambler": "Scrambler NXDN",
+  "editor.col.dmr_privacy": "Privacidad",
+  "editor.keys.alg.arc4": "Privacidad mejorada DMR (ARC4-40)",
+  "editor.keys.alg.dmr": "DMR AES-256",
+@@ -2061,6 +2065,7 @@
+  "editor.keys.show": "Mostrar",
+  "editor.keys.add": "Añadir clave",
+  "editor.keys.bad": "Introduce {n} dígitos hexadecimales.",
++ "editor.keys.bad_seed": "Introduce una clave decimal de 1 a 32767.",
+  "editor.problem.mode_fallback_stale": "El canal de respaldo {number} se cambió o eliminó: la radio lo ignora.",
+  "editor.problem.mode_fallback_kind": "El canal de respaldo debe ser un canal FM o DMR normal.",
+  "editor.problem.mode_same_identity": "El mismo sistema que {other}: un envío compartido o la radio pueden tomar cualquiera.",
+diff --git a/site/i18n/it.json b/site/i18n/it.json
+index 9f8165b..94a10a5 100644
+--- a/site/i18n/it.json
++++ b/site/i18n/it.json
+@@ -1666,6 +1666,7 @@
+  "editor.mode_name.P25": "P25",
+  "editor.mode_name.P25_TRUNK": "P25 Trunking",
+  "editor.mode_name.NXDN": "NXDN",
++ "editor.mode_name.NXDN_SCRAMBLER": "Scrambler NXDN",
+  "editor.mode_name.AM": "AM (solo ricezione)",
+  "editor.modes.add": "Aggiungi sistema",
+  "editor.modes.add_title": "Nuovo sistema {type}",
+@@ -1837,6 +1838,7 @@
+  "editor.nxdn.tx_ran": "RAN in TX (vuoto: il RAN in RX)",
+  "editor.nxdn.aes": "Cifratura AES-256",
+  "editor.nxdn.aes_help": "Trasmette cifrato e riproduce le chiamate cifrate con questa chiave. Dove la legge vieta la cifratura (bande radioamatoriali quasi ovunque), lasciala disattivata.",
++ "editor.nxdn.scrambler_help": "Seleziona l’ID della chiave corrispondente nella scheda Radio. Senza chiave la trasmissione è bloccata.",
+  "editor.nxdn.key_id": "ID chiave (0-63)",
+  "editor.nxdn.ran_any": "0 riceve ogni RAN.",
+  "editor.nxdn.unit_id": "ID unità NXDN",
+@@ -2045,6 +2047,7 @@
+  "editor.problem.mode_no_secret": "Il sistema richiede la sua chiave e non ce l'ha: la radio non può usarlo.",
+  "editor.problem.mode_secret_bad": "La chiave del sistema non è valida.",
+  "editor.problem.key_bad": "La lunghezza della chiave non corrisponde al suo algoritmo.",
++ "editor.problem.nxdn_scrambler_key_missing": "Manca la chiave dello scrambler NXDN. Questo canale non può trasmettere.",
+  "editor.problem.key_id_range": "Un ID chiave arriva fino a {max}.",
+  "editor.problem.key_duplicate": "Due chiavi hanno lo stesso algoritmo e lo stesso ID.",
+  "editor.keys.title": "Chiavi di traffico",
+@@ -2052,6 +2055,7 @@
+  "editor.keys.alg.p25": "P25 AES-256",
+  "editor.keys.alg.p25des": "P25 DES-OFB",
+  "editor.keys.alg.nxdn": "NXDN AES-256",
++ "editor.keys.alg.nxdn_scrambler": "Scrambler NXDN",
+  "editor.col.dmr_privacy": "Privacy",
+  "editor.keys.alg.arc4": "Privacy avanzata DMR (ARC4-40)",
+  "editor.keys.alg.dmr": "DMR AES-256",
+@@ -2061,6 +2065,7 @@
+  "editor.keys.show": "Mostra",
+  "editor.keys.add": "Aggiungi chiave",
+  "editor.keys.bad": "Inserisci {n} cifre esadecimali.",
++ "editor.keys.bad_seed": "Inserisci un valore decimale da 1 a 32767.",
+  "editor.problem.mode_fallback_stale": "Il canale di ripiego {number} è stato cambiato o eliminato: la radio lo ignora.",
+  "editor.problem.mode_fallback_kind": "Il canale di ripiego deve essere un normale canale FM o DMR.",
+  "editor.problem.mode_same_identity": "Lo stesso sistema di {other}: una condivisione o la radio possono prendere l'uno o l'altro.",
+diff --git a/site/i18n/zh.json b/site/i18n/zh.json
+index e0d4bf7..c3c5028 100644
+--- a/site/i18n/zh.json
++++ b/site/i18n/zh.json
+@@ -1666,6 +1666,7 @@
+  "editor.mode_name.P25": "P25",
+  "editor.mode_name.P25_TRUNK": "P25 集群",
+  "editor.mode_name.NXDN": "NXDN",
++ "editor.mode_name.NXDN_SCRAMBLER": "NXDN 扰码",
+  "editor.mode_name.AM": "AM（仅接收）",
+  "editor.modes.add": "添加系统",
+  "editor.modes.add_title": "新建{type}系统",
+@@ -1837,6 +1838,7 @@
+  "editor.nxdn.tx_ran": "发射 RAN（留空：同接收 RAN）",
+  "editor.nxdn.aes": "AES-256 加密",
+  "editor.nxdn.aes_help": "以加密方式发射，并播放用此密钥加密的呼叫。法律禁止加密的地方（大多数国家的业余频段）请保持关闭。",
++ "editor.nxdn.scrambler_help": "选择在电台选项卡中配置的对应密钥 ID。缺少密钥时禁止发射。",
+  "editor.nxdn.key_id": "密钥 ID（0-63）",
+  "editor.nxdn.ran_any": "0 接收所有 RAN。",
+  "editor.nxdn.unit_id": "NXDN 单元 ID",
+@@ -2045,6 +2047,7 @@
+  "editor.problem.mode_no_secret": "该系统需要密钥但没有：电台无法使用。",
+  "editor.problem.mode_secret_bad": "该系统的密钥无效。",
+  "editor.problem.key_bad": "密钥长度与算法不符。",
++ "editor.problem.nxdn_scrambler_key_missing": "缺少 NXDN 扰码密钥。此信道无法发射。",
+  "editor.problem.key_id_range": "密钥 ID 最大为 {max}。",
+  "editor.problem.key_duplicate": "两个密钥的算法和密钥 ID 相同。",
+  "editor.keys.title": "通信密钥",
+@@ -2052,6 +2055,7 @@
+  "editor.keys.alg.p25": "P25 AES-256",
+  "editor.keys.alg.p25des": "P25 DES-OFB",
+  "editor.keys.alg.nxdn": "NXDN AES-256",
++ "editor.keys.alg.nxdn_scrambler": "NXDN 扰码",
+  "editor.col.dmr_privacy": "加密",
+  "editor.keys.alg.arc4": "DMR 增强保密 (ARC4-40)",
+  "editor.keys.alg.dmr": "DMR AES-256",
+@@ -2061,6 +2065,7 @@
+  "editor.keys.show": "显示",
+  "editor.keys.add": "添加密钥",
+  "editor.keys.bad": "输入 {n} 个十六进制数字。",
++ "editor.keys.bad_seed": "请输入 1 至 32767 的十进制数。",
+  "editor.problem.mode_fallback_stale": "备用信道 {number} 已被更改或删除：电台会忽略它。",
+  "editor.problem.mode_fallback_kind": "备用信道必须是普通 FM 或 DMR 信道。",
+  "editor.problem.mode_same_identity": "与 {other} 是同一系统：共享或电台可能使用其中任一个。",
+diff --git a/site/static/js/codeplug/channelmodes.js b/site/static/js/codeplug/channelmodes.js
+index 87979a9..0d27554 100644
+--- a/site/static/js/codeplug/channelmodes.js
++++ b/site/static/js/codeplug/channelmodes.js
+@@ -22,6 +22,7 @@ import { getName, putName } from "./fields.js";
+ import { redactDmrBasicKeys, aniByte } from "./records.js";
+ import { KINDS, kindRow, typeRow, radioRuns } from "./modes.js";
+ import { u16, u32, put16, put32, sameBytes, sameValue, nameCheck } from "./modebytes.js";
++import { SCRAMBLER_ALG, SCRAMBLER_SEED_MAX } from "./mode_nxdn.js";
+ 
+ export const MODE_KEY = { system: 0x0100, entry: 0x0200, secret: 0x0300, tag: 0x0400, setting: 0x0A00 };
+ export const MODE_LIMITS = { systems: 255, entries: 256, tags: 1024, name: 16 };
+@@ -477,6 +478,9 @@ export function validateModes(m, err, warn, { features = null, baseNames } = {})
+ 		}
+ 		if (typeof c.fallback === "number") warn("channels", c, "fallback", "mode_fallback_stale", { number: c.fallback });
+ 		else if (c.fallback?.kind) warn("channels", c, "fallback", "mode_fallback_kind");
++		if (mod.requiredKeyAlg && c.tagTx && !(m.keyring ?? []).some((k) =>
++			k.alg === mod.requiredKeyAlg && k.id === c.params?.keyId && validKeyHex(k.alg, k.key)))
++			warn("channels", c, "keyId", "nxdn_scrambler_key_missing");
+ 		mod.validate?.(c, c.params, { err: (f, code, p = {}) => err("channels", c, f, code, p), warn: (f, code, p = {}) => warn("channels", c, f, code, p) });
+ 	}
+ 	for (const k of KINDS) {
+@@ -519,11 +523,17 @@ export const KEY_ALGS = [
+ 	{ alg: 0x25, token: "dmr", idMin: 1, idMax: 255, hex: false },	// DMR AES-256, Motorola layout
+ 	{ alg: 0x24, token: "dmr128", idMin: 1, idMax: 255, hex: false, bytes: 16 },
+ 	{ alg: 0x21, token: "arc4", idMin: 1, idMax: 255, hex: false, bytes: 5 },
++	{ alg: SCRAMBLER_ALG, token: "nxdn_scrambler", idMax: 63, hex: false, bytes: 2, decimalSeed: true },
+ ];
+ export const keyAlg = (alg) => KEY_ALGS.find((a) => a.alg === alg) ?? null;
+ export const keyBytes = (alg) => keyAlg(alg)?.bytes ?? 32;
+ const hexToBytes = (s) => Uint8Array.from(s.match(/../g) ?? [], (x) => parseInt(x, 16));
+ const bytesToHex = (b) => [...b].map((x) => x.toString(16).padStart(2, "0")).join("").toUpperCase();
++export const scramblerSeed = (hex) => u16(hexToBytes(hex), 0);
++export function scramblerKeyHex(seed) {
++	if (!Number.isInteger(seed) || seed < 1 || seed > SCRAMBLER_SEED_MAX) return "";
++	return bytesToHex([seed & 0xFF, seed >> 8]);
++}
+ // A traffic key record of the keyring with an algorithm the editor knows.
+ function decodeKey(key, v) {
+ 	if (!v || v[0] !== KEY_RING_SYSTEM || !keyAlg(v[1]) || v.length < 5 + keyBytes(v[1])) return null;
+@@ -531,7 +541,8 @@ function decodeKey(key, v) {
+ }
+ export const newKey = (alg) => ({ slot: null, alg, id: 1, flags: 0, key: "" });
+ export const validKeyHex = (alg, s) => keyAlg(alg) != null && typeof s === "string" &&
+-	s.length === 2 * keyBytes(alg) && /^[0-9A-Fa-f]+$/.test(s);
++	s.length === 2 * keyBytes(alg) && /^[0-9A-Fa-f]+$/.test(s) &&
++	(alg !== SCRAMBLER_ALG || scramblerKeyHex(scramblerSeed(s)) !== "");
+ 
+ // --- Secrets (8) ---
+ 
+diff --git a/site/static/js/codeplug/csv.js b/site/static/js/codeplug/csv.js
+index 54f65a7..e9bd6b8 100644
+--- a/site/static/js/codeplug/csv.js
++++ b/site/static/js/codeplug/csv.js
+@@ -11,6 +11,7 @@ import { LIMITS, POWER_NAMES, CALL_TYPES, SQUELCH_OPEN, validDtmf } from "./reco
+ import { newChannel, newContact, remove, assignNumbers } from "./model.js";
+ import { setKind } from "./channelmodes.js";
+ import { CALLSIGN_LEN, DGID_MAX, DT_DATA_FR, DT_VD1, DT_VD2, DT_VW } from "./mode_ysf.js";
++import { SCRAMBLER_KIND } from "./mode_nxdn.js";
+ 
+ // --- RFC 4180 ---
+ 
+@@ -172,6 +173,7 @@ const TYPES = Object.fromEntries(CALL_TYPES.map((k) => [k, k[0].toUpperCase() +
+ // Conventional digital channels carry their mode tag and parameters separately from the base record.
+ // "NXDN" alone means the 9600 bit/s mode, as the editor's new NXDN channel does.
+ const NXDN_KIND = 4, YSF_KIND = 6;
++const isNxdn = (kind) => kind === NXDN_KIND || kind === SCRAMBLER_KIND;
+ const YSF_DEVIATIONS = { wide: "Wide", narrow: "Narrow" };
+ const YSF_FORMATS = { [DT_VD1]: "V/D-1", [DT_DATA_FR]: "Data FR", [DT_VD2]: "DN", [DT_VW]: "VW" };
+ const asChannelMode = (s) => {
+@@ -180,11 +182,13 @@ const asChannelMode = (s) => {
+ 	for (const [mode, text] of Object.entries(MODES)) if (text.toLowerCase() === v) return { kind: 0, mode };
+ 	if (["nxdn", "nxdn96", "nxdn 96", "nxdn9600", "nxdn 9600"].includes(v)) return { kind: NXDN_KIND, rate9600: true };
+ 	if (["nxdn48", "nxdn 48", "nxdn4800", "nxdn 4800"].includes(v)) return { kind: NXDN_KIND, rate9600: false };
+-	throw new Bad("bad_value", { value: s.trim(), allowed: "FM, DMR, NXDN 4800, NXDN 9600, YSF" });
++	if (["nxdn scrambler", "nxdn 9600 scrambler", "nxdn s"].includes(v)) return { kind: SCRAMBLER_KIND, rate9600: true };
++	if (v === "nxdn 4800 scrambler") return { kind: SCRAMBLER_KIND, rate9600: false };
++	throw new Bad("bad_value", { value: s.trim(), allowed: "FM, DMR, NXDN 4800, NXDN 9600, NXDN Scrambler, YSF" });
+ };
+ const channelModeText = (r) => {
+ 	if (r.kind === YSF_KIND) return "YSF";
+-	if (r.kind === NXDN_KIND) return r.params?.rate9600 === false ? "NXDN 4800" : "NXDN 9600";
++	if (isNxdn(r.kind)) return `NXDN ${r.params?.rate9600 === false ? "4800" : "9600"}${r.kind === SCRAMBLER_KIND ? " Scrambler" : ""}`;
+ 	return MODES[r.mode];
+ };
+ const setChannelMode = (r, s, m) => {
+@@ -192,13 +196,14 @@ const setChannelMode = (r, s, m) => {
+ 	const v = asChannelMode(s);
+ 	if (v.kind) {
+ 		setKind(m, r, v.kind);
+-		if (v.kind === NXDN_KIND) r.params = { ...r.params, rate9600: v.rate9600 };
++		if (isNxdn(v.kind)) r.params = { ...r.params, rate9600: v.rate9600 };
+ 	} else setKind(m, r, 0, v.mode);
+ };
+-const usesTagTx = (r) => r.kind === NXDN_KIND || r.kind === YSF_KIND;
+-const rxOnlyText = (r) => yesNo(usesTagTx(r) ? !r.tagTx : r.rxOnly);
++const usesTagTx = (r) => isNxdn(r.kind) || r.kind === YSF_KIND;
++// Scrambler CSVs leave the base RX only even in editors that don't recognize the mode.
++const rxOnlyText = (r) => yesNo(r.kind === SCRAMBLER_KIND || (usesTagTx(r) ? !r.tagTx : r.rxOnly));
+ const setRxOnly = (r, s) => {
+-	if (r.kind === YSF_KIND && !s.trim()) return;
++	if ((r.kind === YSF_KIND || r.kind === SCRAMBLER_KIND) && !s.trim()) return;
+ 	const v = asBool(s);
+ 	if (usesTagTx(r)) r.tagTx = !v;
+ 	else r.rxOnly = v;
+@@ -210,15 +215,18 @@ const asRan = (s) => {
+ 	if (!Number.isInteger(n) || n < 0 || n > 63) throw new Bad("range", { min: 0, max: 63 });
+ 	return n;
+ };
+-const modeField = (kind, label, key, put, get) => ({
+-	get: (r) => (r.kind === kind && r.params ? get(r.params) : ""),
+-	set: (r, s) => {
+-		const v = put(s, r.kind === kind ? r.params : null);
+-		if (v === null) return;
+-		if (r.kind !== kind || !r.params) throw new Bad("bad_value", { value: s.trim(), allowed: label });
+-		r.params = { ...r.params, [key]: v };
+-	},
+-});
++const modeField = (kind, label, key, put, get) => {
++	const matches = kind === NXDN_KIND ? isNxdn : (id) => id === kind;
++	return {
++		get: (r) => (matches(r.kind) && r.params ? get(r.params) : ""),
++		set: (r, s) => {
++			const v = put(s, matches(r.kind) ? r.params : null);
++			if (v === null) return;
++			if (!matches(r.kind) || !r.params) throw new Bad("bad_value", { value: s.trim(), allowed: label });
++			r.params = { ...r.params, [key]: v };
++		},
++	};
++};
+ const nxdnField = (key, put, get) => modeField(NXDN_KIND, "an NXDN channel", key, put, get);
+ const ysfField = (key, parse, get, blank = () => null) => modeField(YSF_KIND, "a YSF channel", key,
+ 	(s, params) => s.trim() ? parse(s) : params ? blank(params) : null, get);
+@@ -408,6 +416,15 @@ export const TABLES = {
+ 				...nxdnField("rxRan", asRan, (p) => String(p.rxRan ?? 0)) },
+ 			{ header: "TX RAN", aliases: ["NXDN TX RAN"], key: "nxdnTxRan",
+ 				...nxdnField("txRan", asRan, (p) => String(p.txRan ?? 1)) },
++			{ header: "NXDN Scrambler Key ID", key: "scramblerKeyId", aliases: [],
++				...modeField(SCRAMBLER_KIND, "an NXDN Scrambler channel", "keyId", asRan, (p) => p.keyId ?? "") },
++			{ header: "NXDN Scrambler TX", key: "scramblerTx", aliases: [],
++				get: (r) => r.kind === SCRAMBLER_KIND ? yesNo(r.tagTx) : "",
++				set: (r, s) => {
++					if (!s.trim()) return;
++					if (r.kind !== SCRAMBLER_KIND) throw new Bad("bad_value", { value: s.trim(), allowed: "an NXDN Scrambler channel" });
++					r.tagTx = asBool(s);
++				} },
+ 			{ header: "YSF DT", key: "ysfDt", aliases: ["YSF Data Type", "Data Type"], ...ysfField("dt", asWord(YSF_FORMATS, DT_VD1), (p) => YSF_FORMATS[p.dt]) },
+ 			{ header: "Deviation", key: "ysfNarrow", aliases: ["YSF Deviation"],
+ 				...ysfField("narrow", (s) => asWord(YSF_DEVIATIONS)(s) === "narrow", (p) => p.narrow ? "Narrow" : "Wide") },
+@@ -524,9 +541,9 @@ export function importTable(m, text, table = detect(text)) {
+ 	const { found, unknown } = mapHeader(spec, rows[0] || []);
+ 	const keys = new Set(found.map((f) => f.col.key));
+ 	if (table === "channels" && !spec.required.every((key) => keys.has(key))) throw new Bad("not_a_table");
+-	// Read a channel's mode first, then its RX DG-ID before a blank TX DG-ID can inherit it.
++	// Read the mode first and the RX DG-ID before a blank TX DG-ID. Scrambler TX overrides base RX Only.
+ 	if (table === "channels") {
+-		const priority = { mode: 0, ysfRxDgid: 1 };
++		const priority = { mode: 0, ysfRxDgid: 1, scramblerTx: 3 };
+ 		found.sort((a, b) => (priority[a.col.key] ?? 2) - (priority[b.col.key] ?? 2));
+ 	}
+ 	const problems = [];
+diff --git a/site/static/js/codeplug/mode_nxdn.js b/site/static/js/codeplug/mode_nxdn.js
+index 08fa952..ed02e35 100644
+--- a/site/static/js/codeplug/mode_nxdn.js
++++ b/site/static/js/codeplug/mode_nxdn.js
+@@ -11,6 +11,7 @@ export const RAN_MAX = 63, TX_RAN_SET = 0x80, TX_RAN_DEFAULT = 1, RATE_4800 = 0x
+ export const UNIT_MAX = 65519, ID_ALL = 0xFFFF;
+ // Type-C trunking (docs/spec/nxdn-trunking.md 3): byte 5 flags, bytes 6-9 the plan's base (Hz), 10-11 its spacing (125 Hz)
+ export const TRUNK = 0x01, TRUNK_ALL = 0x02, SPACING_UNIT = 125, TRUNK_LEN = 12;
++export const SCRAMBLER_ALG = 1, SCRAMBLER_KIND = 8, SCRAMBLER_MARK = 2, SCRAMBLER_SEED_MAX = 32767;
+ 
+ // The TX RAN a block that leaves it unset sends: the RX RAN, RAN 1 when that is every RAN (0)
+ const txDefault = (rx) => (rx !== 0 ? rx : TX_RAN_DEFAULT);
+@@ -115,3 +116,25 @@ export const nxdnKind = {
+ 		validate() {},
+ 	},
+ };
++
++export const nxdnScramblerKind = {
++	...nxdnKind,
++	id: SCRAMBLER_KIND,
++	feature: "NXDN_SCRAMBLER",
++	settings: null,
++	requiredKeyAlg: SCRAMBLER_ALG,
++	newParams: () => ({ rate9600: true, squelch: 0, rxRan: 0, txRan: TX_RAN_DEFAULT, keyId: null }),
++	decode(b) {
++		const { rate9600, squelch, rxRan, txRan, trunk } = decodeConv(b);
++		const keyId = b?.length >= 5 && b[3] === SCRAMBLER_MARK && b[4] <= 63 && !trunk ? b[4] : null;
++		return { rate9600, squelch, rxRan, txRan, keyId };
++	},
++	encode(p, prev = null) {
++		const v = encodeConv(p, prev);
++		const keyOk = Number.isInteger(p.keyId) && p.keyId >= 0 && p.keyId <= 63;
++		v[3] = keyOk ? SCRAMBLER_MARK : 0;
++		v[4] = keyOk ? p.keyId : 0;
++		return v;
++	},
++	fields: () => nxdnKind.fields().filter((f) => ["rate9600", "squelch", "rxRan", "txRan", "keyId"].includes(f.key)),
++};
+diff --git a/site/static/js/codeplug/modes.js b/site/static/js/codeplug/modes.js
+index c4acac8..ebc16fb 100644
+--- a/site/static/js/codeplug/modes.js
++++ b/site/static/js/codeplug/modes.js
+@@ -10,7 +10,7 @@
+ 
+ import { t3Kind, t3System } from "./mode_t3.js";
+ import { p25Kind, p25TrunkKind, p25System } from "./mode_p25.js";
+-import { nxdnKind } from "./mode_nxdn.js";
++import { nxdnKind, nxdnScramblerKind } from "./mode_nxdn.js";
+ import { ysfKind } from "./mode_ysf.js";
+ import { m17Kind } from "./mode_m17.js";
+ import { amKind } from "./mode_am.js";
+@@ -24,6 +24,7 @@ export const KINDS = [
+ 	{ id: 5, token: "AM", short: "AM", feature: "AM_RX", module: amKind },
+ 	{ id: 6, token: "YSF", short: "YSF", feature: "YSF", module: ysfKind },
+ 	{ id: 7, token: "M17", short: "M17", feature: "M17", module: m17Kind },
++	{ id: 8, token: "NXDN_SCRAMBLER", short: "NXDN-S", feature: "NXDN_SCRAMBLER", module: nxdnScramblerKind },
+ ];
+ 
+ export const SYSTEM_TYPES = [
+diff --git a/site/static/js/editor/modesview.js b/site/static/js/editor/modesview.js
+index e414158..e63c746 100644
+--- a/site/static/js/editor/modesview.js
++++ b/site/static/js/editor/modesview.js
+@@ -9,7 +9,7 @@
+ import { formDialog, fallbackOptions } from "./views.js";
+ import { specField, parseSpec, formatSpec, label } from "./modefields.js";
+ import { SYSTEM_TYPES, typeRow, typeName, offeredTypes, offeredKinds } from "../codeplug/modes.js";
+-import { newSystem, syncModes, SHARE, MODE_LIMITS, KEY_ALGS, KEY_MAX, keyAlg, keyBytes, validKeyHex, newKey } from "../codeplug/channelmodes.js";
++import { newSystem, syncModes, SHARE, MODE_LIMITS, KEY_ALGS, KEY_MAX, keyAlg, keyBytes, validKeyHex, newKey, scramblerSeed, scramblerKeyHex } from "../codeplug/channelmodes.js";
+ import { remove, assignNumbers } from "../codeplug/model.js";
+ 
+ const SHARE_LEVELS = [SHARE.off, SHARE.identity, SHARE.whole];
+@@ -292,8 +292,10 @@ export function keyringPart(api, features) {
+ 		const a = keyAlg(k.alg);
+ 		const id = h("input", { type: "text", id: `kr-id-${i}`, value: a.hex ? k.id.toString(16).toUpperCase().padStart(4, "0") : String(k.id), size: "6", spellcheck: "false" });
+ 		const hexLength = 2 * keyBytes(k.alg);
+-		const key = h("input", { type: "password", id: `kr-key-${i}`, value: k.key, size: String(hexLength + 2),
+-			maxlength: String(hexLength), spellcheck: "false", autocomplete: "off" });
++		const keyLength = a.decimalSeed ? 5 : hexLength;
++		const key = h("input", { type: "password", id: `kr-key-${i}`,
++			value: a.decimalSeed && k.key ? String(scramblerSeed(k.key)) : k.key, size: String(keyLength + 2),
++			maxlength: String(keyLength), inputmode: a.decimalSeed ? "numeric" : "text", spellcheck: "false", autocomplete: "off" });
+ 		const err = h("span", { class: "small ed-err" });
+ 		id.addEventListener("change", () => {
+ 			const n = a.hex ? parseInt(id.value, 16) : Number(id.value);
+@@ -302,8 +304,9 @@ export function keyringPart(api, features) {
+ 			set(k, { id: n });
+ 		});
+ 		key.addEventListener("change", () => {
+-			const v = key.value.replace(/[\s:-]/g, "").toUpperCase();
+-			if (!validKeyHex(k.alg, v)) return void (err.textContent = t("editor.keys.bad", { n: hexLength }));
++			const text = key.value.trim();
++			const v = a.decimalSeed ? (/^[0-9]+$/.test(text) ? scramblerKeyHex(Number(text)) : "") : text.replace(/[\s:-]/g, "").toUpperCase();
++			if (!validKeyHex(k.alg, v)) return void (err.textContent = t(a.decimalSeed ? "editor.keys.bad_seed" : "editor.keys.bad", { n: hexLength }));
+ 			err.textContent = "";
+ 			set(k, { key: v });
+ 		});
+diff --git a/site/static/js/editor/views.js b/site/static/js/editor/views.js
+index 250ff18..bdfc06d 100644
+--- a/site/static/js/editor/views.js
++++ b/site/static/js/editor/views.js
+@@ -355,7 +355,17 @@ export function channelForm(m, t, { features = null } = {}) {
+ 		}
+ 		const alg = KEY_ALGS.find((a) => a.token.toUpperCase() === k.token);
+ 		for (const spec of mod.fields()) {
+-			if (alg && spec.key === "keyId") continue;
++			if (alg && spec.key === "keyId") {
++				if (mod.requiredKeyAlg) {
++					const get = (r) => on(r) ? r.params?.keyId : null;
++					kindFields.push(sel(`k${k.id}.keyId`, `editor.keys.alg.${alg.token}`,
++						(r) => aesOptions(m, t, alg, get(r), "editor.none"), {
++							show: on, get, help: t("editor.nxdn.scrambler_help"),
++							set: (r, id) => on(r) && (r.params = { ...r.params, keyId: id }),
++						}));
++				}
++				continue;
++			}
+ 			const cipher = spec.keyToken ? KEY_ALGS.find((a) => a.token === spec.keyToken) : spec.key === "aes" ? alg : null;
+ 			if (cipher) {
+ 				const get = (r) => on(r) && r.params?.[spec.key] ? r.params.keyId : null;
+diff --git a/site/tests/nxdn-scrambler.test.mjs b/site/tests/nxdn-scrambler.test.mjs
+new file mode 100644
+index 0000000..2cd3297
+--- /dev/null
++++ b/site/tests/nxdn-scrambler.test.mjs
+@@ -0,0 +1,69 @@
++// SPDX-License-Identifier: MIT
++// Copyright (c) 2026 The RadioFoundry Authors
++// Copyright (c) 2026 lyra XE1POC (changes)
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { empty, encode, decode, newChannel } from "../static/js/codeplug/model.js";
++import { decodeArea, getValue } from "../static/js/codeplug/kv.js";
++import { decodeTag, MODE_KEY, KEY_BASE, setKind, validKeyHex, scramblerKeyHex, scramblerSeed, withoutSecrets } from "../static/js/codeplug/channelmodes.js";
++import { exportTable, importTable, parse } from "../static/js/codeplug/csv.js";
++import { channelForm } from "../static/js/editor/views.js";
++
++const memory = (name) => newChannel({ name, mode: "dmr", rxHz: 433000000, txHz: 433000000, rxOnly: false });
++
++test("NXDN scrambler uses a separate DMR RX-only base and a two-byte keyring record", () => {
++	const m = empty();
++	const scrambled = memory("Scrambled"), aes = memory("AES");
++	m.channels.push(scrambled, aes);
++	setKind(m, scrambled, 8);
++	setKind(m, aes, 4);
++	m.keyring = [{ alg: 1, id: 0, key: scramblerKeyHex(4660) }, { alg: 1, id: 63, key: scramblerKeyHex(32767) },
++		{ alg: 3, id: 0, key: "AB".repeat(32) }];
++	assert.equal(scramblerKeyHex(4660), "3412");
++	assert.equal(scramblerSeed("FF7F"), 32767);
++	assert.equal(validKeyHex(1, "0000"), false);
++	assert.equal(validKeyHex(1, "0080"), false);
++	assert.equal(validKeyHex(3, "AB".repeat(32)), true);
++	const f = channelForm(m, (s) => s, { features: "DMR,NXDN,NXDN_SCRAMBLER" });
++	const key = f.find((x) => x.key === "k8.keyId");
++	assert.deepEqual(key.options(scrambled).map(([id]) => id), [null, 0, 63]);
++	key.set(scrambled, 0);
++	f.find((x) => x.key === "k4.aes").set(aes, 0);
++	scrambled.params.rate9600 = false;
++	const image = encode(m);
++	const area = decodeArea(image.bytes).entries;
++	const scramblerTag = decodeTag(getValue(area, MODE_KEY.tag + scrambled.number - 1));
++	assert.equal(scramblerTag.kind, 8);
++	assert.equal(scramblerTag.flags & 3, 1);
++	assert.deepEqual([...scramblerTag.params.slice(0, 5)], [4, 0, 0, 2, 0]);
++	assert.deepEqual([...getValue(area, KEY_BASE)], [255, 1, 0, 0, 0, 0x34, 0x12]);
++	const [scr, old] = decode(image).channels;
++	assert.equal(scr.rxOnly, true);
++	assert.equal(scr.tagTx, true);
++	assert.equal(scr.params.keyId, 0);
++	assert.equal(old.kind, 4);
++	assert.equal(old.params.aes, true);
++	assert.equal(old.params.keyId, 0);
++	withoutSecrets(image.bytes);
++	const clean = decode(image);
++	assert.deepEqual(clean.keyring, []);
++	assert.equal(clean.channels[0].params.keyId, 0);
++});
++
++test("scrambler CSV preserves rate, RAN, key ID and tag TX with a receive-only stand-in", () => {
++	const m = empty();
++	const imported = importTable(m, "NXDN Scrambler TX,NXDN Scrambler Key ID,Name,RX,RX Only,Mode,RX RAN,TX RAN\nYes,0,Scrambler,433,Yes,NXDN 4800 Scrambler,4,7\n", "channels");
++	assert.deepEqual(imported.problems, []);
++	assert.equal(m.channels[0].kind, 8);
++	assert.equal(m.channels[0].tagTx, true);
++	assert.deepEqual(m.channels[0].params, { keyId: 0, rate9600: false, rxRan: 4, txRan: 7, squelch: 0 });
++	const text = exportTable(m, "channels");
++	const [header, row] = parse(text);
++	assert.equal(row[header.indexOf("RX Only")], "Yes");
++	assert.equal(row[header.indexOf("NXDN Scrambler TX")], "Yes");
++	assert.equal(row[header.indexOf("NXDN Scrambler Key ID")], "0");
++	const round = empty();
++	assert.deepEqual(importTable(round, text, "channels").problems, []);
++	assert.equal(round.channels[0].tagTx, true);
++	assert.deepEqual(round.channels[0].params, m.channels[0].params);
++});
+diff --git a/tests/host/Makefile b/tests/host/Makefile
+index 08c8f26..cfe7df1 100644
+--- a/tests/host/Makefile
++++ b/tests/host/Makefile
+@@ -142,6 +142,14 @@ TESTS   += nxdnEngineTestAes
+ nxdnEngineTestAes: nxdnEngineTest.c $(CORE)/nxdn/nxdn_engine.c $(NXDN) $(wildcard $(CORE)/nxdn/*.h) $(CORE)/air/air_session.c $(CORE)/air/air_framer.c $(CORE)/air/air_softmodem.c $(FEC)
+ 	$(CC) $(CFLAGS) -I$(ROOT)/hal -Wshadow -DCONFIG_NXDN=1 -DCONFIG_AIR_AES=1 -o $@ nxdnEngineTest.c $(CORE)/nxdn/nxdn_engine.c $(NXDN) $(CORE)/dmr/ambe/ambeFec.c $(CORE)/air/air_session.c $(CORE)/air/air_framer.c $(CORE)/air/air_softmodem.c $(FEC) -lm
+ 
++# The 15-bit NXDN conventional voice scrambler, checked alongside existing AES support.
++SCRAMBLE := $(CORE)/nxdn/nxdn_scramble.c $(CORE)/dmr/ambe/ambeFec.c
++TESTS   += nxdnScrambleTest nxdnEngineTestScramble
++nxdnScrambleTest: nxdnScrambleTest.c $(SCRAMBLE) $(wildcard $(CORE)/nxdn/*.h)
++	$(CC) $(CFLAGS) -I$(ROOT)/hal -Wshadow -DCONFIG_NXDN=1 -DCONFIG_NXDN_SCRAMBLER=1 -o $@ nxdnScrambleTest.c $(SCRAMBLE)
++nxdnEngineTestScramble: nxdnEngineTest.c $(CORE)/nxdn/nxdn_engine.c $(NXDN) $(SCRAMBLE) $(wildcard $(CORE)/nxdn/*.h) $(CORE)/air/air_session.c $(CORE)/air/air_framer.c $(CORE)/air/air_softmodem.c $(FEC)
++	$(CC) $(CFLAGS) -I$(ROOT)/hal -Wshadow -DCONFIG_NXDN=1 -DCONFIG_AIR_AES=1 -DCONFIG_NXDN_SCRAMBLER=1 -o $@ nxdnEngineTest.c $(CORE)/nxdn/nxdn_engine.c $(NXDN) $(SCRAMBLE) $(CORE)/air/air_session.c $(CORE)/air/air_framer.c $(CORE)/air/air_softmodem.c $(FEC) -lm
++
+ # YSF frames, their FEC and voice, and the engine on two made-up providers (core/ysf)
+ YSF     := $(CORE)/ysf/ysf_frame.c $(CORE)/ysf/ysf_voice.c $(CORE)/ysf/ysf_rx.c $(CORE)/ysf/ysf_tx.c $(CORE)/dmr/ambe/ambeFec.c
+ TESTS   += ysfTest ysfEngineTest
+@@ -275,6 +283,8 @@ run: $(TESTS)
+ 	./nxdnTrunkTest | tail -1
+ 	./nxdnEngineTest | tail -1
+ 	./nxdnEngineTestAes | tail -1
++	./nxdnScrambleTest
++	./nxdnEngineTestScramble
+ 	./ysfTest | tail -1
+ 	./ysfEngineTest | tail -1
+ 	./m17Test | tail -1
+@@ -370,7 +380,7 @@ radioCoreTestP25T: $(RCP25T) $(wildcard $(CORE)/radio/*.h) $(wildcard $(CORE)/dm
+ 
+ # The same with NXDN conventional (CONFIG_NXDN): the far end is an NXDN engine on the fake board.air; the voice goes
+ # through the DMR side's vocoder path. No vocoder lends memory (as on the STM32 platform)
+-TESTS   += radioCoreTestNxdn radioCoreTestP25Nxdn
++TESTS   += radioCoreTestNxdn radioCoreTestP25Nxdn radioCoreTestNxdnScrambler
+ RCNXDN  := $(RCORE) $(CORE)/radio/radio_nxdn.c $(CORE)/nxdn/nxdn_engine.c $(NXDN) $(CORE)/air/air_session.c \
+            $(CORE)/air/air_framer.c $(FEC) $(CORE)/debuglink/debuglink_view_nxdn.c $(CORE)/hostlink/build_info.c \
+            $(CORE)/crypto/air_nonce.c
+@@ -379,6 +389,11 @@ radioCoreTestNxdn: $(RCNXDN) $(wildcard $(CORE)/radio/*.h) $(wildcard $(CORE)/dm
+ 	$(CC) $(CFLAGS) $(CORE_HAL) -I. -DDMR_RX_TRACE=0 -DCONFIG_DMR_IP_GATEWAY=0 -DCONFIG_SFR=1 -DCONFIG_APRS=0 \
+ 		-DCONFIG_NXDN=1 -DCONFIG_AIR_RAW=1 -o $@ $(RCNXDN) -lm
+ 
++RCNXSC  := $(sort $(RCNXDN) $(SCRAMBLE))
++radioCoreTestNxdnScrambler: $(RCNXSC) $(wildcard $(CORE)/radio/*.h $(CORE)/nxdn/*.h)
++	$(CC) $(CFLAGS) $(CORE_HAL) -I. -DDMR_RX_TRACE=0 -DCONFIG_DMR_IP_GATEWAY=0 -DCONFIG_SFR=1 -DCONFIG_APRS=0 \
++		-DCONFIG_NXDN=1 -DCONFIG_AIR_RAW=1 -DCONFIG_NXDN_SCRAMBLER=1 -o $@ $(RCNXSC) -lm
++
+ # The same with YSF (CONFIG_YSF): the far end is a YSF engine on the fake board.air; the voice goes
+ # through the DMR side's vocoder path. No vocoder lends memory (as on the STM32 platform)
+ # (sorted: the lists share the AMBE FEC source, which sort drops the second copy of)
+@@ -553,7 +568,7 @@ boardBandTest: boardBandTest.c $(ROOT)/hal/board.h
+ 	$(CC) $(CFLAGS) -I$(ROOT)/hal -Wshadow -o $@ boardBandTest.c
+ 
+ run: run-core
+-run-core: radioCoreTest radioCoreTestNoVfoDmr radioCoreTestP25 radioCoreTestP25T radioCoreTestNxdn radioCoreTestP25Nxdn radioCoreTestYsf radioCoreTestM17 radioCoreTestAprs radioCoreTestAprsDmr radioFeaturesTest radioFeaturesTestNoDual roamTest radioListenBandsTest inputTest switchFollowTest aprsRadioTest aprsRadioMdcTest quadratureTest serialmicTest miclevelTest resampleTest \
++run-core: radioCoreTest radioCoreTestNoVfoDmr radioCoreTestP25 radioCoreTestP25T radioCoreTestNxdn radioCoreTestNxdnScrambler radioCoreTestP25Nxdn radioCoreTestYsf radioCoreTestM17 radioCoreTestAprs radioCoreTestAprsDmr radioFeaturesTest radioFeaturesTestNoDual roamTest radioListenBandsTest inputTest switchFollowTest aprsRadioTest aprsRadioMdcTest quadratureTest serialmicTest miclevelTest resampleTest \
+           rx2LinkTest keyassignTest powerSwitchTest powerKeyTest boardBandTest batteryTest aesTest voiceCipherTest
+ 	./aprsRadioTest
+ 	./aprsRadioMdcTest
+@@ -561,6 +576,7 @@ run-core: radioCoreTest radioCoreTestNoVfoDmr radioCoreTestP25 radioCoreTestP25T
+ 	./radioCoreTestNoVfoDmr
+ 	./radioCoreTestP25
+ 	./radioCoreTestNxdn
++	./radioCoreTestNxdnScrambler
+ 	./radioCoreTestP25Nxdn
+ 	./radioCoreTestYsf
+ 	./radioCoreTestM17
+@@ -764,11 +780,14 @@ $(shell python3 $(ROOT)/tools/gen_about.py $(ROOT)/AUTHORS $(ROOT)/platform/stm3
+ UIFLAGS := -std=gnu99 -Wall -Wextra -Wno-unused-parameter -Wshadow -g $(COVFLAGS) $(SANFLAGS) -I$(CORE) -I$(ROOT)/hal -I. -Iout/gen \
+            '-DGFX_FB_BYTES=(320u*320u*2u)' -DGFX_MAX_ROWS=320 -DCONFIG_FONT_XL=1 -DFONT_BOTH -DGFX_INDEXED=1 -DGFX_FIT_TRACE
+ UIDEPS  := $(UIAPP) $(ABOUT_H) $(LANG_H) $(wildcard $(CORE)/ui/*.h $(CORE)/ui/fonts/*.inc sim/ui_sim.h)
+-TESTS   += uiFlowTest uiFlowTestNoColor uiSim
++TESTS   += uiFlowTest uiFlowTestNoColor uiFlowTestNxdnScrambler uiSim
+ 
+ uiFlowTest: uiFlowTest.c $(UIDEPS)
+ 	$(CC) $(UIFLAGS) -DCONFIG_P25=1 -DCONFIG_P25_TRUNK=1 -DCONFIG_NXDN=1 -DCONFIG_YSF=1 -o $@ uiFlowTest.c $(UIAPP) -lz -lm
+ 
++uiFlowTestNxdnScrambler: uiFlowTest.c $(UIDEPS)
++	$(CC) $(UIFLAGS) -DCONFIG_P25=1 -DCONFIG_P25_TRUNK=1 -DCONFIG_NXDN=1 -DCONFIG_YSF=1 -DCONFIG_NXDN_SCRAMBLER=1 -o $@ uiFlowTest.c $(UIAPP) -lz -lm
++
+ # ... and with the FM signaling ID rows (MDC-1200 PTT ID) in the channel editor
+ TESTS   += uiFlowTestMdc
+ uiFlowTestMdc: uiFlowTest.c $(UIDEPS)
+@@ -821,7 +840,7 @@ ui-sheets: uiSim
+ 	UI_GALLERY_COLORS="$(UI_GALLERY_COLORS)" ./uiSim --sheets out/sheets $(GEOM)
+ 
+ run: run-ui
+-run-ui: gfxTest gfxTestZh i18nTest i18nTestNoLang i18nTestDefault uiFlowTest uiFlowTestNoColor uiFlowTestMdc uiSim beepReel
++run-ui: gfxTest gfxTestZh i18nTest i18nTestNoLang i18nTestDefault uiFlowTest uiFlowTestNoColor uiFlowTestMdc uiFlowTestNxdnScrambler uiSim beepReel
+ 	./gfxTest
+ 	./gfxTestZh
+ 	./i18nTest
+@@ -830,6 +849,7 @@ run-ui: gfxTest gfxTestZh i18nTest i18nTestNoLang i18nTestDefault uiFlowTest uiF
+ 	./uiFlowTest
+ 	./uiFlowTestNoColor
+ 	./uiFlowTestMdc
++	./uiFlowTestNxdnScrambler
+ 	./uiSim --layout
+ 	./beepReel --out out/beep-reel --no-frames > /dev/null	# checks every beep has a scene and the scenes still run
+ .PHONY: run-ui ui-gallery ui-sheets
+@@ -1557,15 +1577,19 @@ run-p25cp: p25CodeplugTest p25CodeplugConvTest
+ .PHONY: run-p25cp
+ 
+ # NXDN in the codeplug (core/nxdn/nxdn_codeplug.c): the shared vectors, a channel's set-up, a channel saved from the radio
+-TESTS   += nxdnCodeplugTest
++TESTS   += nxdnCodeplugTest nxdnCodeplugTestScrambler
+ NXDNCP  := $(CPTAG) $(CORE)/codeplug/codeplug_talk.c $(CORE)/codeplug/codeplug_tag.c $(CORE)/codeplug/codeplug_records.c $(CORE)/nxdn/nxdn_codeplug.c
+ 
+ nxdnCodeplugTest: nxdnCodeplugTest.c $(NXDNCP) $(wildcard $(CORE)/codeplug/*.h $(CORE)/nxdn/*.h) ../vectors/channel-modes.txt
+ 	$(CC) $(CFLAGS) -I$(ROOT)/hal -I. -Wshadow -DCONFIG_AIR=1 -DCONFIG_NXDN=1 -o $@ nxdnCodeplugTest.c $(NXDNCP)
+ 
++nxdnCodeplugTestScrambler: nxdnCodeplugTest.c $(NXDNCP) $(wildcard $(CORE)/codeplug/*.h $(CORE)/nxdn/*.h) ../vectors/channel-modes.txt
++	$(CC) $(CFLAGS) -I$(ROOT)/hal -I. -Wshadow -DCONFIG_AIR=1 -DCONFIG_NXDN=1 -DCONFIG_NXDN_SCRAMBLER=1 -o $@ nxdnCodeplugTest.c $(NXDNCP)
++
+ run: run-nxdncp
+-run-nxdncp: nxdnCodeplugTest
++run-nxdncp: nxdnCodeplugTest nxdnCodeplugTestScrambler
+ 	./nxdnCodeplugTest
++	./nxdnCodeplugTestScrambler
+ .PHONY: run-nxdncp
+ 
+ # YSF in the codeplug (core/ysf/ysf_codeplug.c): the shared vectors, a channel's set-up, the radio-wide record, a channel saved from the radio
+diff --git a/tests/host/nxdnCodeplugTest.c b/tests/host/nxdnCodeplugTest.c
+index 74fb5d9..c6e14b3 100644
+--- a/tests/host/nxdnCodeplugTest.c
++++ b/tests/host/nxdnCodeplugTest.c
+@@ -12,6 +12,7 @@
+ #include "codeplug/codeplug_tag.h"
+ #include "codeplug/codeplug_records.h"
+ #include "nxdn/nxdn_codeplug.h"
++#include "nxdn/nxdn.h"
+ #include "storage/storage.h"
+ #include "sim/sim_flash.h"
+ 
+@@ -87,7 +88,8 @@ static void test_vectors(void)
+ 			nxdn_conv_decode(b, unhex(w[1], b, sizeof b), &c);
+ 			CHECK(c.rate9600 == (h(w[2]) != 0) && c.rx_ran == h(w[3]) && c.tx_ran == h(w[4]) && c.squelch == h(w[5]));
+ 		} else if (strcmp(w[0], "nxdnenc") == 0) {
+-			nxdn_conv_t c = { h(w[1]) != 0, (uint8_t)h(w[2]), (uint8_t)h(w[3]), (uint8_t)h(w[4]), false, 0, false, false, 0, 0 };
++			nxdn_conv_t c = { .rate9600 = h(w[1]) != 0, .rx_ran = (uint8_t)h(w[2]),
++					  .tx_ran = (uint8_t)h(w[3]), .squelch = (uint8_t)h(w[4]) };
+ 			uint8_t e[NXDN_CP_CONV_LEN];
+ 			nxdn_conv_encode(&c, e);
+ 			CHECK(unhex(w[5], b, sizeof b) == NXDN_CP_CONV_LEN && memcmp(e, b, NXDN_CP_CONV_LEN) == 0);
+@@ -96,8 +98,8 @@ static void test_vectors(void)
+ 			nxdn_conv_decode(b, unhex(w[1], b, sizeof b), &c);
+ 			CHECK(c.aes == (h(w[2]) != 0) && c.kid == h(w[3]));
+ 		} else if (strcmp(w[0], "nxdnaesenc") == 0) {
+-			nxdn_conv_t c = { h(w[1]) != 0, (uint8_t)h(w[2]), (uint8_t)h(w[3]), (uint8_t)h(w[4]), h(w[5]) != 0, (uint8_t)h(w[6]),
+-					  false, false, 0, 0 };
++			nxdn_conv_t c = { .rate9600 = h(w[1]) != 0, .rx_ran = (uint8_t)h(w[2]), .tx_ran = (uint8_t)h(w[3]),
++					  .squelch = (uint8_t)h(w[4]), .aes = h(w[5]) != 0, .kid = (uint8_t)h(w[6]) };
+ 			uint8_t e[NXDN_CP_CONV_LEN];
+ 			nxdn_conv_encode(&c, e);
+ 			CHECK(unhex(w[7], b, sizeof b) == NXDN_CP_CONV_LEN && memcmp(e, b, NXDN_CP_CONV_LEN) == 0);
+@@ -312,11 +314,64 @@ static void test_conv_save(void)
+ 	}
+ }
+ 
++#if CONFIG_NXDN_SCRAMBLER
++static void test_scrambler_codeplug(void)
++{
++	fresh();
++	fits = true;
++	channel_t c = make("NXDN-S", 453100000, 453100000), read;
++	c.rx_only = false;
++	nxdn_conv_t enc = { .rate9600 = false, .rx_ran = 2, .tx_ran = 7, .scramble = true, .kid = 0 };
++	nxdn_conv_cfg_t cfg;
++	codeplug_tag_t tag;
++	CHECK(nxdn_conv_save(7, &c, &enc) && codeplug_channel(7, &read));
++	CHECK(read.kind == CODEPLUG_KIND_NXDN_SCRAMBLER && !read.rx_only && codeplug_kind_built(read.kind));
++	CHECK(codeplug_tag_read(7, &tag) && tag.flags == CODEPLUG_TAG_TX && tag.system == CODEPLUG_SYSTEM_NONE);
++	CHECK(nxdn_conv_load(7, &read, &cfg) && cfg.conv.scramble && !cfg.conv.aes && !cfg.conv.trunk &&
++	      !cfg.conv.rate9600 && cfg.conv.kid == 0 && cfg.conv.rx_ran == 2 && cfg.conv.tx_ran == 7);
++	CHECK(codeplug_tag_remove(7) && codeplug_channel(7, &read));
++	CHECK(read.kind == CODEPLUG_KIND_NONE && read.mode == RADIO_MODE_DMR && read.rx_only);
++	CHECK(nxdn_conv_save(7, &c, &enc));
++	enc.aes = true;
++	CHECK(!nxdn_conv_save(7, &c, &enc));
++	enc.aes = false;
++	enc.trunk = true;
++	CHECK(!nxdn_conv_save(7, &c, &enc));
++	uint8_t short_tag[] = { 0x00, 0, 0, NXDN_CP_ENC_SCRAMBLER };
++	CHECK(codeplug_tag_write(7, c.name, &tag, short_tag, sizeof short_tag) && codeplug_channel(7, &read));
++	CHECK(nxdn_conv_load(7, &read, &cfg) && cfg.conv.scramble && cfg.conv.kid == UINT8_MAX);
++	enc = (nxdn_conv_t){ .rate9600 = true, .aes = true, .kid = 63, .trunk = true };
++	CHECK(nxdn_conv_save(7, &read, &enc) && codeplug_channel(7, &read));
++	CHECK(read.kind == CODEPLUG_KIND_NXDN && nxdn_conv_load(7, &read, &cfg));
++	CHECK(cfg.conv.aes && cfg.conv.trunk && !cfg.conv.scramble && cfg.conv.kid == 63);
++
++	const uint8_t key0[] = { CODEPLUG_SYSTEM_NONE, NXDN_CIPHER_SCRAMBLE, 0, 0, 0, 0x01, 0x00 };
++	const uint8_t key5[] = { CODEPLUG_SYSTEM_NONE, NXDN_CIPHER_SCRAMBLE, 5, 0, 0, 0x34, 0x12 };
++	const uint8_t key63[] = { CODEPLUG_SYSTEM_NONE, NXDN_CIPHER_SCRAMBLE, 63, 0, 0, 0xFF, 0x7F };
++	const uint8_t bad[] = { CODEPLUG_SYSTEM_NONE, NXDN_CIPHER_SCRAMBLE, 6, 0, 0, 0x00, 0x80 };
++	const uint8_t aes[] = { CODEPLUG_SYSTEM_NONE, NXDN_CIPHER_AES, 5, 0, 0, 0x78, 0x56 };
++	uint16_t keys[NXDN_CP_KID_MAX + 1u];
++	CHECK(codeplug_kv_set(CODEPLUG_KEY_TRAFFIC, key0, sizeof key0));
++	CHECK(codeplug_kv_set(CODEPLUG_KEY_TRAFFIC + 1, key5, sizeof key5));
++	CHECK(codeplug_kv_set(CODEPLUG_KEY_TRAFFIC + 2, key63, sizeof key63));
++	CHECK(codeplug_kv_set(CODEPLUG_KEY_TRAFFIC + 3, bad, sizeof bad));
++	CHECK(codeplug_kv_set(CODEPLUG_KEY_TRAFFIC + 4, aes, sizeof aes));
++	nxdn_scrambler_keyring(keys);
++	CHECK(keys[0] == 1 && keys[5] == 0x1234 && keys[6] == 0 && keys[63] == 32767);
++	CHECK(codeplug_kv_set(CODEPLUG_KEY_TRAFFIC + 5, key5, sizeof key5));
++	nxdn_scrambler_keyring(keys);
++	CHECK(keys[0] == 1 && keys[5] == 0 && keys[63] == 32767);
++}
++#endif
++
+ int main(void)
+ {
+ 	test_vectors();
+ 	test_conv_load();
+ 	test_conv_save();
++#if CONFIG_NXDN_SCRAMBLER
++	test_scrambler_codeplug();
++#endif
+ 	sim_flash_free();
+ 	if (failures) {
+ 		printf("nxdnCodeplugTest: %d failure(s)\n", failures);
+diff --git a/tests/host/nxdnEngineTest.c b/tests/host/nxdnEngineTest.c
+index a2e6d85..499ee32 100644
+--- a/tests/host/nxdnEngineTest.c
++++ b/tests/host/nxdnEngineTest.c
+@@ -844,6 +844,53 @@ static void testAes(bool rate9600)
+ }
+ #endif
+ 
++#if CONFIG_NXDN_SCRAMBLER
++static uint16_t h_scramble_key(uint8_t id, void *ctx)
++{
++	(void)ctx;
++	return id == 6 ? 12345u : 0;
++}
++
++static void testScramble(bool rate9600)
++{
++	nxdn_engine_hooks_t has_key = hooks;
++	nxdn_engine_cfg_t tx = base_cfg(rate9600), rx = base_cfg(rate9600);
++	uint16_t first;
++	nxdn_engine_view_t v;
++
++	has_key.scramble_key = h_scramble_key;
++	tx.scramble_tx = true;
++	tx.scramble_kid = 6;
++	rx.unit_id = 2002;
++	begin(0, &tx, &has_key);
++	begin(1, &rx, &has_key);
++	over(80, 10, 22);
++	CHECK(r[1].call.vcall.cipher == NXDN_CIPHER_SCRAMBLE && r[1].call.vcall.key_id == 6 && !r[1].call.iv,
++	      "scrambler advertises its own cipher and key ID without an AES IV");
++	CHECK(r[1].nvoice >= 40 && check_order(&r[1], &r[0], &first) == 0 && first == 0,
++	      "scrambler restores voice and filler through a full transmission");
++
++	begin(0, &tx, &has_key);
++	begin(1, &rx, &hooks);
++	over(40, 0, 0);
++	nxdn_engine_view(&r[1].e, &v);
++	CHECK(v.rx.vcall.cipher == NXDN_CIPHER_SCRAMBLE && r[1].starts == 0 && r[1].nvoice == 0,
++	      "no receive key: call is visible without audio");
++	begin(0, &tx, &hooks);
++	CHECK(!nxdn_engine_tx_prepare(&r[0].e) && nxdn_engine_tx_state(&r[0].e) == AIR_TX_IDLE && prov[0].qn == 0,
++	      "no transmit key: no clear fallback or queued symbols");
++	tx.trunk = true;
++	begin(0, &tx, &has_key);
++	CHECK(!nxdn_engine_tx_prepare(&r[0].e), "scrambler does not transmit on Type-C");
++#if CONFIG_AIR_AES
++	tx.trunk = false;
++	tx.aes_tx = true;
++	begin(0, &tx, &has_key);
++	CHECK(!nxdn_engine_tx_prepare(&r[0].e), "ambiguous AES and scrambler selection is refused");
++#endif
++}
++#endif
++
+ int main(void)
+ {
+ 	testCall(false);
+@@ -851,6 +898,10 @@ int main(void)
+ #if CONFIG_AIR_AES
+ 	testAes(false);
+ 	testAes(true);
++#endif
++#if CONFIG_NXDN_SCRAMBLER
++	testScramble(false);
++	testScramble(true);
+ #endif
+ 	testSquelch();
+ 	testAllCall();
+diff --git a/tests/host/nxdnScrambleTest.c b/tests/host/nxdnScrambleTest.c
+new file mode 100644
+index 0000000..b8849e0
+--- /dev/null
++++ b/tests/host/nxdnScrambleTest.c
+@@ -0,0 +1,85 @@
++// SPDX-License-Identifier: MIT
++// Copyright (c) 2026 The RadioFoundry Authors
++#include <stdio.h>
++#include <string.h>
++#include "nxdn/nxdn_scramble.h"
++#include "dmr/ambe/ambeFec.h"
++
++int main(void)
++{
++	uint8_t bits[49] = { 0 }, before[49];
++	// NXDN TS 1-D v1.3, 7.2.2.1: all 20 bytes of the key-1 UDCH example.
++	// Consecutive EHR positions take consecutive 49-bit slices of the same keystream.
++	static const uint8_t plain_data[] = "ABCDEFGHIJKLMNOPQRST";
++	static const uint8_t scrambled_data[] = {
++		0xc1, 0x43, 0x43, 0x42, 0x45, 0x52, 0x47, 0x30, 0x48, 0x5a,
++		0x4d, 0x2c, 0x58, 0x0e, 0x30, 0xd1, 0x50, 0x54, 0x55, 0x40,
++	};
++	for (unsigned pos = 0; pos * sizeof bits < 8 * sizeof scrambled_data; pos++) {
++		memset(bits, 0, sizeof bits);
++		if (!nxdn_scramble_ehr(1, (uint8_t)(pos / 4), (uint8_t)(pos % 4), bits))
++			return 1;
++		for (unsigned i = 0; i < sizeof bits; i++) {
++			unsigned bit = pos * sizeof bits + i;
++			if (bit >= 8 * sizeof scrambled_data)
++				break;
++			unsigned expected = (plain_data[bit / 8] ^ scrambled_data[bit / 8]) >> (7 - bit % 8);
++			if (bits[i] != (expected & 1u))
++				return puts("FAIL standard UDCH vector"), 1;
++		}
++		if (!nxdn_scramble_ehr(1, (uint8_t)(pos / 4), (uint8_t)(pos % 4), bits))
++			return 1;
++		for (unsigned i = 0; i < sizeof bits; i++)
++			if (bits[i])
++				return puts("FAIL reversible"), 1;
++	}
++	memset(bits, 0, sizeof bits);
++	if (!nxdn_scramble_ehr(32767, 3, 3, bits))
++		return puts("FAIL maximum key"), 1;
++	{
++		// NXDN TS 1-D v1.3, 7.2.1.1: the EHR 1031 Hz tone with key 1.
++		const uint8_t plain[7] = { 0xfe, 0xe2, 0x12, 0x12, 0x12, 0x10, 0x00 };
++		static const uint8_t expected_voice[16][9] = {
++			{ 0x2a, 0xac, 0xf8, 0xc7, 0xcc, 0xa0, 0x84, 0x74, 0x64 },
++			{ 0xec, 0x8e, 0xff, 0xd1, 0x27, 0x58, 0x56, 0xa4, 0x8a },
++			{ 0xa0, 0x80, 0xd2, 0x9d, 0xac, 0xe0, 0x81, 0xec, 0x62 },
++			{ 0x9f, 0x14, 0xfd, 0xc3, 0x2d, 0x06, 0xb1, 0x64, 0x4d },
++			{ 0xb7, 0x7d, 0xa5, 0x30, 0xf7, 0x31, 0x39, 0x0c, 0xc8 },
++			{ 0xac, 0xcc, 0x99, 0xf7, 0x53, 0x20, 0xb0, 0xa4, 0x06 },
++			{ 0xc1, 0xd0, 0x5f, 0x61, 0x88, 0x84, 0x01, 0x65, 0xef },
++			{ 0xf5, 0x0a, 0xfd, 0xc5, 0x3c, 0x4a, 0x55, 0x68, 0x50 },
++			{ 0x90, 0x79, 0x62, 0xd4, 0x90, 0x35, 0x32, 0x63, 0xb8 },
++			{ 0x95, 0x7b, 0x84, 0x04, 0x78, 0xe8, 0x76, 0xce, 0x6c },
++			{ 0xe2, 0x86, 0xa4, 0xe7, 0xce, 0xa4, 0x81, 0x20, 0x2e },
++			{ 0x12, 0x8c, 0xbd, 0x81, 0x0b, 0x03, 0xf4, 0xa7, 0xe8 },
++			{ 0xf5, 0x5f, 0xf2, 0x1a, 0x19, 0x9d, 0x64, 0x40, 0x20 },
++			{ 0x4f, 0x48, 0x9c, 0x91, 0xb0, 0xa7, 0x88, 0x2f, 0xda },
++			{ 0xde, 0x27, 0x56, 0xa9, 0xc2, 0x8a, 0x23, 0xcb, 0x8d },
++			{ 0x0e, 0x8c, 0xbd, 0x83, 0x5c, 0x2f, 0x1c, 0x36, 0x64 },
++		};
++		uint8_t voice[9], original[9];
++
++		for (unsigned i = 0; i < 49; i++)
++			bits[i] = (uint8_t)((plain[i / 8] >> (7 - i % 8)) & 1u);
++		ambeFecEncode(bits, original);
++		for (uint8_t pos = 0; pos < 16; pos++) {
++			memcpy(voice, original, sizeof voice);
++			if (!nxdn_scramble_vch(1, pos / 4, pos % 4, voice) ||
++			    memcmp(voice, expected_voice[pos], sizeof voice))
++				return puts("FAIL standard EHR vector"), 1;
++			if (!nxdn_scramble_vch(1, pos / 4, pos % 4, voice) || memcmp(voice, original, sizeof voice))
++				return puts("FAIL voice round trip"), 1;
++		}
++		voice[0] ^= 0x80;
++		if (!nxdn_scramble_vch(1, 0, 0, voice) || memcmp(voice, expected_voice[0], sizeof voice))
++			return puts("FAIL voice FEC correction"), 1;
++	}
++	memset(bits, 0x5a, sizeof bits);
++	memcpy(before, bits, sizeof bits);
++	if (nxdn_scramble_ehr(0, 0, 0, bits) || nxdn_scramble_ehr(32768, 0, 0, bits) ||
++	    nxdn_scramble_ehr(1, 4, 0, bits) || nxdn_scramble_ehr(1, 0, 4, bits) ||
++	    memcmp(bits, before, sizeof bits))
++		return puts("FAIL validation"), 1;
++	puts("nxdnScrambleTest: passed");
++	return 0;
++}
+diff --git a/tests/host/radioCoreTest.c b/tests/host/radioCoreTest.c
+index d6e6515..c1bf745 100644
+--- a/tests/host/radioCoreTest.c
++++ b/tests/host/radioCoreTest.c
+@@ -8454,10 +8454,22 @@ static bool nfar_iv(uint8_t iv[8], void *ctx)
+ 	return true;
+ }
+ #endif
++#if CONFIG_NXDN_SCRAMBLER
++static bool nfar_scramble_tx;
++static uint8_t nfar_scramble_id;
++static uint16_t nfar_scramble_key(uint8_t id, void *ctx)
++{
++	(void)ctx;
++	return id == 4 ? 0x1234 : id == 7 ? 0x3210 : id == 8 ? 0x1A2B : 0;
++}
++#endif
+ static const nxdn_engine_hooks_t nfar_hooks = { .rx_start = nf_start, .rx_update = nf_update, .rx_voice = nf_voice,
+ 						.rx_end = nf_end, .tx_voice = nf_tx,
+ #if CONFIG_AIR_AES
+-						.tx_iv = nfar_iv
++						.tx_iv = nfar_iv,
++#endif
++#if CONFIG_NXDN_SCRAMBLER
++						.scramble_key = nfar_scramble_key,
+ #endif
+ };
+ 
+@@ -8498,6 +8510,10 @@ static void nfar_begin(bool rate9600, uint8_t ran, uint16_t unit, bool unit_call
+ 	c.aes_key = nfar_key;
+ 	c.aes_kid = nfar_kid;
+ 	c.aes_tx = nfar_key != NULL;
++#endif
++#if CONFIG_NXDN_SCRAMBLER
++	c.scramble_tx = nfar_scramble_tx;
++	c.scramble_kid = nfar_scramble_id;
+ #endif
+ 	ambeFecEncode(zero, zero_frame);
+ 	if (nfar_running) {
+@@ -8890,11 +8906,22 @@ uint16_t nxdn_radio_unit_id(void)
+ 
+ bool nxdn_conv_load(uint16_t number, const channel_t *ch, nxdn_conv_cfg_t *out)
+ {
+-	if (ch->kind != CODEPLUG_KIND_NXDN || number < 1 || number > NCH)
++	if (!nxdn_cp_kind(ch->kind) || number < 1 || number > NCH)
+ 		return false;
+ 	*out = stored_nxdn[number];
+ 	return true;
+ }
++
++#if CONFIG_NXDN_SCRAMBLER
++void nxdn_scrambler_keyring(uint16_t keys[NXDN_CP_KID_MAX + 1u])
++{
++	for (uint8_t id = 0; id <= NXDN_CP_KID_MAX; id++) {
++		uint8_t seed[2];
++		keys[id] = codeplug_traffic_key(CODEPLUG_SYSTEM_NONE, NXDN_CIPHER_SCRAMBLE, id, seed, sizeof seed) == sizeof seed ?
++			   (uint16_t)(seed[0] | seed[1] << 8) : 0u;
++	}
++}
++#endif
+ // A plain channel in NXDN saved as a stored one: the record and block it was given
+ static struct { uint16_t number; channel_t ch; nxdn_conv_t conv; } nxdn_saved;
+ bool nxdn_conv_save(uint16_t number, const channel_t *ch, const nxdn_conv_t *conv)
+@@ -9643,9 +9670,75 @@ static void test_nxdn_trunk_rx_only(void)
+ 	board_rx_ext_set(false);
+ }
+ 
++static void test_nxdn_scrambler(void)
++{
++	setup_codeplug_nxdn();
++	add(3, "NXDN scrambler", 446100000, RADIO_MODE_DMR, false, 2);
++	chans[3].kind = CODEPLUG_KIND_NXDN_SCRAMBLER;
++	chans[3].system = CODEPLUG_SYSTEM_NONE;
++	stored_nxdn[3] = (nxdn_conv_cfg_t){ .conv = { .rate9600 = true, .scramble = true, .kid = 4, .tx_ran = 1 },
++					    .unit_id = 4321, .target = 20 };
++	start();
++	aud.feed = true;
++	int before = hw.tx_calls;
++#if CONFIG_NXDN_SCRAMBLER
++	const uint8_t key4[] = { CODEPLUG_SYSTEM_NONE, NXDN_CIPHER_SCRAMBLE, 4, 0, 0, 0x34, 0x12 };
++	const uint8_t key7[] = { CODEPLUG_SYSTEM_NONE, NXDN_CIPHER_SCRAMBLE, 7, 0, 0, 0x10, 0x32 };
++	kv_t3_clear();
++	kv_t3_set(CODEPLUG_KEY_TRAFFIC, key4, sizeof key4);
++	kv_t3_set(CODEPLUG_KEY_TRAFFIC + 1, key7, sizeof key7);
++	for (int rate = 0; rate <= 1; rate++) {
++		stored_nxdn[3].conv.rate9600 = rate != 0;
++		req(RREQ_ZONE_POS, 0);
++		req(RREQ_ZONE_POS, 2);
++		CHECK(radio_nxdn_running() && sm.view.ch.kind == CODEPLUG_KIND_NXDN_SCRAMBLER);
++		CHECK(((sm.view.nxdn.flags & RADIO_NXDN_9600) != 0) == (rate != 0));
++		nfar_scramble_tx = true;
++		nfar_scramble_id = 7; // RX uses the call's different installed key, not the TX selection.
++		nfar_begin(rate != 0, 1, 2001, false, 20);
++		CHECK(nxdn_engine_tx_prepare(&nfar) && nxdn_engine_tx_go(&nfar));
++		nfar_tx = true;
++		run(1100);
++		CHECK((sm.view.nxdn.flags & (RADIO_NXDN_ENC | RADIO_NXDN_PLAYED)) == (RADIO_NXDN_ENC | RADIO_NXDN_PLAYED));
++		nxdn_engine_tx_stop(&nfar);
++		run(550);
++		nfar_scramble_id = 8;
++		nfar_begin(rate != 0, 1, 2001, false, 20);
++		CHECK(nxdn_engine_tx_prepare(&nfar) && nxdn_engine_tx_go(&nfar));
++		nfar_tx = true;
++		run(1100);
++		CHECK((sm.view.nxdn.flags & (RADIO_NXDN_ENC | RADIO_NXDN_PLAYED)) == RADIO_NXDN_ENC);
++		nxdn_engine_tx_stop(&nfar);
++		run(550);
++		nfar_scramble_tx = false;
++		nfar_begin(rate != 0, 1, 2001, false, 20);
++		req(RREQ_PTT, 1);
++		CHECK(sm.view.state == RS_TX && hw.keyed);
++		run(1550);
++		req(RREQ_PTT, 0);
++		run(600);
++		CHECK(nfar_heard.call.vcall.cipher == NXDN_CIPHER_SCRAMBLE && nfar_heard.call.vcall.key_id == 4);
++		CHECK(nfar_heard.voice >= 30 && nfar_heard.enc >= 20);
++	}
++	nfar_stop();
++	before = hw.tx_calls;
++	// Deleting the stored key while still tuned refuses PTT without a channel change.
++	kv_t3_clear();
++#else
++	req(RREQ_ZONE_POS, 2);
++#endif
++	req(RREQ_PTT, 1);
++	CHECK(sm.view.state == RS_TX_DENIED && !hw.keyed && hw.tx_calls == before);
++	CHECK(sm.view.tx_deny == (CONFIG_NXDN_SCRAMBLER ? TXDENY_REFUSED : TXDENY_MODE));
++	req(RREQ_PTT, 0);
++	nxdn_defaults();
++	memset(stored_nxdn, 0, sizeof stored_nxdn);
++}
++
+ static void test_nxdn(void)
+ {
+ 	test_nxdn_rx();
++	test_nxdn_scrambler();
+ 	test_nxdn_trunk_rx_only();
+ 	test_nxdn_monitor();
+ #if CONFIG_AIR_AES
+diff --git a/tests/host/sim/ui_sim.c b/tests/host/sim/ui_sim.c
+index 93c1b4c..a334329 100644
+--- a/tests/host/sim/ui_sim.c
++++ b/tests/host/sim/ui_sim.c
+@@ -774,6 +774,10 @@ bool ui_svc_write_channel_air(uint16_t number, const channel_t *ch, uint16_t fro
+ 		c.kind = c.mode == RADIO_MODE_P25 ? CODEPLUG_KIND_P25 : CODEPLUG_KIND_NXDN;
+ 		c.mode = RADIO_MODE_DMR;	// the stand-in record
+ 	}
++#if CONFIG_NXDN_SCRAMBLER
++	if (nxdn_cp_kind(c.kind))
++		c.kind = conv->nxdn.scramble ? CODEPLUG_KIND_NXDN_SCRAMBLER : CODEPLUG_KIND_NXDN;
++#endif
+ 	int i = sim_write(number, &c);
+ 	if (i < 0)
+ 		return false;
+@@ -861,9 +865,16 @@ bool codeplug_channel(uint16_t number, channel_t *out)
+ 	return true;
+ }
+ 
+-#if CONFIG_AIR_AES
++#if CONFIG_NXDN_SCRAMBLER
++static bool sim_scrambler_key;
++#endif
++#if CONFIG_AIR_AES || CONFIG_NXDN_SCRAMBLER
+ int codeplug_key_step(uint8_t alg, uint8_t bytes, int32_t current, int dir, uint16_t min, uint16_t max)
+ {
++#if CONFIG_NXDN_SCRAMBLER
++	if (alg == 1 && bytes == 2)
++		return sim_scrambler_key && min <= 7 && max >= 7 && (dir > 0 ? current < 7 : current < 0 || current > 7) ? 7 : -1;
++#endif
+ 	uint16_t id = alg == 0x84 ? 0x1234 : alg == 3 ? 0 : alg == 0x21 ? 9 : alg == 0x24 ? 98 : 7;
+ 	if (bytes != (alg == 0x21 ? 5 : alg == 0x24 ? 16 : 32))
+ 		return -1;
+@@ -901,7 +912,7 @@ bool radio_nxdn_fits(void) { return nxdn_radio; }
+ // A stored NXDN channel's set-up (nxdn_codeplug.c): 9600 bit/s, RAN 1, unless the editor saved a block
+ bool nxdn_conv_load(uint16_t number, const channel_t *ch, nxdn_conv_cfg_t *out)
+ {
+-	if (ch->kind != CODEPLUG_KIND_NXDN)
++	if (!nxdn_cp_kind(ch->kind))
+ 		return false;
+ 	memset(out, 0, sizeof *out);
+ 	out->conv = (nxdn_conv_t){ .rate9600 = true, .rx_ran = 1, .tx_ran = 1, .squelch = NXDN_SQUELCH_RAN };
+@@ -2638,6 +2649,9 @@ void sim_reset(const sim_geom_t *g, sim_map_t map)
+ 	view.volume_src = RVOL_KNOB;
+ 	p25_radio = false;
+ 	nxdn_radio = false;
++#if CONFIG_NXDN_SCRAMBLER
++	sim_scrambler_key = false;
++#endif
+ #if CONFIG_NXDN
+ 	memset(&view.nxdn, 0, sizeof view.nxdn);
+ 	view.nxdn.flags = RADIO_NXDN_9600;	// the NXDN settings' defaults (radio_nxdn.c): 9600 bit/s, RAN 1, group 1
+@@ -2908,6 +2922,15 @@ static bool check(const char *kv, char *err, size_t len)
+ 	}
+ 	else if (strcmp(key, "temporary") == 0) snprintf(got, sizeof got, "%u", view.temporary);
+ 	else if (strcmp(key, "writes") == 0) snprintf(got, sizeof got, "%u", (unsigned)sim_rec.codeplug_writes);
++#if CONFIG_NXDN_SCRAMBLER
++	else if (strcmp(key, "saved_scrambler_id") == 0) {
++		const ui_air_conv_t *saved = sim_air(41);
++		const channel_t *c = sim_edit(41);
++		int id = c != NULL && c->kind == CODEPLUG_KIND_NXDN_SCRAMBLER && saved != NULL && saved->nxdn.scramble ?
++			 saved->nxdn.kid : -1;
++		snprintf(got, sizeof got, "%d", id);
++	}
++#endif
+ 	else if (strcmp(key, "saved_rxonly_hz") == 0) {
+ 		const channel_t *saved = n_edits ? &sim_edits[n_edits - 1].ch : NULL;
+ 		snprintf(got, sizeof got, "%u", saved != NULL && saved->rx_only ? (unsigned)saved->rx_hz : 0);
+@@ -3726,6 +3749,12 @@ static bool run_token(char *t, char *err, size_t len)
+ 		nxdn_radio = true;
+ 		return true;
+ 	}
++#if CONFIG_NXDN_SCRAMBLER
++	if (strcmp(t, "scrambler-key") == 0) {
++		sim_scrambler_key = true;
++		return true;
++	}
++#endif
+ 	if (strcmp(t, "hwopt") == 0) {		// this radio has hardware options (sim_hwopts)
+ 		board.hwopts = sim_hwopts;
+ 		board.hwopt_count = 2;
+diff --git a/tests/host/uiFlowTest.c b/tests/host/uiFlowTest.c
+index 8e2c0e6..208412b 100644
+--- a/tests/host/uiFlowTest.c
++++ b/tests/host/uiFlowTest.c
+@@ -177,6 +177,10 @@ static const flow_t flows[] = {
+ 	  "focus=Trunk shows=Group", 1, false },
+ 	{ "NXDN trunk: every group", "dlmode:nxdn ok 5 up up up ok down down down down down", "ok ok",
+ 	  "focus=Trunk shows=All_groups", 2, false },
++#if CONFIG_NXDN_SCRAMBLER
++	{ "NXDN scrambler installed key", "scrambler-key dlmode:nxdn ok 5 up up up ok up up", "ok up ok long:ok",
++	  "writes=1 saved_scrambler_id=7 toast=Saved_as_channel_41", 4, true },
++#endif
+ 	{ "NXDN RAN: saved with the channel", "dlmode:nxdn ok 5 up up up ok down down down ok 1 7 ok", "long:ok",
+ 	  "writes=1 toast=Saved_as_channel_41", 1, true },
+ 	// From NXDN 9600 the row goes to FM, then round through DMR and P25 to NXDN at 4800 and back to 9600

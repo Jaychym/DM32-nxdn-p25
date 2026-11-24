@@ -7,7 +7,7 @@
 Unete a mi grupo de telegram <https://t.me/+fGNVb8mR-eliYmMx>
 
 Firmware abierto y multimodo para el **Baofeng DM-32UV**: FM, AM, DMR (Tier II y **Tier III troncal**), **APCO P25 fase 1**,
-**NXDN48/NXDN96** y **YSF (V/D-1, DN y VW)**, con **AES-256** en DMR, P25 y NXDN y **ARC4 Motorola** en DMR. Desde el 17 de noviembre de 2026 se compila sobre
+**NXDN48/NXDN96** y **YSF (V/D-1, DN y VW)**, con **AES-256** en DMR, P25 y NXDN y **AES-128** y **ARC4 Motorola** en DMR. Desde el 17 de noviembre de 2026 se compila sobre
 [RadioFoundry](https://github.com/RadioFoundry/RadioFoundry) actual (commit `e89121e9`), que ya trae P25 y NXDN, más
 los cambios de esta rama en [`integration/current/base.patch`](integration/current/base.patch). Deriva de
 [Open25-DM32](https://github.com/tylerwatt12/Open25-DM32) (tylerwatt12). La mantiene **lyra XE1POC**.
@@ -71,7 +71,7 @@ Para cambiar el grupo sin editar el codeplug, abre **Menú rápido › TG** en e
 
 1. En el CPS de Baofeng, abre **Digital Encrypt Systems** y consulta la clave **AES256** de 32 bytes y su número en la columna **Encryption ID**. Usa el valor completo de 64 caracteres hexadecimales del editor de la clave. La cuadrícula puede ocultar los primeros ocho.
 2. En el CPS web, abre **Radio → Claves AES-256**, registra el mismo valor para **DMR** con ese **ID de clave** y selecciónalo en cada canal que lo use. Por ejemplo, una clave en la fila **No. 1** con **Encryption ID 4** debe quedar como **ID 4**.
-3. Guarda el codeplug y comprueba una llamada en cada sentido con el mismo grupo, CC y ranura. Para este procedimiento ambos radios deben usar AES-256. **AES-128 no está implementado** ([#47](../../issues/47)); **ARC4** sí está disponible como clave DMR Motorola de 5 bytes ([#28](../../issues/28)).
+3. Guarda el codeplug y comprueba una llamada en cada sentido con el mismo grupo, CC y ranura. Para este procedimiento ambos radios deben usar AES-256. Para AES-128, selecciona el tipo **DMR AES-128** y una clave de 32 dígitos hexadecimales en ambos radios ([#47](../../issues/47)). **ARC4** usa una clave DMR Motorola de 5 bytes ([#28](../../issues/28)).
 
 El importador de respaldos de fábrica requiere volver a cargar y asignar las claves manualmente. La ubicación de **Encryption ID** en el archivo `.data` sigue por confirmar. [Reporte de interoperabilidad y formato del respaldo](../../issues/42)
 

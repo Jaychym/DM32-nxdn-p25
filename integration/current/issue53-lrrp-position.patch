@@ -1,0 +1,942 @@
+diff --git a/core/dmr/dmrDataService.c b/core/dmr/dmrDataService.c
+index 4ab0c95..6e906c0 100644
+--- a/core/dmr/dmrDataService.c
++++ b/core/dmr/dmrDataService.c
+@@ -97,8 +97,8 @@ static void unlock(void)
+ // --- The burst list being sent ---
+ 
+ // What the list on air is for, so that its end reaches the right owner
+-enum { TXK_OTHER, TXK_SMS, TXK_SIGNAL, TXK_ARS, TXK_REPLY, TXK_EMERGENCY, TXK_IP, TXK_UDP, TXK_COUNT };
+-static const char *const txKindNames[TXK_COUNT] = { "other", "sms", "signal", "ars", "reply", "emergency", "ip", "udp" };
++enum { TXK_OTHER, TXK_SMS, TXK_SIGNAL, TXK_ARS, TXK_REPLY, TXK_EMERGENCY, TXK_IP, TXK_UDP, TXK_LRRP, TXK_COUNT };
++static const char *const txKindNames[TXK_COUNT] = { "other", "sms", "signal", "ars", "reply", "emergency", "ip", "udp", "lrrp" };
+ 
+ DMR_DATA_BUFFER static dmrBurst_t txBursts[DMR_DATA_MAX_BURSTS];
+ static int txBurstCount = 0;
+@@ -249,13 +249,15 @@ DMR_DATA_BUFFER static dmrDataMessage_t inbox[DMR_DATA_INBOX_SIZE];
+ static uint8_t inboxNewest = 0;
+ static uint8_t inboxUsed = 0;
+ 
+-static void post(uint8_t kind, uint32_t id)
++static void post_with_position(uint8_t kind, uint32_t id, int32_t lat, int32_t lon)
+ {
+ 	lock();
+ 	lastEvent.serial++;
+ 	lastEvent.kind = kind;
+ 	lastEvent.id = id;
+ 	lastEvent.atMs = now;
++	lastEvent.lat_e7 = lat;
++	lastEvent.lon_e7 = lon;
+ 	dataSerial++;
+ 	dmrDataEvent_t copy = lastEvent;
+ 	unlock();
+@@ -265,6 +267,11 @@ static void post(uint8_t kind, uint32_t id)
+ 	}
+ }
+ 
++static void post(uint8_t kind, uint32_t id)
++{
++	post_with_position(kind, id, 0, 0);
++}
++
+ static bool canTransmit(void)
+ {
+ 	return channel.canTransmit && (channel.ownId != 0);
+@@ -1673,8 +1680,93 @@ bool dmrDataServiceOwnPosition(lrrpPosition_t *position)
+ 	return havePosition(position);
+ }
+ 
++#if CONFIG_DMR_LRRP
++#define LRRP_QUERY_START_MS 2000u
++#define LRRP_QUERY_REPLY_MS 12000u
++
++static struct {
++	uint32_t queued, dst;  // API under the service lock, then radio task while dst is nonzero
++	uint32_t token, serial, channel, own, since;
++	bool submitted, sent;
++} lrrpQuery;
++
++bool dmr_lrrp_request_position(uint32_t dst)
++{
++	if (dst == 0 || dst > 0xffffffu)
++		return false;
++	lock();
++	bool ok = channel.ownId != 0 && dst != channel.ownId && lrrpQuery.queued == 0 && lrrpQuery.dst == 0;
++	if (ok) {
++		lrrpQuery.queued = dst;
++		lrrpQuery.channel = channel.channelKey;
++		lrrpQuery.own = channel.ownId;
++	}
++	unlock();
++	return ok;
++}
++
++static void lrrpQueryEnd(uint8_t kind, int32_t lat, int32_t lon)
++{
++	lock();
++	uint32_t dst = lrrpQuery.dst;
++	lrrpQuery.dst = 0;
++	lrrpQuery.submitted = lrrpQuery.sent = false;
++	unlock();
++	if (dst != 0)
++		post_with_position(kind, dst, lat, lon);
++}
++
++static bool lrrpQueryCurrent(void)
++{
++	return lrrpQuery.channel == channel.channelKey && lrrpQuery.own == channel.ownId;
++}
++
++static void lrrpQueryTick(void)
++{
++	if (lrrpQuery.dst == 0) {
++		lock();
++		lrrpQuery.dst = lrrpQuery.queued;
++		lrrpQuery.queued = 0;
++		unlock();
++		if (lrrpQuery.dst == 0)
++			return;
++		if (lrrpQuery.serial == 0)
++			lrrpQuery.serial = now ^ channel.channelKey ^ channel.ownId;
++		lrrpQuery.token = ++lrrpQuery.serial;
++		lrrpQuery.since = now;
++		lrrpQuery.submitted = lrrpQuery.sent = false;
++	}
++	uint32_t limit = lrrpQuery.sent ? LRRP_QUERY_REPLY_MS : LRRP_QUERY_START_MS;
++	if (passthrough || !lrrpQueryCurrent() || now - lrrpQuery.since >= limit ||
++	    (!lrrpQuery.submitted && !canTransmit())) {
++		if (txKind == TXK_LRRP && !txRunning)
++			txPending = false;  // a request cannot start on a new channel after the user retunes
++		lrrpQueryEnd(DMR_DATA_EV_POSITION_FAILED, 0, 0);
++		return;
++	}
++	if (!lrrpQuery.submitted && !dmrDataServiceIsBusy()) {
++		uint8_t doc[LRRP_MAX_DOCUMENT];
++		int n = lrrpBuildImmediateRequest(lrrpQuery.token, doc);
++		if (sendUDP(false, lrrpQuery.dst, DMR_UDP_PORT_LRRP, DMR_UDP_PORT_LRRP, doc, n, DMR_TYPE_RATE_1_2, TXK_LRRP)) {
++			lrrpQuery.since = now;
++			lrrpQuery.submitted = true;
++		}
++	}
++}
++#endif
++
+ static void lrrpReceived(uint32_t src, const uint8_t *payload, int length)
+ {
++#if CONFIG_DMR_LRRP
++	if (lrrpQuery.sent && lrrpQuery.dst == src && lrrpQueryCurrent()) {
++		bool fix;
++		int32_t lat, lon;
++		if (lrrpDecodeImmediateReport(payload, length, lrrpQuery.token, &fix, &lat, &lon)) {
++			lrrpQueryEnd(fix ? DMR_DATA_EV_POSITION : DMR_DATA_EV_POSITION_NO_FIX, lat, lon);
++			return;
++		}
++	}
++#endif
+ 	uint8_t next = (lrrpWriteIdx + 1) % LRRP_QUEUE_SIZE;
+ 	lrrpPendingRequest_t *pending = &lrrpQueue[lrrpWriteIdx];
+ 
+@@ -2035,6 +2127,12 @@ static void txGiveUp(void)
+ 		case TXK_IP:
+ 			ipTxDone(false);
+ 			break;
++#if CONFIG_DMR_LRRP
++		case TXK_LRRP:
++			if (lrrpQuery.submitted)
++				lrrpQueryEnd(DMR_DATA_EV_POSITION_FAILED, 0, 0);
++			break;
++#endif
+ #if DMR_DATA_UDP_API
+ 		case TXK_UDP:
+ 			udpTxDone(false);
+@@ -2056,7 +2154,9 @@ void dmrDataServiceTick(uint32_t nowMs, const dmrDataChannel_t *ch)
+ 	}
+ 	if (ch != NULL)
+ 	{
++		lock();  // publish the channel identity together with the RX/TX attributes
+ 		channel = *ch;
++		unlock();
+ 	}
+ 
+ 	takeMailbox();
+@@ -2133,6 +2233,9 @@ void dmrDataServiceTick(uint32_t nowMs, const dmrDataChannel_t *ch)
+ #endif
+ 	arsTick();
+ 	lrrpTick();
++#if CONFIG_DMR_LRRP
++	lrrpQueryTick();
++#endif
+ 	// Confirmed data to us whose last blocks never came (lost bursts): what is missing is asked for
+ 	if (dmrDataRxConfirmedActive() && ((now - lastBlockWindow) > CNF_RX_STALL_MS))
+ 	{
+@@ -2212,6 +2315,18 @@ void dmrDataServiceTxDone(uint8_t err)
+ 		case TXK_IP:
+ 			ipTxDone(err == 0);
+ 			break;
++#if CONFIG_DMR_LRRP
++		case TXK_LRRP:
++			if (!lrrpQuery.submitted)
++				break;
++			if (err != 0) {
++				lrrpQueryEnd(DMR_DATA_EV_POSITION_FAILED, 0, 0);
++			} else {
++				lrrpQuery.sent = true;
++				lrrpQuery.since = now;
++			}
++			break;
++#endif
+ #if DMR_DATA_UDP_API
+ 		case TXK_UDP:
+ 			udpTxDone(err == 0);
+@@ -2758,6 +2873,9 @@ void dmrDataServiceInit(const dmrDataEnv_t *e)
+ 	txEnded = false;
+ 	txEndStamp = false;
+ 	dmrDataRxReset();
++#if CONFIG_DMR_LRRP
++	memset(&lrrpQuery, 0, sizeof lrrpQuery);
++#endif
+ }
+ 
+ void dmrDataServiceSetSettings(const dmrDataSettings_t *s)
+diff --git a/core/dmr/dmrDataService.h b/core/dmr/dmrDataService.h
+index 298c4d4..c08d792 100644
+--- a/core/dmr/dmrDataService.h
++++ b/core/dmr/dmrDataService.h
+@@ -98,6 +98,9 @@ typedef enum
+ 	DMR_DATA_EV_ZONE_SENT,					// id: the destination; our zone went out whole
+ 	DMR_DATA_EV_ZONE_FAILED,				// id: the destination; it couldn't be sent
+ 	DMR_DATA_EV_ZONE_REFUSED,				// id: the directory service; it answered our request with a refusal
++	DMR_DATA_EV_POSITION,					// id: peer, lat_e7 / lon_e7: reported coordinates
++	DMR_DATA_EV_POSITION_NO_FIX,			// id: peer responded without a usable fix
++	DMR_DATA_EV_POSITION_FAILED,			// id: no report, or request could not be sent
+ } dmrDataEventKind_t;
+ 
+ typedef struct
+@@ -106,6 +109,7 @@ typedef struct
+ 	uint8_t  kind;							// dmrDataEventKind_t
+ 	uint32_t id;
+ 	uint32_t atMs;
++	int32_t lat_e7, lon_e7;
+ } dmrDataEvent_t;
+ 
+ typedef enum { DMR_ARS_STATE_OFF, DMR_ARS_STATE_REGISTERING, DMR_ARS_STATE_REGISTERED, DMR_ARS_STATE_REFUSED, DMR_ARS_STATE_NO_ANSWER } dmrArsState_t;
+diff --git a/core/dmr/dmrLrrp.c b/core/dmr/dmrLrrp.c
+index 055c779..4bb8a0c 100644
+--- a/core/dmr/dmrLrrp.c
++++ b/core/dmr/dmrLrrp.c
+@@ -272,6 +272,86 @@ static int putRequestId(uint8_t *out, const uint8_t *requestId, int requestIdLen
+ 	return n + requestIdLength;
+ }
+ 
++#if CONFIG_DMR_LRRP
++int lrrpBuildImmediateRequest(uint32_t id, uint8_t out[LRRP_MAX_DOCUMENT])
++{
++	const uint8_t key[4] = { id >> 24, id >> 16, id >> 8, id };
++	uint8_t tokens[7];
++	int n = putRequestId(tokens, key, (int)sizeof key);
++	tokens[n++] = 0x50;  // request position with an accuracy radius
++	return finishDocument(0x05, tokens, n, out);
++}
++
++static uint32_t read_u32(reader_t *r)
++{
++	uint32_t v = 0;
++	for (unsigned i = 0; i < 4; i++)
++		v = (v << 8) | readByte(r);
++	return v;
++}
++
++bool lrrpDecodeImmediateReport(const uint8_t *payload, int length, uint32_t id,
++				       bool *fix, int32_t *lat, int32_t *lon)
++{
++	if (length < 2 || payload[0] != DOC_IMMEDIATE_RESPONSE)
++		return false;
++	reader_t r = { .d = payload, .i = 1, .end = length };
++	uint32_t n = readUintvar(&r);
++	if (r.error || n != (uint32_t)(length - r.i))
++		return false;
++	uint32_t result = LRRP_RESULT_SUCCESS, latitude = 0, longitude = 0;
++	bool matched = false, found = false, result_seen = false;
++	while (!r.error && r.i < r.end) {
++		switch (readByte(&r)) {
++		case TOK_REQUEST_ID:
++			if (matched || readUintvar(&r) != 4 || read_u32(&r) != id)
++				return false;
++			matched = true;
++			break;
++		case TOK_RESULT:
++			if (result_seen)
++				return false;
++			result = readUintvar(&r);
++			result_seen = true;
++			break;
++		case TOK_RESULT_OK:
++			if (result_seen)
++				return false;
++			result_seen = true;
++			break;
++		case TOK_POSITION_RADIUS:
++			if (found)
++				return false;
++			latitude = read_u32(&r);
++			longitude = read_u32(&r);
++			skipUfloatvar(&r);
++			found = true;
++			break;
++		case TOK_INFO_TIME:
++			for (unsigned i = 0; i < 5; i++)
++				readByte(&r);
++			break;
++		case TOK_DIRECTION:
++			readByte(&r);
++			break;
++		case TOK_SPEED_HOR:
++			skipUfloatvar(&r);
++			break;
++		default:
++			return false;
++		}
++	}
++	if (r.error || !matched || (!found && result == LRRP_RESULT_SUCCESS))
++		return false;
++	*fix = found && result == LRRP_RESULT_SUCCESS;
++	int32_t mag = (int32_t)((((uint64_t)latitude & 0x7fffffffu) * 900000000u + (1u << 30)) >> 31);
++	*lat = latitude >> 31 ? -mag : mag;
++	int64_t signed_lon = longitude >> 31 ? (int64_t)longitude - INT64_C(4294967296) : longitude;
++	*lon = (int32_t)(signed_lon * INT64_C(3600000000) / INT64_C(4294967296));
++	return true;
++}
++#endif
++
+ // A coordinate in 1e-7 degree, as dmr_gps_range takes it: minutes10000 / 600000 degree is minutes10000 * 50 / 3 in
+ // 1e-7, rounded half up
+ static int32_t e7Of(uint8_t degrees, uint32_t minutes10000, bool positive)
+diff --git a/core/dmr/dmrLrrp.h b/core/dmr/dmrLrrp.h
+index c7e029a..ba87b75 100644
+--- a/core/dmr/dmrLrrp.h
++++ b/core/dmr/dmrLrrp.h
+@@ -11,6 +11,7 @@
+ 
+ #include <stdbool.h>
+ #include <stdint.h>
++#include "config.h"
+ #include "dmr/dmrData.h"
+ 
+ #define LRRP_REQUEST_ID_MAX			16
+@@ -65,6 +66,13 @@ typedef struct
+ 
+ bool lrrpDecodeRequest(const uint8_t *payload, int length, lrrpRequest_t *request);
+ 
++#if CONFIG_DMR_LRRP
++// One immediate request with a four-byte transaction ID. Accept only a matching immediate report.
++int lrrpBuildImmediateRequest(uint32_t id, uint8_t out[LRRP_MAX_DOCUMENT]);
++bool lrrpDecodeImmediateReport(const uint8_t *payload, int length, uint32_t id,
++				       bool *fix, int32_t *lat, int32_t *lon);
++#endif
++
+ // The answers, each returns the document's length (0 if it doesn't fit). position may be NULL (no fix): the answer
+ // then carries LRRP_RESULT_NO_FIX
+ int lrrpBuildImmediateResponse(const lrrpRequest_t *request, const lrrpPosition_t *position, uint8_t *out);
+diff --git a/core/dmr/dmr_data_api.h b/core/dmr/dmr_data_api.h
+index db7cd9b..c26a2d4 100644
+--- a/core/dmr/dmr_data_api.h
++++ b/core/dmr/dmr_data_api.h
+@@ -80,6 +80,11 @@ bool dmr_data_send_udp(uint32_t dst, bool group, uint16_t src_port, uint16_t dst
+ dmr_req_state_t dmr_data_udp_state(void);
+ #endif
+ 
++#if CONFIG_DMR_LRRP
++// Ask for one position from a cooperating unit on the current channel. Safe from any task.
++bool dmr_lrrp_request_position(uint32_t dst);
++#endif
++
+ // --- Status ---
+ uint32_t dmr_data_serial(void);		// bumped on every event and inbox change
+ dmrDataEvent_t dmr_data_last_event(void);
+@@ -103,7 +108,7 @@ static inline bool dmr_signal_radio_check(uint32_t dst) { (void)dst; return fals
+ static inline dmr_req_state_t dmr_signal_state(uint8_t *kind, uint32_t *dst)
+ { if (kind) *kind = 0; if (dst) *dst = 0; return DMR_REQ_IDLE; }
+ static inline uint32_t dmr_data_serial(void) { return 0; }
+-static inline dmrDataEvent_t dmr_data_last_event(void) { dmrDataEvent_t e = { 0, 0, 0, 0 }; return e; }
++static inline dmrDataEvent_t dmr_data_last_event(void) { dmrDataEvent_t e = { 0 }; return e; }
+ static inline void dmr_data_get_settings(dmrDataSettings_t *out) { (void)out; }
+ static inline void dmr_data_set_settings(const dmrDataSettings_t *in) { (void)in; }
+ static inline dmrArsState_t dmr_data_ars_state(void) { return DMR_ARS_STATE_OFF; }
+diff --git a/core/ui/lang/es.po b/core/ui/lang/es.po
+index 7b32704..5ebbca1 100644
+--- a/core/ui/lang/es.po
++++ b/core/ui/lang/es.po
+@@ -127,6 +127,16 @@ msgctxt "BANNER_OFF_OR_OUT_OF_RANGE"
+ msgid "Off or out of range: try later"
+ msgstr "Apagada o fuera de alcance"
+ 
++#: core/ui/ui_app.c
++msgctxt "POS_QUERY_NO_FIX"
++msgid "No usable fix"
++msgstr "Sin posición GPS válida"
++
++#: core/ui/ui_app.c
++msgctxt "POS_QUERY_NO_REPORT"
++msgid "No position received"
++msgstr "Sin respuesta de posición"
++
+ #: core/ui/ui_app.c
+ msgctxt "HOTSPOT_BANNER_STARTED_BY_HOST"
+ msgid "Hotspot started by host"
+@@ -1577,6 +1587,21 @@ msgctxt "WHY_POS_REQUESTS_NOT_IN_BUILD"
+ msgid "Position requests: not in this build"
+ msgstr "Pedir posición: no disponible"
+ 
++#: core/ui/ui_menus.c
++msgctxt "POS_QUERY_NEEDS_DMR"
++msgid "Use a transmit-enabled DMR channel"
++msgstr "Usa un canal DMR con TX"
++
++#: core/ui/ui_menus.c
++msgctxt "POS_QUERY_WAIT"
++msgid "Requesting position"
++msgstr "Consultando posición"
++
++#: core/ui/ui_menus.c
++msgctxt "POS_QUERY_BUSY"
++msgid "Position request busy"
++msgstr "Consulta de posición en curso"
++
+ #: core/ui/ui_menus.c
+ msgctxt "ACT_TOAST_ALREADY_IN_CONTACTS"
+ msgid "Already in your contacts"
+@@ -3892,11 +3917,6 @@ msgctxt "SET_LABEL_STATUS_LEDS"
+ msgid "Status LEDs"
+ msgstr "LED de estado"
+ 
+-#: core/ui/ui_menus.c
+-msgctxt "SET_LABEL_LANGUAGE"
+-msgid "Language"
+-msgstr "Idioma/Language"
+-
+ #: core/ui/ui_menus.c
+ msgctxt "SET_LABEL_HOME_ZONE"
+ msgid "Zone name on Home"
+@@ -3912,6 +3932,11 @@ msgctxt "SET_LABEL_HOME_COMPACT_DUAL"
+ msgid "Hide second watch pane"
+ msgstr "Ocultar segundo canal"
+ 
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_LANGUAGE"
++msgid "Language"
++msgstr "Idioma/Language"
++
+ #: core/ui/ui_menus.c
+ msgctxt "SET_LABEL_REPLY_WINDOW"
+ msgid "Reply window"
+diff --git a/core/ui/lang/fr.po b/core/ui/lang/fr.po
+index 0654714..a12f42b 100644
+--- a/core/ui/lang/fr.po
++++ b/core/ui/lang/fr.po
+@@ -127,6 +127,16 @@ msgctxt "BANNER_OFF_OR_OUT_OF_RANGE"
+ msgid "Off or out of range: try later"
+ msgstr "Hors portée/éteint"
+ 
++#: core/ui/ui_app.c
++msgctxt "POS_QUERY_NO_FIX"
++msgid "No usable fix"
++msgstr "Position GPS indisponible"
++
++#: core/ui/ui_app.c
++msgctxt "POS_QUERY_NO_REPORT"
++msgid "No position received"
++msgstr "Aucune position reçue"
++
+ #: core/ui/ui_app.c
+ msgctxt "HOTSPOT_BANNER_STARTED_BY_HOST"
+ msgid "Hotspot started by host"
+@@ -1577,6 +1587,21 @@ msgctxt "WHY_POS_REQUESTS_NOT_IN_BUILD"
+ msgid "Position requests: not in this build"
+ msgstr "Req. pos. indispo."
+ 
++#: core/ui/ui_menus.c
++msgctxt "POS_QUERY_NEEDS_DMR"
++msgid "Use a transmit-enabled DMR channel"
++msgstr "Canal DMR avec TX requis"
++
++#: core/ui/ui_menus.c
++msgctxt "POS_QUERY_WAIT"
++msgid "Requesting position"
++msgstr "Demande de position"
++
++#: core/ui/ui_menus.c
++msgctxt "POS_QUERY_BUSY"
++msgid "Position request busy"
++msgstr "Demande de position en cours"
++
+ #: core/ui/ui_menus.c
+ msgctxt "ACT_TOAST_ALREADY_IN_CONTACTS"
+ msgid "Already in your contacts"
+@@ -3892,11 +3917,6 @@ msgctxt "SET_LABEL_STATUS_LEDS"
+ msgid "Status LEDs"
+ msgstr "Voyants"
+ 
+-#: core/ui/ui_menus.c
+-msgctxt "SET_LABEL_LANGUAGE"
+-msgid "Language"
+-msgstr "Langue / Language"
+-
+ #: core/ui/ui_menus.c
+ msgctxt "SET_LABEL_HOME_ZONE"
+ msgid "Zone name on Home"
+@@ -3912,6 +3932,11 @@ msgctxt "SET_LABEL_HOME_COMPACT_DUAL"
+ msgid "Hide second watch pane"
+ msgstr "Masquer le second canal"
+ 
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_LANGUAGE"
++msgid "Language"
++msgstr "Langue / Language"
++
+ #: core/ui/ui_menus.c
+ msgctxt "SET_LABEL_REPLY_WINDOW"
+ msgid "Reply window"
+diff --git a/core/ui/lang/it.po b/core/ui/lang/it.po
+index 171ca24..9b27668 100644
+--- a/core/ui/lang/it.po
++++ b/core/ui/lang/it.po
+@@ -127,6 +127,16 @@ msgctxt "BANNER_OFF_OR_OUT_OF_RANGE"
+ msgid "Off or out of range: try later"
+ msgstr "Spenta o fuori portata: riprova"
+ 
++#: core/ui/ui_app.c
++msgctxt "POS_QUERY_NO_FIX"
++msgid "No usable fix"
++msgstr "Posizione GPS non valida"
++
++#: core/ui/ui_app.c
++msgctxt "POS_QUERY_NO_REPORT"
++msgid "No position received"
++msgstr "Nessuna posizione ricevuta"
++
+ #: core/ui/ui_app.c
+ msgctxt "HOTSPOT_BANNER_STARTED_BY_HOST"
+ msgid "Hotspot started by host"
+@@ -1577,6 +1587,21 @@ msgctxt "WHY_POS_REQUESTS_NOT_IN_BUILD"
+ msgid "Position requests: not in this build"
+ msgstr "Richieste posizione: non in questa build"
+ 
++#: core/ui/ui_menus.c
++msgctxt "POS_QUERY_NEEDS_DMR"
++msgid "Use a transmit-enabled DMR channel"
++msgstr "Usa un canale DMR con TX"
++
++#: core/ui/ui_menus.c
++msgctxt "POS_QUERY_WAIT"
++msgid "Requesting position"
++msgstr "Richiesta di posizione"
++
++#: core/ui/ui_menus.c
++msgctxt "POS_QUERY_BUSY"
++msgid "Position request busy"
++msgstr "Richiesta di posizione in corso"
++
+ #: core/ui/ui_menus.c
+ msgctxt "ACT_TOAST_ALREADY_IN_CONTACTS"
+ msgid "Already in your contacts"
+@@ -3892,11 +3917,6 @@ msgctxt "SET_LABEL_STATUS_LEDS"
+ msgid "Status LEDs"
+ msgstr "LED di stato"
+ 
+-#: core/ui/ui_menus.c
+-msgctxt "SET_LABEL_LANGUAGE"
+-msgid "Language"
+-msgstr "Lingua/Language"
+-
+ #: core/ui/ui_menus.c
+ msgctxt "SET_LABEL_HOME_ZONE"
+ msgid "Zone name on Home"
+@@ -3912,6 +3932,11 @@ msgctxt "SET_LABEL_HOME_COMPACT_DUAL"
+ msgid "Hide second watch pane"
+ msgstr "Nascondi il secondo canale"
+ 
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_LANGUAGE"
++msgid "Language"
++msgstr "Lingua/Language"
++
+ #: core/ui/ui_menus.c
+ msgctxt "SET_LABEL_REPLY_WINDOW"
+ msgid "Reply window"
+diff --git a/core/ui/lang/zh.po b/core/ui/lang/zh.po
+index 3fb2518..f7f0dc9 100644
+--- a/core/ui/lang/zh.po
++++ b/core/ui/lang/zh.po
+@@ -129,6 +129,16 @@ msgctxt "BANNER_OFF_OR_OUT_OF_RANGE"
+ msgid "Off or out of range: try later"
+ msgstr "关机或超出范围：稍后再试"
+ 
++#: core/ui/ui_app.c
++msgctxt "POS_QUERY_NO_FIX"
++msgid "No usable fix"
++msgstr "無有效定位"
++
++#: core/ui/ui_app.c
++msgctxt "POS_QUERY_NO_REPORT"
++msgid "No position received"
++msgstr "未收到位置"
++
+ #: core/ui/ui_app.c
+ msgctxt "HOTSPOT_BANNER_STARTED_BY_HOST"
+ msgid "Hotspot started by host"
+@@ -1579,6 +1589,21 @@ msgctxt "WHY_POS_REQUESTS_NOT_IN_BUILD"
+ msgid "Position requests: not in this build"
+ msgstr "位置请求：本版本无"
+ 
++#: core/ui/ui_menus.c
++msgctxt "POS_QUERY_NEEDS_DMR"
++msgid "Use a transmit-enabled DMR channel"
++msgstr "使用可發射的 DMR 頻道"
++
++#: core/ui/ui_menus.c
++msgctxt "POS_QUERY_WAIT"
++msgid "Requesting position"
++msgstr "正在查詢位置"
++
++#: core/ui/ui_menus.c
++msgctxt "POS_QUERY_BUSY"
++msgid "Position request busy"
++msgstr "位置查詢進行中"
++
+ #: core/ui/ui_menus.c
+ msgctxt "ACT_TOAST_ALREADY_IN_CONTACTS"
+ msgid "Already in your contacts"
+@@ -3894,11 +3919,6 @@ msgctxt "SET_LABEL_STATUS_LEDS"
+ msgid "Status LEDs"
+ msgstr "状态 LED"
+ 
+-#: core/ui/ui_menus.c
+-msgctxt "SET_LABEL_LANGUAGE"
+-msgid "Language"
+-msgstr "语言"
+-
+ #: core/ui/ui_menus.c
+ msgctxt "SET_LABEL_HOME_ZONE"
+ msgid "Zone name on Home"
+@@ -3914,6 +3934,11 @@ msgctxt "SET_LABEL_HOME_COMPACT_DUAL"
+ msgid "Hide second watch pane"
+ msgstr "隐藏第二频道"
+ 
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_LANGUAGE"
++msgid "Language"
++msgstr "语言"
++
+ #: core/ui/ui_menus.c
+ msgctxt "SET_LABEL_REPLY_WINDOW"
+ msgid "Reply window"
+diff --git a/core/ui/ui_app.c b/core/ui/ui_app.c
+index 1a010ee..8d04820 100644
+--- a/core/ui/ui_app.c
++++ b/core/ui/ui_app.c
+@@ -703,6 +703,11 @@ static void handle_event(const ui_event_t *ev)
+ 				TR(BANNER_OFF_OR_OUT_OF_RANGE, "Off or out of range: try later"));
+ 		}
+ 		break;
++	case UI_EV_POSITION_RESULT:
++		station(&b, ev);
++		banner(UI_BANNER_RESULT, !ev->ok, ev->id, title, ev->ok ? ev->text : ev->index == 1 ?
++			TR(POS_QUERY_NO_FIX, "No usable fix") : TR(POS_QUERY_NO_REPORT, "No position received"));
++		break;
+ 	case UI_EV_EMERGENCY:
+ 		emerg_id = ev->id;
+ 		strcpy(emerg_name, ev->name);
+diff --git a/core/ui/ui_menus.c b/core/ui/ui_menus.c
+index 9bf03d9..0824c30 100644
+--- a/core/ui/ui_menus.c
++++ b/core/ui/ui_menus.c
+@@ -242,7 +242,8 @@ static void act_item(uint16_t i, ui_item_t *it)
+ 		break;
+ 	case A_POSITION:
+ 		sb_str(&b, TR(TITLE_POSITION, "Position"));
+-		it->flags |= UI_ITEM_DIM;
++		if (!(feats() & UI_FEAT_LRRP))
++			it->flags |= UI_ITEM_DIM;
+ 		break;
+ 	case A_SAVE_CONTACT:
+ 		sb_str(&b, ui_target.saved ? TR(ACT_ROW_IN_CONTACTS, "In contacts") :
+@@ -325,7 +326,17 @@ static void act_select(uint16_t i, bool hold)
+ 		}
+ 		break;
+ 	case A_POSITION:
+-		ui_toast(TR(WHY_POS_REQUESTS_NOT_IN_BUILD, "Position requests: not in this build"));
++		if (!(feats() & UI_FEAT_LRRP)) {
++			ui_toast(TR(WHY_POS_REQUESTS_NOT_IN_BUILD, "Position requests: not in this build"));
++		} else if (ui_view()->ch.mode != RADIO_MODE_DMR || ui_view()->ch.rx_only || ui_view()->hotspot ||
++			   ui_view()->ch.kind == CODEPLUG_KIND_DMR_TRUNK) {
++			ui_toast(TR(POS_QUERY_NEEDS_DMR, "Use a transmit-enabled DMR channel"));
++		} else if (ui_svc_request_position(ui_target.id)) {
++			ui_go_home();
++			ui_toast(TR(POS_QUERY_WAIT, "Requesting position"));
++		} else {
++			ui_toast(TR(POS_QUERY_BUSY, "Position request busy"));
++		}
+ 		break;
+ 	case A_SAVE_CONTACT:
+ #if CONFIG_CONTACT_EDIT
+diff --git a/core/ui/ui_svc.h b/core/ui/ui_svc.h
+index 1563af3..8a7eb5f 100644
+--- a/core/ui/ui_svc.h
++++ b/core/ui/ui_svc.h
+@@ -64,6 +64,7 @@ extern radio_view_t ui_svc_view;
+ #define UI_FEAT_NXDN		(1u << 23)	// NXDN on this board (CONFIG_NXDN, radio_nxdn_fits): the same
+ #define UI_FEAT_YSF		(1u << 24)	// YSF on this board (CONFIG_YSF, radio_ysf_fits): the same
+ #define UI_FEAT_M17		(1u << 25)	// M17 on this board (CONFIG_M17, radio_m17_fits): the same
++#define UI_FEAT_LRRP		(1u << 28)	// DMR immediate position request
+ uint32_t ui_svc_features(void);
+ // The parts of it each package reports (ui_svc_features ORs them): dmr-voice / radio core, dmr-data, storage-cps,
+ // radio-features
+@@ -243,6 +244,7 @@ bool ui_svc_msg_delete(uint16_t i);
+ // Queue a text message; the result comes back as a ui_notify() event
+ bool ui_svc_msg_send(uint32_t dst, bool group, const char *text);
+ bool ui_svc_radio_check(uint32_t id);
++bool ui_svc_request_position(uint32_t id);
+ bool ui_svc_call_alert(uint32_t id);
+ // ARS registration with the presence server (Settings > Connections > Data services), as dmrArsState_t
+ enum { UI_ARS_OFF, UI_ARS_REGISTERING, UI_ARS_REGISTERED, UI_ARS_REFUSED, UI_ARS_NO_ANSWER };
+@@ -480,6 +482,7 @@ typedef enum {
+ 				// failed after retries
+ 	UI_EV_CALL_ALERT,	// call alert received from id
+ 	UI_EV_RADIO_CHECK,	// answer to our radio check: ok, ms
++	UI_EV_POSITION_RESULT,	// ok: coordinates in text; index 1: answer without a fix; else no report
+ 	UI_EV_PRIVATE_CALL,	// a private call to us from id started
+ 	UI_EV_EMERGENCY,	// emergency received from id
+ 	UI_EV_HOTSPOT_STARTED,	// the host started hotspot mode
+diff --git a/core/ui/ui_svc_data.c b/core/ui/ui_svc_data.c
+index 6530fde..eb05ff5 100644
+--- a/core/ui/ui_svc_data.c
++++ b/core/ui/ui_svc_data.c
+@@ -11,11 +11,12 @@
+ #include "dmr/dmr_data_api.h"
+ #include "codeplug/codeplug.h"
+ #include "hal_time.h"
++#include "fmt.h"
+ 
+ uint32_t ui_svc_feat_data(void)
+ {
+ 	return (CONFIG_DMR_SMS ? UI_FEAT_SMS : 0) | (CONFIG_DMR_SIGNALING ? UI_FEAT_SIGNALING : 0) |
+-	       (CONFIG_ZONE_SHARE ? UI_FEAT_ZONE_SHARE : 0);
++	       (CONFIG_ZONE_SHARE ? UI_FEAT_ZONE_SHARE : 0) | (CONFIG_DMR_LRRP ? UI_FEAT_LRRP : 0);
+ }
+ 
+ static void contact_name(uint32_t id, bool group, char *out, size_t len)
+@@ -92,6 +93,13 @@ bool ui_svc_radio_check(uint32_t id)
+ 	return dmr_signal_radio_check(id);
+ }
+ 
++#if CONFIG_DMR_LRRP
++bool ui_svc_request_position(uint32_t id)
++{
++	return dmr_lrrp_request_position(id);
++}
++#endif
++
+ bool ui_svc_call_alert(uint32_t id)
+ {
+ 	return dmr_signal_call_alert(id);
+@@ -136,6 +144,22 @@ void ui_svc_poll(void)
+ 		ev.kind = UI_EV_CALL_ALERT_RESULT;
+ 		ev.ok = d.kind == DMR_DATA_EV_CALL_ALERT_ACKED;
+ 		break;
++#if CONFIG_DMR_LRRP
++	case DMR_DATA_EV_POSITION:
++	case DMR_DATA_EV_POSITION_NO_FIX:
++	case DMR_DATA_EV_POSITION_FAILED:
++		ev.kind = UI_EV_POSITION_RESULT;
++		ev.ok = d.kind == DMR_DATA_EV_POSITION;
++		ev.index = d.kind == DMR_DATA_EV_POSITION_NO_FIX ? 1 : 0;
++		if (ev.ok) {
++			sbuf_t b;
++			sb_init(&b, ev.text, sizeof ev.text);
++			sb_coord(&b, d.lat_e7, 'N', 'S');
++			sb_chr(&b, ' ');
++			sb_coord(&b, d.lon_e7, 'E', 'W');
++		}
++		break;
++#endif
+ 	case DMR_DATA_EV_RADIO_CHECK_OK:
+ 	case DMR_DATA_EV_RADIO_CHECK_FAILED:
+ 		ev.kind = UI_EV_RADIO_CHECK;
+diff --git a/core/ui/ui_svc_stub.c b/core/ui/ui_svc_stub.c
+index 3236933..b40b394 100644
+--- a/core/ui/ui_svc_stub.c
++++ b/core/ui/ui_svc_stub.c
+@@ -97,6 +97,7 @@ WEAK void ui_svc_msg_read(uint16_t i) { (void)i; }
+ WEAK bool ui_svc_msg_delete(uint16_t i) { (void)i; return false; }
+ WEAK bool ui_svc_msg_send(uint32_t dst, bool group, const char *text) { (void)dst; (void)group; (void)text; return false; }
+ WEAK bool ui_svc_radio_check(uint32_t id) { (void)id; return false; }
++WEAK bool ui_svc_request_position(uint32_t id) { (void)id; return false; }
+ WEAK bool ui_svc_call_alert(uint32_t id) { (void)id; return false; }
+ WEAK uint8_t ui_svc_ars_state(void) { return UI_ARS_OFF; }
+ 
+diff --git a/docs/spec/dmr-data.md b/docs/spec/dmr-data.md
+index 9161828..7b9b26b 100644
+--- a/docs/spec/dmr-data.md
++++ b/docs/spec/dmr-data.md
+@@ -364,6 +364,10 @@ that form, and it confirms delivery. Motorola TMS ("Motorola") is the format for
+ 
+ ## 7. LRRP
+ 
++- A local user may ask an individual unit for one position from the contact actions. The request uses LRRP UDP 4001,
++  a four-byte transaction ID, and waits 12 seconds after transmit. An immediate report must match that ID, the station
++  ID and the channel key. A retune, unavailable TX, no fix and a missing reply are handled without keeping the remote
++  coordinates in the codeplug. Incoming reply settings are independent of the outgoing request.
+ - Immediate location requests to us are answered; triggered requests (periodic, distance) start a trigger (2 at
+   most, reports at most every 5 s) with a start response, then reports.
+ - The position is the position service's ([position.md](position.md)), through the `ownPosition` hook the radio
+diff --git a/docs/user/10-messages-and-signaling.md b/docs/user/10-messages-and-signaling.md
+index a1909fe..234ea19 100644
+--- a/docs/user/10-messages-and-signaling.md
++++ b/docs/user/10-messages-and-signaling.md
+@@ -141,3 +141,8 @@ codeplug, so the [Codeplug Editor](04-programming.md) can set it too.
+ 
+ LRRP answers location requests from a dispatcher. A radio without GPS ([Radio reference](23-radios.md)) answers "no
+ fix". **Settings > Location > Answer GPS requests** turns the answers off.
++
++To ask a cooperating radio for one position, open a private contact's actions and choose **Position** on a
++conventional DMR channel that allows transmit. The result shows the coordinates reported by that radio, a response
++without a fix, or a timeout. Changing frequency, slot, or color code ends the request. Both radios need interoperable
++LRRP on UDP 4001. Replies are unauthenticated; use the action only with stations that agreed to share their location.
+diff --git a/tests/host/Makefile b/tests/host/Makefile
+index 452ac1c..2d21ff2 100644
+--- a/tests/host/Makefile
++++ b/tests/host/Makefile
+@@ -328,7 +328,7 @@ RCORE   := radioCoreTest.c $(CORE)/radio/radio_sm.c $(CORE)/codeplug/codeplug_ke
+            $(CORE)/radio/radio_hotspot.c $(CORE)/hotspot/mmdvm.c $(CORE)/hotspot/hotspot.c \
+            $(CORE)/hotspot/hotspotUplink.c $(CORE)/hotspot/hotspotData.c $(CORE)/hotspot/dmrDataFrame.c \
+            $(CORE)/hotspot/hotspotSfr.c $(CORE)/dmr/sfrRunner.c $(CORE)/dmr/sfr.c \
+-           $(CORE)/ui/ui_svc_radio.c $(CORE)/ui/ui_svc_storage.c $(CORE)/ui/ui_svc_data.c \
++           $(CORE)/ui/ui_svc_radio.c $(CORE)/ui/ui_svc_storage.c $(CORE)/ui/ui_svc_data.c $(CORE)/ui/fmt.c \
+            $(CORE)/ui/ui_svc_emergency.c $(CORE)/input/keyassign.c sim/sim_flash.c \
+            $(CORE)/debuglink/debuglink_view_radio.c $(CORE)/debuglink/dl_fmt.c $(CORE)/codeplug/zone_edit.c \
+            $(CORE)/radio/pa_sweep.c $(CORE)/radio/pa_keyrun.c \
+diff --git a/tests/host/dmrDataServiceTest.c b/tests/host/dmrDataServiceTest.c
+index e82d31d..c21180c 100644
+--- a/tests/host/dmrDataServiceTest.c
++++ b/tests/host/dmrDataServiceTest.c
+@@ -632,6 +632,67 @@ static void testLrrp(void)
+ }
+ 
+ 
++#if CONFIG_DMR_LRRP
++static void answerLocation(uint32_t src, uint32_t token, const lrrpPosition_t *position)
++{
++	uint8_t doc[LRRP_MAX_DOCUMENT];
++	lrrpRequest_t req;
++	int n = lrrpBuildImmediateRequest(token, doc);
++	CHECK(lrrpDecodeRequest(doc, n, &req));
++	n = lrrpBuildImmediateResponse(&req, position, doc);
++	dmrBurst_t bursts[DMR_DATA_MAX_BURSTS];
++	int count = dmrDataBuildUDP(false, OUR_ID, src, DMR_UDP_PORT_LRRP, DMR_UDP_PORT_LRRP,
++				    doc, n, DMR_TYPE_RATE_1_2, 1, bursts, DMR_DATA_MAX_BURSTS);
++	rxBursts(bursts, count);
++}
++
++static void testLocationQuery(void)
++{
++	reset();
++	settings.lrrpReply = false;  // asking does not turn on sharing one's own location
++	CHECK(!dmr_lrrp_request_position(ch.ownId));
++	CHECK(dmr_lrrp_request_position(LRRP_SERVER));
++	CHECK(!dmr_lrrp_request_position(LRRP_SERVER));
++	runMainTask(700);
++	CHECK(countLrrp(0x05) == 1 && lrrpQuery.sent);
++	uint32_t token = lrrpQuery.token;
++	answerLocation(LRRP_SERVER + 1, token, NULL);
++	answerLocation(LRRP_SERVER, token + 1, NULL);
++	CHECK(lrrpQuery.dst == LRRP_SERVER);
++	lrrpPosition_t found;
++	lrrpPositionFromE7(-338500000, 1512100000, 0xffff, 0xffff, 0xffffffff, 0, &found);
++	answerLocation(LRRP_SERVER, token, &found);
++	dmrDataEvent_t e = dmr_data_last_event();
++	CHECK(e.kind == DMR_DATA_EV_POSITION && e.id == LRRP_SERVER);
++	CHECK(e.lat_e7 >= -338500010 && e.lat_e7 <= -338499990);
++	CHECK(e.lon_e7 >= 1512099990 && e.lon_e7 <= 1512100010);
++
++	CHECK(dmr_lrrp_request_position(LRRP_SERVER));
++	runMainTask(700);
++	answerLocation(LRRP_SERVER, lrrpQuery.token, NULL);
++	CHECK(dmr_data_last_event().kind == DMR_DATA_EV_POSITION_NO_FIX);
++
++	CHECK(dmr_lrrp_request_position(LRRP_SERVER));
++	runMainTask(15000);
++	CHECK(dmr_data_last_event().kind == DMR_DATA_EV_POSITION_FAILED);
++
++	CHECK(dmr_lrrp_request_position(LRRP_SERVER));
++	runMainTask(10);
++	ch.channelKey++;
++	runMainTask(20);
++	CHECK(dmr_data_last_event().kind == DMR_DATA_EV_POSITION_FAILED);
++
++	// Even a channel change before the next radio-task tick must cancel a queued position request.
++	int sent = countLrrp(0x05);
++	CHECK(dmr_lrrp_request_position(LRRP_SERVER));
++	ch.channelKey++;
++	runMainTask(700);
++	CHECK(countLrrp(0x05) == sent);
++	CHECK(dmr_data_last_event().kind == DMR_DATA_EV_POSITION_FAILED);
++	settings.lrrpReply = true;
++}
++#endif
++
+ static int countCsbk(uint8_t opcode, uint32_t dst)
+ {
+ 	int n = 0;
+@@ -2489,6 +2550,9 @@ int main(void)
+ 	testARS();
+ 	testArsPowerOff();
+ 	testLrrp();
++#if CONFIG_DMR_LRRP
++	testLocationQuery();
++#endif
+ 	testSignaling();
+ #if CONFIG_DMR_TMS
+ 	ipSettings(DMR_UDPC_AUTO, DMR_IPC_OFF, 0, 0, 0);
+diff --git a/tests/host/lrrpTest.c b/tests/host/lrrpTest.c
+index d8178fc..514180f 100644
+--- a/tests/host/lrrpTest.c
++++ b/tests/host/lrrpTest.c
+@@ -307,10 +307,38 @@ static void test_fuzz(void)
+ 	printf("# lrrp fuzz: %ld requests, %ld decoded\n", iters, decoded);
+ }
+ 
++#if CONFIG_DMR_LRRP
++static void test_immediate_query(void)
++{
++	uint8_t wire[LRRP_MAX_DOCUMENT];
++	lrrpRequest_t req;
++	uint32_t token = 0x81a53f09u;
++	int n = lrrpBuildImmediateRequest(token, wire);
++	static const uint8_t expected[] = { 5, 7, 0x22, 4, 0x81, 0xa5, 0x3f, 9, 0x50 };
++	CHECK(n == (int)sizeof expected && memcmp(wire, expected, sizeof expected) == 0);
++	CHECK(lrrpDecodeRequest(wire, n, &req) && req.requestIdLength == 4 && req.wanted == LRRP_WANT_ACCURACY);
++	lrrpPosition_t pos;
++	lrrpPositionFromE7(194891520, -988700190, 0xffff, 0xffff, 0xffffffff, 0, &pos);
++	bool fix;
++	int32_t lat, lon;
++	n = lrrpBuildImmediateResponse(&req, &pos, wire);
++	CHECK(lrrpDecodeImmediateReport(wire, n, token, &fix, &lat, &lon) && fix);
++	CHECK(lat >= 194891510 && lat <= 194891530);
++	CHECK(lon >= -988700200 && lon <= -988700180);
++	CHECK(!lrrpDecodeImmediateReport(wire, n, token + 1, &fix, &lat, &lon));
++	CHECK(!lrrpDecodeImmediateReport(wire, n - 1, token, &fix, &lat, &lon));
++	n = lrrpBuildImmediateResponse(&req, NULL, wire);
++	CHECK(lrrpDecodeImmediateReport(wire, n, token, &fix, &lat, &lon) && !fix);
++}
++#endif
++
+ int main(void)
+ {
+ 	test_decode();
+ 	test_build();
++#if CONFIG_DMR_LRRP
++	test_immediate_query();
++#endif
+ 	test_distance();
+ 	test_fuzz();
+ 	printf("lrrpTest: %d checks, %d failures\n", checks, failures);

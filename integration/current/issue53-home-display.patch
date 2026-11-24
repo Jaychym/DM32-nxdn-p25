@@ -1,0 +1,595 @@
+diff --git a/core/settings/settings.h b/core/settings/settings.h
+index 553c15b..9fb4d31 100644
+--- a/core/settings/settings.h
++++ b/core/settings/settings.h
+@@ -258,12 +258,16 @@ typedef struct {
+ 	uint8_t rs_led_mode;		// radio_led_mode_t; 0 keeps the original indicators
+ 	uint32_t rs_scan_lo_hz, rs_scan_hi_hz;	// 0 = no saved bounds
+ 	uint8_t rs_permit_style;		// radio_permit_style_t; 0 = by mode
+-	uint8_t reserved_ui[3];
++	uint8_t home_flags;		// SETTINGS_HOME_NO_ZONE / SETTINGS_HOME_COMPACT_DUAL
++	uint8_t home_text_color;	// ui accent index, 0 = theme's own text
++	uint8_t reserved_ui;
+ } settings_t;
+ 
+ // Pages: settings_t is stored as records of SETTINGS_PAGE_BYTES each (settings-store.md 2.1). Only the pages its size
+ // needs are written, each with its own length, so settings_t grows by appending fields; the record's page field
+ // allows 16 pages (3776 bytes)
++#define SETTINGS_HOME_NO_ZONE		0x01u
++#define SETTINGS_HOME_COMPACT_DUAL	0x02u
+ #define SETTINGS_PAGE_BYTES	236u
+ #define SETTINGS_PAGES_MAX	16u
+ #define SETTINGS_PAGES		((sizeof(settings_t) + SETTINGS_PAGE_BYTES - 1u) / SETTINGS_PAGE_BYTES)
+diff --git a/core/ui/lang/es.po b/core/ui/lang/es.po
+index 892318d..7b32704 100644
+--- a/core/ui/lang/es.po
++++ b/core/ui/lang/es.po
+@@ -3897,6 +3897,21 @@ msgctxt "SET_LABEL_LANGUAGE"
+ msgid "Language"
+ msgstr "Idioma/Language"
+ 
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_HOME_ZONE"
++msgid "Zone name on Home"
++msgstr "Zona en Inicio"
++
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_HOME_TEXT_COLOR"
++msgid "Home text color"
++msgstr "Color del texto de Inicio"
++
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_HOME_COMPACT_DUAL"
++msgid "Hide second watch pane"
++msgstr "Ocultar segundo canal"
++
+ #: core/ui/ui_menus.c
+ msgctxt "SET_LABEL_REPLY_WINDOW"
+ msgid "Reply window"
+diff --git a/core/ui/lang/fr.po b/core/ui/lang/fr.po
+index eec664b..0654714 100644
+--- a/core/ui/lang/fr.po
++++ b/core/ui/lang/fr.po
+@@ -3897,6 +3897,21 @@ msgctxt "SET_LABEL_LANGUAGE"
+ msgid "Language"
+ msgstr "Langue / Language"
+ 
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_HOME_ZONE"
++msgid "Zone name on Home"
++msgstr "Zone sur l'accueil"
++
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_HOME_TEXT_COLOR"
++msgid "Home text color"
++msgstr "Couleur du texte accueil"
++
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_HOME_COMPACT_DUAL"
++msgid "Hide second watch pane"
++msgstr "Masquer le second canal"
++
+ #: core/ui/ui_menus.c
+ msgctxt "SET_LABEL_REPLY_WINDOW"
+ msgid "Reply window"
+diff --git a/core/ui/lang/it.po b/core/ui/lang/it.po
+index adbbc80..171ca24 100644
+--- a/core/ui/lang/it.po
++++ b/core/ui/lang/it.po
+@@ -3897,6 +3897,21 @@ msgctxt "SET_LABEL_LANGUAGE"
+ msgid "Language"
+ msgstr "Lingua/Language"
+ 
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_HOME_ZONE"
++msgid "Zone name on Home"
++msgstr "Zona nella schermata Home"
++
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_HOME_TEXT_COLOR"
++msgid "Home text color"
++msgstr "Colore testo Home"
++
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_HOME_COMPACT_DUAL"
++msgid "Hide second watch pane"
++msgstr "Nascondi il secondo canale"
++
+ #: core/ui/ui_menus.c
+ msgctxt "SET_LABEL_REPLY_WINDOW"
+ msgid "Reply window"
+diff --git a/core/ui/lang/zh.po b/core/ui/lang/zh.po
+index 31878bf..3fb2518 100644
+--- a/core/ui/lang/zh.po
++++ b/core/ui/lang/zh.po
+@@ -3899,6 +3899,21 @@ msgctxt "SET_LABEL_LANGUAGE"
+ msgid "Language"
+ msgstr "语言"
+ 
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_HOME_ZONE"
++msgid "Zone name on Home"
++msgstr "主页区域"
++
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_HOME_TEXT_COLOR"
++msgid "Home text color"
++msgstr "主页文字颜色"
++
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_HOME_COMPACT_DUAL"
++msgid "Hide second watch pane"
++msgstr "隐藏第二频道"
++
+ #: core/ui/ui_menus.c
+ msgctxt "SET_LABEL_REPLY_WINDOW"
+ msgid "Reply window"
+diff --git a/core/ui/ui_app.c b/core/ui/ui_app.c
+index ad619c1..1a010ee 100644
+--- a/core/ui/ui_app.c
++++ b/core/ui/ui_app.c
+@@ -2142,12 +2142,15 @@ void ui_app_init(void)
+ 					  UI_SET_ALIAS_SHOW, UI_SET_PTT_LOCKED, UI_SET_HEAR_ALL_DEFAULT, UI_SET_MESSAGE_TONE,
+ 					  UI_SET_UPDOWN_HOME, UI_SET_LABEL_FIRST, UI_SET_LOW_BATTERY, UI_SET_AUTO_OFF_MIN, UI_SET_THEME, UI_SET_ACCENT,
+ 					  UI_SET_STRIP, UI_SET_VIBRATE, UI_SET_VOLUME, UI_SET_LANGUAGE,
+-					  UI_SET_KNOB_WHEN_LOCKED,
++					  UI_SET_KNOB_WHEN_LOCKED, UI_SET_HOME_ZONE,
++#if CONFIG_UI_COLOR
++					  UI_SET_HOME_TEXT_COLOR,
++#endif
+ #if CONFIG_UI_KAWAII
+ 					  UI_SET_CLASSIC_STYLE, UI_SET_HOME_NAME_FIRST,
+ #endif
+ #if CONFIG_DUAL_WATCH
+-					  UI_SET_DUAL_TALK_BACK,
++					  UI_SET_DUAL_TALK_BACK, UI_SET_HOME_COMPACT_DUAL,
+ #endif
+ 	};
+ 	for (uint8_t i = 0; i < sizeof ui_ids; i++)
+@@ -2247,6 +2250,9 @@ void ui_apply_setting(uint8_t id, int32_t v)
+ 	case UI_SET_BRIGHTNESS: ui_st.brightness = (uint8_t)(v >= 10 && v <= 100 ? v : 100); break;
+ 	case UI_SET_HINTS: ui_st.hints = v != 0; break;
+ 	case UI_SET_LARGE_TEXT: ui_st.large_text = v != 0; break;
++	case UI_SET_HOME_ZONE: ui_st.home_no_zone = v == 0; break;
++	case UI_SET_HOME_TEXT_COLOR: ui_st.home_text_color = v >= 0 && v < UI_ACCENT_COUNT ? (uint8_t)v : 0; break;
++	case UI_SET_HOME_COMPACT_DUAL: ui_st.home_compact_dual = v != 0; break;
+ 	case UI_SET_AUTO_LOCK_S: ui_st.auto_lock_s = clamp_u16(v); break;
+ 	case UI_SET_ALIAS_SHOW: ui_st.alias_show = v != 0; break;
+ 	case UI_SET_HEAR_ALL_DEFAULT:
+@@ -2924,6 +2930,14 @@ bool ui_app_tick(const radio_view_t *v, uint32_t now_ms)
+ 		hs_diag = false;
+ #endif
+ 	if (now - last_refresh >= (fast ? REFRESH_FAST_MS : REFRESH_MS)) {
++#if CONFIG_GPS
++		if (stack[sp].scr == SCR_HOME) {
++			ui_position_t pos;
++			ui_st.gps_status = UI_GPS_OFF;
++			if ((ui_svc_features() & UI_FEAT_GPS) && ui_svc_setting_get(UI_SET_GPS) != 0)
++				ui_st.gps_status = ui_svc_position(&pos) && pos.fix ? UI_GPS_FIX : UI_GPS_SEARCHING;
++		}
++#endif
+ 		last_refresh = now;
+ 		dirty = true;
+ 	}
+diff --git a/core/ui/ui_menus.c b/core/ui/ui_menus.c
+index b605213..9bf03d9 100644
+--- a/core/ui/ui_menus.c
++++ b/core/ui/ui_menus.c
+@@ -7335,6 +7335,13 @@ static const set_item_t s_display[] = {
+ 	TOGGLE(TRN(SET_LABEL_LARGE_CHANNEL_NAME, "Large channel name"), "Home Pink frequency name", UI_SET_HOME_NAME_FIRST),
+ #endif
+ 	LIST(TRN(SET_LABEL_STATUS_LEDS, "Status LEDs"), "light amber blink scan", UI_SET_RADIO_LED_MODE, v_led_mode, n_led_mode),
++	TOGGLE(TRN(SET_LABEL_HOME_ZONE, "Zone name on Home"), "display current zone name", UI_SET_HOME_ZONE),
++#if CONFIG_UI_COLOR
++	LIST(TRN(SET_LABEL_HOME_TEXT_COLOR, "Home text color"), "home foreground", UI_SET_HOME_TEXT_COLOR, v_accent, n_accent),
++#endif
++#if CONFIG_DUAL_WATCH
++	TOGGLE(TRN(SET_LABEL_HOME_COMPACT_DUAL, "Hide second watch pane"), "compact display dual watch", UI_SET_HOME_COMPACT_DUAL),
++#endif
+ 	// Last, so the rows above keep their places; its search words are "language" in other languages, for a user who
+ 	// can't read the English
+ 	ACTION(TRN(SET_LABEL_LANGUAGE, "Language"), "idioma langue sprache lingua taal jezyk", SA_LANGUAGE),
+@@ -7791,6 +7798,7 @@ static const char *set_why_not(const set_item_t *s)
+ 			TR(SET_WHY_NO_VIBRATION_MOTOR, "This radio has no vibration motor");
+ 	case UI_SET_THEME:
+ 	case UI_SET_ACCENT:
++	case UI_SET_HOME_TEXT_COLOR:
+ 	case UI_SET_STRIP:
+ 		return board.display != NULL && board.display->bpp == 1 ?
+ 			TR(SET_WHY_COLOR_SCREENS_ONLY, "Colors are for color screens") : NULL;
+diff --git a/core/ui/ui_screens.c b/core/ui/ui_screens.c
+index 65c2af8..8ef035f 100644
+--- a/core/ui/ui_screens.c
++++ b/core/ui/ui_screens.c
+@@ -153,6 +153,17 @@ static void kawaii_boot(const char *board_name, const char *version, const char
+ #define kawaii() false
+ #endif
+ 
++static const color_t acc[UI_ACCENT_COUNT] = {
++	[UI_ACCENT_DEFAULT] = RGB565(216, 216, 216),
++	[UI_ACCENT_RED] = RGB565(240, 112, 112),
++	[UI_ACCENT_ORANGE] = RGB565(255, 160, 64),
++	[UI_ACCENT_YELLOW] = RGB565(255, 208, 0),
++	[UI_ACCENT_TEAL] = RGB565(72, 210, 210),
++	[UI_ACCENT_BLUE] = RGB565(104, 176, 255),
++	[UI_ACCENT_PURPLE] = RGB565(184, 150, 255),
++	[UI_ACCENT_PINK] = RGB565(255, 136, 200),
++};
++
+ // The highlight color over the theme's own (Settings > Display), one shade per color for both the filled status strip
+ // (reverse video: the color as background, text and icons black) and the focus highlight (black text), so the two
+ // match; also Home's channel number. All are light shades: black on each is at least 7.5:1 after RGB565 rounding.
+@@ -165,16 +176,6 @@ static void accent_apply(void)
+ 	ui_col.chnum = ui_col.dim;
+ 	if (!CONFIG_UI_COLOR)
+ 		return;
+-	static const color_t acc[UI_ACCENT_COUNT] = {
+-		[UI_ACCENT_DEFAULT] = RGB565(216, 216, 216),
+-		[UI_ACCENT_RED] = RGB565(240, 112, 112),
+-		[UI_ACCENT_ORANGE] = RGB565(255, 160, 64),
+-		[UI_ACCENT_YELLOW] = RGB565(255, 208, 0),
+-		[UI_ACCENT_TEAL] = RGB565(72, 210, 210),
+-		[UI_ACCENT_BLUE] = RGB565(104, 176, 255),
+-		[UI_ACCENT_PURPLE] = RGB565(184, 150, 255),
+-		[UI_ACCENT_PINK] = RGB565(255, 136, 200),
+-	};
+ 	// Warnings on the filled strip (SCAN, MON, ROAM, unread, the lock, a low battery): dark amber where it reads, dark
+ 	// blue on the warm strips where amber can't; at least 5:1 on its strip after RGB565 rounding
+ 	static const color_t warn[UI_ACCENT_COUNT] = {
+@@ -516,6 +517,21 @@ static bool strip_fits(const font_t *f, int lx, int rx, const char *word)
+ 	return lx + gfx_text_width(f, word) + 2 * f->w <= rx;
+ }
+ 
++// Small dish, feed and two radio waves, scaled by the normal status font.
++#if CONFIG_GPS
++static void draw_gps(const font_t *f, int x, int y, color_t color)
++{
++	int d = f->h >= 16 ? 2 : 1;
++	int top = y + (f->h - 7 * d) / 2;
++	gfx_fill(x + d, top + 2 * d, d, 3 * d, color);
++	gfx_fill(x + 2 * d, top + 5 * d, 3 * d, d, color);
++	gfx_fill(x + 3 * d, top + 3 * d, d, 2 * d, color);
++	gfx_fill(x + 4 * d, top + 2 * d, d, d, color);
++	gfx_fill(x + 5 * d, top, 2 * d, d, color);
++	gfx_fill(x + 7 * d, top + d, d, 2 * d, color);
++}
++#endif
++
+ // The pill shows st instead of v->state: the hotspot screen shows what the hotspot does without a copy of the whole
+ // view on the UI task's stack (the UI task's deepest path, stack check)
+ static int draw_top_as(const radio_view_t *v, radio_state_t st, const ui_state_t *s, const char *prefix, const char *name)
+@@ -657,11 +673,12 @@ static int draw_top_as(const radio_view_t *v, radio_state_t st, const ui_state_t
+ 	if (v->aprs_tx)
+ 		mw = "FM";
+ 	int lx = gfx_text(f, x, ty, mw, sfg);
+-	if (!titled && st == RS_IDLE && !v->hotspot
++	bool voice_lock = ui_voice_lock_for_tx(v);
+ #if CONFIG_DUAL_WATCH
+-	    && !s->dual.on
++	if (s->dual.on)
++		voice_lock = s->home_compact_dual && s->dual.pane[s->dual.sel].tx_voice_lock;
+ #endif
+-	    && ui_voice_lock_for_tx(v) && lx + f->w + voice_lock_width(f) <= rx)
++	if (!titled && st == RS_IDLE && !v->hotspot && voice_lock && lx + f->w + voice_lock_width(f) <= rx)
+ 		lx = draw_voice_lock(f, lx + f->w / 2, ty, swarn);
+ #if CONFIG_DUAL_WATCH
+ 	if (s->dual.on && !v->aprs_tx && strip_fits(f, lx, rx, TR(TOP_CHIP_DUAL, "DUAL")))
+@@ -701,6 +718,12 @@ static int draw_top_as(const radio_view_t *v, radio_state_t st, const ui_state_t
+ 			}
+ 		}
+ 	}
++#endif
++#if CONFIG_GPS
++	int gps_width = f->h >= 16 ? 16 : 8;
++	if (!titled && s->gps_status != UI_GPS_OFF && lx + f->w + gps_width <= rx &&
++	    (s->gps_status == UI_GPS_FIX || (s->now_ms / 1000u) % 2u == 0))
++		draw_gps(f, lx + f->w / 2, ty, s->gps_status == UI_GPS_FIX ? sfg : swarn);
+ #endif
+ 	if (!titled)
+ 		return L->strip_h;
+@@ -1248,7 +1271,8 @@ static void draw_place(const radio_view_t *v, const ui_state_t *s)
+ 			sb_freq(&b, v->ch.tx_hz);
+ 			zone = buf;
+ 		}
+-		kawaii_center(L->small, L->zone_y, zone, ui_col.dim);
++		if (v->vfo || !s->home_no_zone)
++			kawaii_center(L->small, L->zone_y, zone, ui_col.dim);
+ 		kawaii_card(0, L->channel_y - 8, w, L->sep_y - L->channel_y + 8,
+ 			ui_theme == 2 ? ui_col.bg : ROSE_CARD);
+ 		kawaii_bow(w / 2 - 9, L->channel_y - 13, ui_col.priv);
+@@ -1290,7 +1314,7 @@ static void draw_place(const radio_view_t *v, const ui_state_t *s)
+ 	}
+ #endif
+ 
+-	if (L->zone_y >= 0) {
++	if (L->zone_y >= 0 && (v->vfo || !s->home_no_zone)) {
+ 		// Zone (or VFO and its step) left, position in the zone right
+ 		char right[16];
+ 		sb_init(&b, right, sizeof right);
+@@ -2801,7 +2825,7 @@ static void draw_tx(const radio_view_t *v, const ui_state_t *s)
+ 	ui_draw_bottom(s, hint);
+ }
+ 
+-void ui_draw_home(const radio_view_t *v, const ui_state_t *s)
++static void draw_home(const radio_view_t *v, const ui_state_t *s)
+ {
+ #if CONFIG_DUAL_WATCH
+ 	if (s->dual.on) {
+@@ -2850,6 +2874,26 @@ void ui_draw_home(const radio_view_t *v, const ui_state_t *s)
+ 	ui_draw_bottom(s, home_hint(v, s));
+ }
+ 
++void ui_draw_home(const radio_view_t *v, const ui_state_t *s)
++{
++	uint8_t a = s->home_text_color;
++	if (!CONFIG_UI_COLOR || gfx_bpp() == 1 || a == UI_ACCENT_DEFAULT || a >= UI_ACCENT_COUNT) {
++		draw_home(v, s);
++		return;
++	}
++	color_t fg = ui_col.fg, dim = ui_col.dim, chnum = ui_col.chnum;
++	color_t c = acc[a];
++	// Light and Pink are light backgrounds. A darker tint keeps the chosen hue legible on both.
++	if (ui_theme == 1 || (kawaii() && ui_theme != 2))
++		c = RGB565((c >> 11) * 8u * 5u / 12u,
++			   ((c >> 5) & 63u) * 4u * 5u / 12u, (c & 31u) * 8u * 5u / 12u);
++	ui_col.fg = ui_col.dim = ui_col.chnum = c;
++	draw_home(v, s);
++	ui_col.fg = fg;
++	ui_col.dim = dim;
++	ui_col.chnum = chnum;
++}
++
+ #if CONFIG_DUAL_WATCH
+ // --- Dual watch Home (docs/ux/dual-watch.md 3) ---
+ // Two panes, A over B, the same size: neither channel is second class. Each pane has a letter tag, the channel's
+@@ -3198,10 +3242,12 @@ static void dual_pane(const radio_view_t *v, const ui_state_t *s, int i, int y,
+ 		dual_row3(p, dual_r3, sizeof dual_r3);
+ 		gfx_text_fit(df, dual_r3, r3 - x0, buf, sizeof buf);
+ 		int lx = gfx_text(df, x0, y3, buf, ui_col.dim);
+-		if (ft->zone)
+-			gfx_text(df, x0, y3 + df->h, p->zone, ui_col.dim);
+-		else
+-			dual_right(df, r3, y3, df->h, lx + 2 * df->w, p->zone, ui_col.dim);
++		if (!s->home_no_zone) {
++			if (ft->zone)
++				gfx_text(df, x0, y3 + df->h, p->zone, ui_col.dim);
++			else
++				dual_right(df, r3, y3, df->h, lx + 2 * df->w, p->zone, ui_col.dim);
++		}
+ 	}
+ }
+ 
+@@ -3393,13 +3439,46 @@ static void __attribute__((noinline)) dual_choose(int avail, int gap, dual_fit_t
+ 	*out = *ft;
+ }
+ 
++static void dual_compact(const ui_state_t *s)
++{
++	const ui_layout_t *l = &ui_layout;
++	const ui_dual_pane_t *p = &s->dual.pane[s->dual.sel];
++	const char *zone = p->zone;
++	int w = gfx_width();
++	char buf[48], fit[48];
++	if (!s->home_no_zone && l->zone_y >= 0) {
++		gfx_text_fit(l->small, zone, w, fit, sizeof fit);
++		gfx_text(l->small, 0, l->zone_y, fit, ui_col.dim);
++	}
++	dual_name(s, s->dual.sel, buf, sizeof buf);
++	const font_t *f = gfx_text_width(l->large, buf) <= w ? l->large : l->medium;
++	gfx_text_fit(f, buf, w, fit, sizeof fit);
++	gfx_text(f, 0, l->channel_y, fit, ui_col.fg);
++	if (p->rx && p->caller[0])
++		gfx_text_fit(l->medium, p->caller, w, fit, sizeof fit);
++	else if (p->target[0])
++		gfx_text_fit(l->medium, p->target, w, fit, sizeof fit);
++	else {
++		sbuf_t b;
++		sb_init(&b, fit, sizeof fit);
++		sb_freq(&b, p->rx_hz);
++		sb_str(&b, " MHz");
++	}
++	gfx_text(l->medium, 0, l->talk_y, fit, p->rx ? ui_col.rx : ui_col.fg);
++	dual_row3(p, buf, sizeof buf);
++	gfx_text_fit(l->small, buf, w, fit, sizeof fit);
++	gfx_text(l->small, 0, l->chips_y, fit, ui_col.dim);
++}
++
+ void ui_draw_home_dual(const radio_view_t *v, const ui_state_t *s)
+ {
+ 	const ui_layout_t *L = &ui_layout;
+ 	int w = gfx_width();
+ 	gfx_clear(ui_col.bg);
+ 	ui_draw_top(v, s, NULL, NULL);
+-	if (s->large_text) {
++	if (s->home_compact_dual) {
++		dual_compact(s);
++	} else if (s->large_text) {
+ 		dual_large(v, s);
+ 	} else {
+ 		int top = L->strip_h, gap = gfx_height() >= UI_TALL_PX ? 6 : 2, pad;
+@@ -3419,7 +3498,7 @@ void ui_draw_home_dual(const radio_view_t *v, const ui_state_t *s)
+ 		dual_activity(v, s, ay, ft->act ? (L->hint_y - ay) / sm->h : 0);
+ 	}
+ 	ui_draw_banner(s);
+-	ui_draw_bottom(s, dual_hint(v, s));
++	ui_draw_bottom(s, s->home_compact_dual ? TR(DUAL_HINT_OPTIONS, "# options  Back stop") : dual_hint(v, s));
+ }
+ #endif
+ 
+diff --git a/core/ui/ui_screens.h b/core/ui/ui_screens.h
+index 63f9563..e77ae4a 100644
+--- a/core/ui/ui_screens.h
++++ b/core/ui/ui_screens.h
+@@ -96,6 +96,8 @@ typedef struct {
+ } ui_dual_t;
+ #endif
+ 
++enum { UI_GPS_OFF, UI_GPS_SEARCHING, UI_GPS_FIX };
++
+ // What the screens show besides the radio view; owned by the UI (ui_app.c)
+ typedef struct {
+ 	uint32_t now_ms;
+@@ -121,6 +123,9 @@ typedef struct {
+ 	uint8_t usb_net;	// UI_USB_NET_*: the status strip's USB network word and link arrows
+ 	bool hints;		// the hint row is shown (Settings > Display)
+ 	bool large_text;	// Home shows only the channel and the talk target (Settings > Display)
++	bool home_no_zone, home_compact_dual;
++	uint8_t home_text_color;
++	uint8_t gps_status;	// UI_GPS_*
+ 	bool privacy;		// the next DMR transmission is encrypted
+ 	bool hear_all;		// hear all latched (quick tile 5 on DMR); follows the radio view where the radio has it
+ 	// Here, in the byte before auto_lock_s that was padding: the radio with the least RAM has none to spare in its
+diff --git a/core/ui/ui_svc.h b/core/ui/ui_svc.h
+index bcbd81f..1563af3 100644
+--- a/core/ui/ui_svc.h
++++ b/core/ui/ui_svc.h
+@@ -453,6 +453,7 @@ typedef enum {
+ 	UI_SET_RADIO_LED_MODE,	// radio_led_mode_t (Settings > Display)
+ 	UI_SET_VFO_SCAN_LOW, UI_SET_VFO_SCAN_HIGH,	// saved VFO bounds in Hz
+ 	UI_SET_PERMIT_STYLE, UI_SET_ROGER_BEEP,	// radio_settings_t (Settings > Sound)
++	UI_SET_HOME_ZONE, UI_SET_HOME_TEXT_COLOR, UI_SET_HOME_COMPACT_DUAL,
+ 	UI_SET_COUNT
+ } ui_setting_t;
+ 
+diff --git a/core/ui/ui_svc_storage.c b/core/ui/ui_svc_storage.c
+index d285c68..874547b 100644
+--- a/core/ui/ui_svc_storage.c
++++ b/core/ui/ui_svc_storage.c
+@@ -282,6 +282,14 @@ int32_t ui_svc_setting_get(uint8_t id)
+ 		settings_read(&st);
+ 		return st.home_name_first == 1;
+ #endif
++	case UI_SET_HOME_ZONE:
++	case UI_SET_HOME_COMPACT_DUAL:
++		settings_read(&st);
++		return id == UI_SET_HOME_ZONE ? !(st.home_flags & SETTINGS_HOME_NO_ZONE) :
++		       (st.home_flags & SETTINGS_HOME_COMPACT_DUAL) != 0;
++	case UI_SET_HOME_TEXT_COLOR:
++		settings_read(&st);
++		return st.home_text_color < UI_ACCENT_COUNT ? st.home_text_color : UI_ACCENT_DEFAULT;
+ 	case UI_SET_THEME:
+ 		settings_read(&st);
+ 		return settings_theme(&st);
+@@ -511,6 +519,20 @@ bool ui_svc_setting_set(uint8_t id, int32_t value)
+ 		settings_end(hal_millis());
+ 		return true;
+ #endif
++	case UI_SET_HOME_ZONE:
++	case UI_SET_HOME_COMPACT_DUAL: {
++		uint8_t flag = id == UI_SET_HOME_ZONE ? SETTINGS_HOME_NO_ZONE : SETTINGS_HOME_COMPACT_DUAL;
++		bool set = (value != 0) != (id == UI_SET_HOME_ZONE);
++		st = settings_begin();
++		st->home_flags = (uint8_t)(set ? st->home_flags | flag : st->home_flags & ~flag);
++		settings_end(hal_millis());
++		return true;
++	}
++	case UI_SET_HOME_TEXT_COLOR:
++		st = settings_begin();
++		st->home_text_color = (uint8_t)clamp16(value, 0, UI_ACCENT_COUNT - 1);
++		settings_end(hal_millis());
++		return true;
+ 	case UI_SET_THEME:
+ 	case UI_SET_ACCENT:
+ 	case UI_SET_STRIP:
+diff --git a/docs/spec/settings-store.md b/docs/spec/settings-store.md
+index a527ac5..3638ecc 100644
+--- a/docs/spec/settings-store.md
++++ b/docs/spec/settings-store.md
+@@ -172,6 +172,7 @@ callsign. The own DMR ID is always the codeplug's.
+ | Tier III kill | Page 1, appended after `t3_stun`: `t3_kill`, bit 0 (`SETTINGS_T3_KILLED`) a kill taken ([dmr-trunking.md](dmr-trunking.md) 7.9): no DMR at all, in any build, until a factory reset clears it; bits 1-7 reserved (0). Then `air_epoch` (16 bits, was `reserved10[2]`): the start's number for the air modes' encryption ([air-encryption.md](air-encryption.md) 1), raised by one at every boot. 0 (an older record) = not killed |
+ | crash report | packed into spare bits, so an older record reads as off with no target: the mode (0 off, 1 ask, 2 send at once) in `accent` bits 4-5; the target's codeplug contact number (0 none, else 1..1024, 11 bits) bits 0-5 in `theme` bits 2-7 and bits 6-10 in `updown_home` bits 2-6. `theme` and `updown_home` keep their value in bits 0-1; read and write them through `settings_theme` / `settings_updown_home` and `settings_crash_*` (`settings.h`). Firmware from before reads a `theme` or `updown_home` with these bits as out of range: the dark theme and Up/Down = channel ([crash-log.md](crash-log.md) 5.2) |
+ | scan limits and LEDs | Page 1 appends `rs_led_mode` (default, scan amber, off) and both optional VFO limits in Hz. Zero keeps the original indicators and scans the entire current band. |
++| Home appearance | Page 1 uses two reserved bytes after `rs_permit_style` for `home_flags` (zone hidden and compact dual watch) and `home_text_color` (a palette index). An older record keeps the original appearance. |
+ | talk permit style | The appended `rs_permit_style` byte lets the owner pick a chirp or three beeps across modes. Zero keeps each mode's original behavior. The existing flags still store talk-permit enable and FM roger beep. |
+ | visual style | Page 1: `classic_style` uses the first byte reserved after the VFO digital settings. Zero uses the build's default style. One uses RadioFoundry styling and boot artwork. The appended byte `home_name_first` is 1 for a larger channel name on Pink Home, 0 for the default frequency emphasis. Older records read 0. |
+ 
+diff --git a/docs/user/06-home-screen.md b/docs/user/06-home-screen.md
+index e837d1d..8667a4d 100644
+--- a/docs/user/06-home-screen.md
++++ b/docs/user/06-home-screen.md
+@@ -27,6 +27,8 @@ A field changed for now (a temporary change) is drawn in a highlight color on Ho
+ 
+ The battery percentage turns to the warning color at the low battery warning level (15 % by default) and below.
+ 
++When GPS is on, a satellite dish blinks while searching and stays visible after a position fix. It gives way to other status icons on narrow screens.
++
+ ## Hint row messages
+ 
+ The hint row changes with the situation. What the **Back** key does is always at the right end of the row, above the
+diff --git a/docs/user/17-settings.md b/docs/user/17-settings.md
+index a15be4b..6526ecf 100644
+--- a/docs/user/17-settings.md
++++ b/docs/user/17-settings.md
+@@ -62,6 +62,9 @@ Some settings are on the menu before the feature behind them exists, or don't ap
+ | Filled status bar | On, Off | On | Fills the top status line with the highlight color (light gray with Default, white in the high-contrast theme) and draws its text black. Not on radios with a monochrome screen | Works |
+ | Large text | On, Off | Off | Home shows only the status line, the channel and the talk target, large | Works |
+ | Large channel name | On, Off | Off | On Pink Home, emphasizes a stored channel’s name and keeps the frequency visible | Works |
++| Zone name on Home | On, Off | On | Shows the active zone when there is room. The VFO still shows its frequency information. | Works |
++| Home text color | Default, Red, Orange, Yellow, Teal, Light blue, Purple, Pink | Default | Changes the Home foreground without replacing transmit, receive or warning colors. The display adjusts the tint for the chosen background. | Color screens |
++| Hide second watch pane | On, Off | Off | Home shows the selected channel and the DUAL indicator. Both channels remain in the watch. | Dual watch builds |
+ | Status LEDs | Default, Scan amber, Off | Default | Gives an amber blink while a zone or VFO scan is searching, or turns the indicators off | Works |
+ | Hint row | On, Off | On | The bottom line with key hints | Works |
+ | Talkgroup name first | On, Off | Off | Home's talk line reads "World TG 91" instead of "TG 91 World": on a small screen the name is what fits. A side key set to **TG name / number** switches it too. On radios with DMR | Works |
+diff --git a/tests/host/sim/ui_sim.c b/tests/host/sim/ui_sim.c
+index 115e128..b6c39ad 100644
+--- a/tests/host/sim/ui_sim.c
++++ b/tests/host/sim/ui_sim.c
+@@ -2646,6 +2646,9 @@ void sim_reset(const sim_geom_t *g, sim_map_t map)
+ 	ui_svc_setting_set(UI_SET_VOLUME, RADIO_VOLUME_DEFAULT);
+ 	ui_svc_setting_set(UI_SET_HINTS, 1);
+ 	ui_svc_setting_set(UI_SET_LARGE_TEXT, 0);
++	ui_svc_setting_set(UI_SET_HOME_ZONE, 1);
++	ui_svc_setting_set(UI_SET_HOME_TEXT_COLOR, 0);
++	ui_svc_setting_set(UI_SET_HOME_COMPACT_DUAL, 0);
+ 	ui_svc_setting_set(UI_SET_BRIGHTNESS, 100);
+ 	ui_svc_setting_set(UI_SET_TOT_S, 180);
+ 	ui_svc_setting_set(UI_SET_BACKLIGHT_S, 30);
+diff --git a/tests/host/uiFlowTest.c b/tests/host/uiFlowTest.c
+index 7cfe314..e61cd7f 100644
+--- a/tests/host/uiFlowTest.c
++++ b/tests/host/uiFlowTest.c
+@@ -13,6 +13,7 @@
+ #include <string.h>
+ #include "sim/ui_sim.h"
+ #include "ui/ui_app.h"
++#include "ui/ui_nav.h"
+ #include "ui/ui_svc.h"
+ #include "ui/ui_screens.h"
+ #include "ui/i18n.h"
+@@ -2057,6 +2058,28 @@ static void title_row_checks(void)
+ }
+ 
+ // Home's talk target line drops a contact name that only repeats the ID ("TG 201 TG 201" on the DB25-D, 2026-10-17)
++static void home_options_checks(void)
++{
++	char err[240];
++	const sim_geom_t *g = &sim_geoms[0];
++#if CONFIG_DUAL_WATCH
++	sim_reset(g, SIM_MAP_K);
++	bool dual_ok = sim_run("quick 7 ctx 3 5 ok expect:dual=1 expect:shows=DUAL", err, sizeof err);
++	ui_apply_setting(UI_SET_HOME_COMPACT_DUAL, 1);
++	if (!dual_ok || !sim_run("wait:200 expect:dual=1 expect:shows=DUAL expect:hides=Heard", err, sizeof err)) {
++		printf("FAIL compact Dual Watch: %s\n", err);
++		fails++;
++	}
++#endif
++	sim_reset(g, SIM_MAP_K);
++	bool zone_ok = sim_run("expect:shows=Local", err, sizeof err);
++	ui_apply_setting(UI_SET_HOME_ZONE, 0);
++	if (!zone_ok || !sim_run("wait:200 expect:hides=Local", err, sizeof err)) {
++		printf("FAIL Home zone option: %s\n", err);
++		fails++;
++	}
++}
++
+ static int check_name_is_id(void)
+ {
+ 	int bad = 0;
+@@ -2166,6 +2189,7 @@ int main(void)
+ 	volume_bar_checks();
+ #endif
+ 	title_row_checks();
++	home_options_checks();
+ 
+ 	crawl(sim_geom_find("160x120i5"), SIM_MAP_K, "K DM-1701");
+ 	crawl(sim_geom_find("128x64"), SIM_MAP_M, "M GD-77");

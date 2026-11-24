@@ -6,7 +6,7 @@ before you install it:
 - Keep a full backup of your radio, including its calibration ([recovery.md](recovery.md)).
 - Transmit only where your license allows.
 - Transmit on a trunked system only if its administrator authorized you and assigned your unit ID.
-- Encrypted calls are muted. Only AES-256 on a conventional P25 or DMR channel with a key is decrypted ([below](#aes-256-conventional-voice)).
+- Protected calls play when the radio supports the selected algorithm and has its key. For NXDN conventional voice, see [NXDN 15-bit scrambler](#nxdn-15-bit-scrambler).
 
 ## Channel modes
 
@@ -16,12 +16,23 @@ before you install it:
 | DMR | `DMR` | Tier II, both timeslots, as RadioFoundry |
 | P25 | `P25` | P25 Phase 1 conventional: one frequency (or a repeater pair), a NAC, a talkgroup |
 | NXDN | `NXDN` | NXDN48 or NXDN96 conventional and Type-C voice trunking |
+| NXDN Scrambler | `NXDN 4800 Scrambler` or `NXDN 9600 Scrambler` | Conventional NXDN voice with an installed 15-bit key |
 | P25 trunk | `P25T` | One P25 Phase 1 trunked system. The channel's frequency is the system's control channel; the radio moves to the voice channels by itself |
 
 The radio's rated bands are 136–174 and 400–480 MHz. **Tools > RX past bands** lets the firmware attempt
 receive-only tuning above those bands. At 800 MHz, the synthesizer lock and useful sensitivity of the RF front end
 have not been confirmed. Tune the actual output frequency and compare with an independent receiver before
 diagnosing a trunking or channel-plan problem.
+
+### NXDN 15-bit scrambler
+
+1. In the web CPS, open **Radio → Keyring** and add an **NXDN scrambler** key. Enter the key as a decimal number from 1 to 32767. Assign a key ID from 0 to 63.
+2. Set the channel's **Mode** to **NXDN Scrambler**. Enter the RX and TX frequencies, select the NXDN48 or NXDN96 rate, set the RANs and choose the installed key ID.
+3. Write the codeplug. A saved conventional NXDN channel can also select an installed key from **Channels → [channel] → NXDN scrambler** on the radio. Hold **OK** to save.
+
+Both radios must use the same seed and key ID. A scrambled memory with a missing key refuses PTT. The scrambler is for conventional voice. AES-256 and Type-C channels retain their existing settings.
+
+CSVs carry the rate, key ID and **NXDN Scrambler TX**, while the base **RX Only** column is set for compatibility with older editors. CSVs and shared zones omit the seed. Use a private backup to retain keys.
 
 ### NXDN Type-C reception
 
