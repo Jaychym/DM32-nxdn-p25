@@ -174,3 +174,10 @@ out. Tested on a DM-32UV against Motorola and Kenwood radios.
 **Support:** want firmware for another radio? Gift one from my wishlist and I can port it:
 <https://throne.com/lyraarsgoetia> · Support development on Ko-fi: <https://ko-fi.com/lyraarsgoetia>
 Donations support development time. The firmware is free (GPL-3.0-or-later): supporting does not buy the firmware, early access, or the AMBE codec, which is not distributed here and still comes from your own radio.
+
+### PIN opcionales en la DM-32UV
+
+En **Ajustes → Mi radio** puedes activar cada protección por separado. Ambas vienen desactivadas.
+
+- **PIN de encendido.** Elige cuatro dígitos. La radio los pide antes de iniciar su funcionamiento normal. Si ya usabas un PIN de seis dígitos, sigue funcionando después de actualizar. Al cambiarlo, el nuevo será de cuatro dígitos.
+- **PIN de lectura CPS.** Elige seis dígitos. Cuando pulses **Leer de la radio** en el editor web compatible, introdúcelos en la computadora. Para cambiar o quitar este PIN se pide el actual en la radio. Para escribir o usar un CPS antiguo con la protección activa, desbloquea la programación desde la radio.
