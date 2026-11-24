@@ -1,0 +1,636 @@
+diff --git a/core/radio/beep.c b/core/radio/beep.c
+index 83a5384..d5b0c4c 100644
+--- a/core/radio/beep.c
++++ b/core/radio/beep.c
+@@ -39,6 +39,8 @@ static const beep_seg_t p_emergency[] = { { 1500, 160 }, { 900, 160 }, { 1500, 1
+ 					  { 900, 160 } };
+ // Rising three-note chime: a message
+ static const beep_seg_t p_message[] = { { 1000, 60 }, { 0, 30 }, { 1300, 60 }, { 0, 30 }, { 1700, 90 } };
++// A double ring for an incoming call alert.
++static const beep_seg_t p_call_alert[] = { { 1600, 130 }, { 0, 80 }, { 1600, 130 } };
+ // Two rising notes: back on the trunked system
+ static const beep_seg_t p_system_back[] = { { 1000, 60 }, { 0, 60 }, { 1400, 60 } };
+ // The speaker test (tests/hil/test_speaker.py): silence with the route up (a pop or a click there is the route's, not
+@@ -64,6 +66,7 @@ static const struct {
+ 	[BEEP_TX_PERMIT_SHORT] = PAT(p_permit),
+ 	[BEEP_SWEEP] = PAT(p_sweep),
+ 	[BEEP_SYSTEM_BACK] = PAT(p_system_back),
++	[BEEP_CALL_ALERT] = PAT(p_call_alert),
+ 	[BEEP_TX_PERMIT_DV] = PAT(p_permit_dv),
+ };
+ 
+diff --git a/core/radio/beep.h b/core/radio/beep.h
+index d75c3f9..e280e6c 100644
+--- a/core/radio/beep.h
++++ b/core/radio/beep.h
+@@ -34,6 +34,7 @@ typedef enum {
+ 	BEEP_SWEEP,		// speaker test (debug link only): a 4 s sweep, BEEP_SWEEP_LO_HZ to BEEP_SWEEP_HI_HZ
+ 	BEEP_SYSTEM_BACK,	// a trunked system found again, the radio back on it from its fallback channel
+ 	BEEP_TX_PERMIT_DV,	// P25 / NXDN: talk now, played before keying (Motorola ASTRO 25 style)
++	BEEP_CALL_ALERT,	// incoming DMR call alert
+ 	BEEP_COUNT
+ } beep_t;
+ 
+diff --git a/core/ui/lang/es.po b/core/ui/lang/es.po
+index 36693c6..000f7e9 100644
+--- a/core/ui/lang/es.po
++++ b/core/ui/lang/es.po
+@@ -364,8 +364,8 @@ msgstr "Marcado rápido "
+ 
+ #: core/ui/ui_app.c
+ msgctxt "DIAL_TOAST_IS_EMPTY"
+-msgid " is empty: set it in qdmr"
+-msgstr " vacío: defínelo en qdmr"
++msgid " unavailable"
++msgstr " no disponible"
+ 
+ #: core/ui/ui_app.c
+ msgctxt "HOME_TOAST_REPLY_ENDED"
+@@ -649,8 +649,8 @@ msgstr "Destino: solo canales DMR"
+ 
+ #: core/ui/ui_app.c
+ msgctxt "DMR_REPLAY_OFF"
+-msgid "DMR recording is off"
+-msgstr "Grabación DMR desactivada"
++msgid "Talk & listen: Record DMR"
++msgstr "Hablar y escuchar: Grabar DMR"
+ 
+ #: core/ui/ui_app.c
+ msgctxt "DMR_REPLAY_EMPTY"
+@@ -3939,8 +3939,8 @@ msgstr "Avisos de voz"
+ 
+ #: core/ui/ui_menus.c
+ msgctxt "SET_LABEL_MESSAGE_TONE"
+-msgid "Message tone"
+-msgstr "Tono de mensaje"
++msgid "Message / alert tones"
++msgstr "Tonos de mensaje y alerta"
+ 
+ #: core/ui/ui_menus.c
+ msgctxt "SET_LABEL_VIBRATE"
+diff --git a/core/ui/lang/fr.po b/core/ui/lang/fr.po
+index a6eb98a..79c017b 100644
+--- a/core/ui/lang/fr.po
++++ b/core/ui/lang/fr.po
+@@ -364,8 +364,8 @@ msgstr "Appel abrégé "
+ 
+ #: core/ui/ui_app.c
+ msgctxt "DIAL_TOAST_IS_EMPTY"
+-msgid " is empty: set it in qdmr"
+-msgstr " vide: régler qdmr"
++msgid " unavailable"
++msgstr " indisponible"
+ 
+ #: core/ui/ui_app.c
+ msgctxt "HOME_TOAST_REPLY_ENDED"
+@@ -649,8 +649,8 @@ msgstr "Cible : DMR seul"
+ 
+ #: core/ui/ui_app.c
+ msgctxt "DMR_REPLAY_OFF"
+-msgid "DMR recording is off"
+-msgstr "Enregistrement DMR arrêté"
++msgid "Talk & listen: Record DMR"
++msgstr "Parler et écouter : enregistrer DMR"
+ 
+ #: core/ui/ui_app.c
+ msgctxt "DMR_REPLAY_EMPTY"
+@@ -3939,8 +3939,8 @@ msgstr "Synthèse vocale"
+ 
+ #: core/ui/ui_menus.c
+ msgctxt "SET_LABEL_MESSAGE_TONE"
+-msgid "Message tone"
+-msgstr "Bip de message"
++msgid "Message / alert tones"
++msgstr "Sons de message et d'alerte"
+ 
+ #: core/ui/ui_menus.c
+ msgctxt "SET_LABEL_VIBRATE"
+diff --git a/core/ui/lang/it.po b/core/ui/lang/it.po
+index 47e57c1..9d25c31 100644
+--- a/core/ui/lang/it.po
++++ b/core/ui/lang/it.po
+@@ -364,8 +364,8 @@ msgstr "Chiam. rapida "
+ 
+ #: core/ui/ui_app.c
+ msgctxt "DIAL_TOAST_IS_EMPTY"
+-msgid " is empty: set it in qdmr"
+-msgstr " è vuota: impostala in qdmr"
++msgid " unavailable"
++msgstr " non disponibile"
+ 
+ #: core/ui/ui_app.c
+ msgctxt "HOME_TOAST_REPLY_ENDED"
+@@ -649,8 +649,8 @@ msgstr "Destinaz.: solo canali DMR"
+ 
+ #: core/ui/ui_app.c
+ msgctxt "DMR_REPLAY_OFF"
+-msgid "DMR recording is off"
+-msgstr "Registrazione DMR spenta"
++msgid "Talk & listen: Record DMR"
++msgstr "Parla e ascolta: registra DMR"
+ 
+ #: core/ui/ui_app.c
+ msgctxt "DMR_REPLAY_EMPTY"
+@@ -3939,8 +3939,8 @@ msgstr "Voce guida"
+ 
+ #: core/ui/ui_menus.c
+ msgctxt "SET_LABEL_MESSAGE_TONE"
+-msgid "Message tone"
+-msgstr "Tono messaggio"
++msgid "Message / alert tones"
++msgstr "Toni messaggi e avvisi"
+ 
+ #: core/ui/ui_menus.c
+ msgctxt "SET_LABEL_VIBRATE"
+diff --git a/core/ui/lang/zh.po b/core/ui/lang/zh.po
+index e0c9ce7..35c6187 100644
+--- a/core/ui/lang/zh.po
++++ b/core/ui/lang/zh.po
+@@ -366,8 +366,8 @@ msgstr "缩位拨号 "
+ 
+ #: core/ui/ui_app.c
+ msgctxt "DIAL_TOAST_IS_EMPTY"
+-msgid " is empty: set it in qdmr"
+-msgstr " 为空：请在 qdmr 设置"
++msgid " unavailable"
++msgstr " 不可用"
+ 
+ #: core/ui/ui_app.c
+ msgctxt "HOME_TOAST_REPLY_ENDED"
+@@ -651,8 +651,8 @@ msgstr "通话目标：仅 DMR 信道"
+ 
+ #: core/ui/ui_app.c
+ msgctxt "DMR_REPLAY_OFF"
+-msgid "DMR recording is off"
+-msgstr "DMR录音已关闭"
++msgid "Talk & listen: Record DMR"
++msgstr "通话与收听：记录DMR"
+ 
+ #: core/ui/ui_app.c
+ msgctxt "DMR_REPLAY_EMPTY"
+@@ -3941,8 +3941,8 @@ msgstr "语音提示"
+ 
+ #: core/ui/ui_menus.c
+ msgctxt "SET_LABEL_MESSAGE_TONE"
+-msgid "Message tone"
+-msgstr "消息提示音"
++msgid "Message / alert tones"
++msgstr "消息与呼叫提示音"
+ 
+ #: core/ui/ui_menus.c
+ msgctxt "SET_LABEL_VIBRATE"
+diff --git a/core/ui/ui_app.c b/core/ui/ui_app.c
+index ea47c68..568d7dd 100644
+--- a/core/ui/ui_app.c
++++ b/core/ui/ui_app.c
+@@ -677,6 +677,8 @@ static void handle_event(const ui_event_t *ev)
+ 		sb_str(&b, TR(ALERT_BANNER_FROM, "Call alert from "));
+ 		station(&b, ev);
+ 		banner(UI_BANNER_CALL_ALERT, false, ev->id, title, TR(HINT_PTT_REPLIES, "PTT replies"));
++		if (ui_st.message_tone)
++			ui_svc_beep(UI_BEEP_CALL_ALERT);
+ 		vibrate(UI_VIBE_CALL);
+ 		break;
+ 	case UI_EV_PRIVATE_CALL:
+@@ -1172,7 +1174,7 @@ bool ui_home_key(const input_event_t *ev)
+ 		sb_init(&b, msg, sizeof msg);
+ 		sb_str(&b, TR(DIAL_TOAST_SPEED_DIAL, "Speed dial "));
+ 		sb_u32(&b, (uint32_t)d, 1);
+-		sb_str(&b, TR(DIAL_TOAST_IS_EMPTY, " is empty: set it in qdmr"));
++		sb_str(&b, TR(DIAL_TOAST_IS_EMPTY, " unavailable"));
+ 		ui_toast(msg);
+ 		return true;
+ 	}
+@@ -2508,7 +2510,7 @@ void ui_app_key(const input_event_t *ev)
+ #if CONFIG_DMR_REPLAY
+ 		case ACT_DMR_REPLAY:
+ 			if (!view->dmr.replay_enabled)
+-				ui_toast(TR(DMR_REPLAY_OFF, "DMR recording is off"));
++				ui_toast(TR(DMR_REPLAY_OFF, "Talk & listen: Record DMR"));
+ 			else if (!view->dmr.replay_ready)
+ 				ui_toast(TR(DMR_REPLAY_EMPTY, "No DMR recording"));
+ 			else if (!view->dmr.active || view->state != RS_IDLE || view->scan != 0)
+diff --git a/core/ui/ui_dual.c b/core/ui/ui_dual.c
+index 92baa2f..70e8625 100644
+--- a/core/ui/ui_dual.c
++++ b/core/ui/ui_dual.c
+@@ -16,6 +16,12 @@
+ #include "i18n.h"
+ #include "codeplug/codeplug.h"
+ #include "codeplug/codeplug_modes.h"
++#if CONFIG_NXDN
++#include "codeplug/codeplug_records.h"
++#endif
++#if CONFIG_P25
++#include "p25/p25_codeplug.h"
++#endif
+ 
+ #define START_GRACE_MS	500	// the radio view may still show no watch this soon after asking for one
+ #define BACK_AGAIN_MS	2000	// Back on Home, then Back again within this: the watch stops
+@@ -218,6 +224,28 @@ static void pane_fill(uint8_t i)
+ 	if (s->valid)
+ 		ch = s->ch;	// as the radio has it: changes for now included
+ 	p->mode = shown_mode(&ch);
++#if CONFIG_P25 || CONFIG_NXDN
++	sbuf_t target;
++	sb_init(&target, p->target, sizeof p->target);
++#endif
++#if CONFIG_P25
++	if (p->mode == RADIO_MODE_P25 && ch.kind != CODEPLUG_KIND_P25_TRUNK) {
++		p25_conv_cfg_t cfg;
++		if (p->number && p25_conv_load(p->number, &ch, &cfg)) {
++			sb_str(&target, cfg.target_unit ? "ID " : "TG ");
++			sb_u32(&target, cfg.target, 1);
++		}
++	}
++#endif
++#if CONFIG_NXDN
++	if (p->mode == RADIO_MODE_NXDN) {
++		nxdn_conv_cfg_t cfg;
++		if (p->number && nxdn_conv_load(p->number, &ch, &cfg)) {
++			sb_str(&target, cfg.target_unit ? "ID " : "TG ");
++			sb_u32(&target, cfg.target, 1);
++		}
++	}
++#endif
+ 	p->rx_hz = ch.rx_hz;
+ 	p->tx_voice_lock = s->valid && s->tx_voice_lock;
+ 	p->tx_voice_clear = s->valid && s->tx_voice_clear;
+@@ -244,6 +272,8 @@ static void pane_fill(uint8_t i)
+ 			t.group = c.type != CONTACT_PRIVATE;
+ 			strcpy(t.name, c.name);
+ 			ui_sb_target(p->target, sizeof p->target, &t);
++		} else {
++			strcpy(p->target, "TG 9");
+ 		}
+ 		sb_str(&b, "TS");
+ 		sb_u32(&b, s->valid && s->ts ? s->ts : ch.timeslot ? ch.timeslot : 1u, 1);
+diff --git a/core/ui/ui_menus.c b/core/ui/ui_menus.c
+index b6eea0e..ee3dfb9 100644
+--- a/core/ui/ui_menus.c
++++ b/core/ui/ui_menus.c
+@@ -7535,7 +7535,7 @@ static const set_item_t s_sound[] = {
+ 	TOGGLE(TRN(SET_LABEL_SCAN_STOP_TONE, "Scan stop tone"), NULL, UI_SET_SCAN_TONE),
+ 	TOGGLE(TRN(SET_LABEL_EMERGENCY_TONE, "Emergency tone"), "alarm", UI_SET_EMERGENCY_TONE),
+ 	TOGGLE(TRN(SET_LABEL_VOICE_PROMPTS, "Voice prompts"), "speech", UI_SET_VOICE_PROMPTS),
+-	TOGGLE(TRN(SET_LABEL_MESSAGE_TONE, "Message tone"), NULL, UI_SET_MESSAGE_TONE),
++	TOGGLE(TRN(SET_LABEL_MESSAGE_TONE, "Message / alert tones"), NULL, UI_SET_MESSAGE_TONE),
+ #if CONFIG_VIBRATE
+ 	TOGGLE(TRN(SET_LABEL_VIBRATE, "Vibrate"), "vibration motor silent", UI_SET_VIBRATE),
+ #endif
+diff --git a/core/ui/ui_screens.c b/core/ui/ui_screens.c
+index acfe5fd..8f40f46 100644
+--- a/core/ui/ui_screens.c
++++ b/core/ui/ui_screens.c
+@@ -489,8 +489,14 @@ static int draw_voice_lock(const font_t *f, int x, int y, color_t color)
+ 	int h = voice_lock_height(f), w = h - h / 4;
+ 	int top = y + (f->h - h) / 2;
+ 
+-	gfx_rect(x + 1, top, w - 2, h / 2 + 1, color);
+-	gfx_fill(x, top + h / 2, w, h - h / 2, color);
++	int shoulder = h / 2;
++	int tip = h - shoulder;
++	int slope = (w - 1) / 2;
++	gfx_fill(x, top, w, shoulder, color);
++	for (int row = 0; row < tip; row++) {
++		int inset = (row + 1) * slope / tip;
++		gfx_hline(x + inset, top + shoulder + row, w - 2 * inset, color);
++	}
+ 	return x + voice_lock_width(f);
+ }
+ 
+@@ -2743,7 +2749,8 @@ static void draw_home_large(const radio_view_t *v, const ui_state_t *s)
+ 		sb_str(&b, v->ch.name);
+ 	const font_t *f = large_font(buf, room, form, sizeof form);
+ 	gfx_text_fit(f, form, w, fit, sizeof fit);
+-	gfx_text(f, 0, y, fit, tx ? ui_col.tx : ui_col.fg);
++	int x = centered_home() ? (w - gfx_text_width(f, fit)) / 2 : 0;
++	gfx_text(f, x, y, fit, tx ? ui_col.tx : ui_col.fg);
+ 	y += room;
+ 	sb_init(&b, buf, sizeof buf);
+ #if CONFIG_YSF
+@@ -2773,7 +2780,8 @@ static void draw_home_large(const radio_view_t *v, const ui_state_t *s)
+ 	}
+ 	f = large_font(buf, room, form, sizeof form);
+ 	gfx_text_fit(f, form, w, fit, sizeof fit);
+-	gfx_text(f, 0, y, fit, v->state == RS_TX ? ui_col.tx : v->state == RS_RX ? ui_col.rx : ui_col.fg);
++	x = centered_home() ? (w - gfx_text_width(f, fit)) / 2 : 0;
++	gfx_text(f, x, y, fit, v->state == RS_TX ? ui_col.tx : v->state == RS_RX ? ui_col.rx : ui_col.fg);
+ }
+ 
+ // Voice PTT uses the same heading, timer and rows for each mode. The target and air settings come from the view.
+@@ -3566,28 +3574,44 @@ static void dual_compact(const ui_state_t *s)
+ {
+ 	const ui_layout_t *l = &ui_layout;
+ 	const ui_dual_pane_t *p = &s->dual.pane[s->dual.sel];
+-	const char *zone = p->zone;
+ 	int w = gfx_width();
+ 	char buf[48], fit[48];
+-	if (!s->home_no_zone && l->zone_y >= 0) {
+-		gfx_text_fit(l->small, zone, w, fit, sizeof fit);
+-		gfx_text(l->small, 0, l->zone_y, fit, ui_col.dim);
+-	}
++	int y = s->large_text ? l->strip_h + 2 : l->channel_y;
++	int room = (l->hint_y - y) / 2;
+ 	dual_name(s, s->dual.sel, buf, sizeof buf);
+-	const font_t *f = gfx_text_width(l->large, buf) <= w ? l->large : l->medium;
+-	gfx_text_fit(f, buf, w, fit, sizeof fit);
+-	gfx_text(f, 0, l->channel_y, fit, ui_col.fg);
+-	if (p->rx && p->caller[0])
+-		gfx_text_fit(l->medium, p->caller, w, fit, sizeof fit);
+-	else if (p->target[0])
+-		gfx_text_fit(l->medium, p->target, w, fit, sizeof fit);
+-	else {
++	const char *target = p->rx && p->caller[0] ? p->caller : p->target;
++	char fallback[24];
++	if (!target[0] && p->mode == RADIO_MODE_FM) {
+ 		sbuf_t b;
+-		sb_init(&b, fit, sizeof fit);
++		sb_init(&b, fallback, sizeof fallback);
+ 		sb_freq(&b, p->rx_hz);
+ 		sb_str(&b, " MHz");
++		target = fallback;
++	} else if (!target[0]) {
++		target = ui_mode_name(p->mode);
+ 	}
+-	gfx_text(l->medium, 0, l->talk_y, fit, p->rx ? ui_col.rx : ui_col.fg);
++	if (s->large_text) {
++		char form[48];
++		const font_t *f = large_font(buf, room, form, sizeof form);
++		gfx_text_fit(f, form, w, fit, sizeof fit);
++		gfx_text(f, centered_home() ? (w - gfx_text_width(f, fit)) / 2 : 0, y, fit, ui_col.fg);
++		f = large_font(target, room, form, sizeof form);
++		gfx_text_fit(f, form, w, fit, sizeof fit);
++		gfx_text(f, centered_home() ? (w - gfx_text_width(f, fit)) / 2 : 0, y + room, fit,
++			 p->rx ? ui_col.rx : ui_col.fg);
++		return;
++	}
++	if (!s->home_no_zone && l->zone_y >= 0) {
++		gfx_text_fit(l->small, p->zone, w, fit, sizeof fit);
++		gfx_text(l->small, centered_home() ? (w - gfx_text_width(l->small, fit)) / 2 : 0,
++			 l->zone_y, fit, ui_col.dim);
++	}
++	const font_t *f = gfx_text_width(l->large, buf) <= w ? l->large : l->medium;
++	gfx_text_fit(f, buf, w, fit, sizeof fit);
++	gfx_text(f, centered_home() ? (w - gfx_text_width(f, fit)) / 2 : 0, y, fit, ui_col.fg);
++	gfx_text_fit(l->medium, target, w, fit, sizeof fit);
++	gfx_text(l->medium, centered_home() ? (w - gfx_text_width(l->medium, fit)) / 2 : 0, l->talk_y, fit,
++		 p->rx ? ui_col.rx : ui_col.fg);
+ 	dual_row3(p, buf, sizeof buf);
+ 	gfx_text_fit(l->small, buf, w, fit, sizeof fit);
+ 	gfx_text(l->small, 0, l->chips_y, fit, ui_col.dim);
+diff --git a/core/ui/ui_svc.h b/core/ui/ui_svc.h
+index 9f537bb..c617f02 100644
+--- a/core/ui/ui_svc.h
++++ b/core/ui/ui_svc.h
+@@ -211,7 +211,7 @@ bool ui_svc_t3_cli(uint32_t gw, char *out, size_t len);
+ #endif
+ 
+ // --- Beeps (radio-features): the radio sounds key beeps only when its key_beep setting is on ---
+-typedef enum { UI_BEEP_KEY, UI_BEEP_ERROR, UI_BEEP_MESSAGE, UI_BEEP_BATTERY_LOW } ui_beep_t;
++typedef enum { UI_BEEP_KEY, UI_BEEP_ERROR, UI_BEEP_MESSAGE, UI_BEEP_BATTERY_LOW, UI_BEEP_CALL_ALERT } ui_beep_t;
+ void ui_svc_beep(uint8_t beep);
+ // --- Vibration (radio-features 4.1): a pattern on the board's motor; the UI asks only when Settings > Sound >
+ // Vibrate is on. Weak no-op without CONFIG_VIBRATE ---
+diff --git a/core/ui/ui_svc_radio.c b/core/ui/ui_svc_radio.c
+index 34f9b4d..7545468 100644
+--- a/core/ui/ui_svc_radio.c
++++ b/core/ui/ui_svc_radio.c
+@@ -548,7 +548,7 @@ void ui_svc_beep(uint8_t beep)
+ {
+ 	static const uint8_t map[] = {
+ 		[UI_BEEP_KEY] = BEEP_KEY, [UI_BEEP_ERROR] = BEEP_ERROR, [UI_BEEP_MESSAGE] = BEEP_MESSAGE,
+-		[UI_BEEP_BATTERY_LOW] = BEEP_BATTERY_LOW,
++		[UI_BEEP_BATTERY_LOW] = BEEP_BATTERY_LOW, [UI_BEEP_CALL_ALERT] = BEEP_CALL_ALERT,
+ 	};
+ 	radio_req_beep(beep < sizeof map ? map[beep] : BEEP_KEY);
+ }
+diff --git a/docs/spec/radio-features.md b/docs/spec/radio-features.md
+index cdf73b9..38cbe6c 100644
+--- a/docs/spec/radio-features.md
++++ b/docs/spec/radio-features.md
+@@ -487,7 +487,8 @@ The ID is 4 hex digits. There are no names for IDs yet. Untested on a radio.
+ | battery critical | 600 Hz three times | entering critical, then every 30 s; the same setting as battery low |
+ | scan hold | 1400 Hz 40 ms | the scan stops on a signal, if `scan_beep` (Settings > Sound > Scan stop tone, off by default) |
+ | emergency | 1500 / 900 Hz warble, 6 x 160 ms | someone's emergency heard (alarm or emergency call), if the emergency setting's tone is on (Settings > Sound > Emergency tone, `dmr-emergency.md`) |
+-| message | 1000, 1300, 1700 Hz rising, 60-90 ms each | a text message arrived: the UI asks for it (`radio_req_beep(BEEP_MESSAGE)`) when Settings > Sound > Message tone is on |
++| message | 1000, 1300, 1700 Hz rising, 60-90 ms each | a text message arrived: the UI asks for it (`radio_req_beep(BEEP_MESSAGE)`) when Settings > Sound > Message / alert tones is on |
++| call alert | 1600 Hz twice, 130 ms each, 80 ms apart | an incoming DMR call alert when the same setting is on |
+ | system back | 1000 Hz, 1400 Hz, 60 ms each | a trunked system found again from its fallback channel ([dmr-trunking.md](dmr-trunking.md) 12.5) |
+ | sweep | 400 ms silence, then 150 Hz to 3.8 kHz over 4 s, phase continuous | the speaker test, from the debug link only (op 22, which can delay it); `test_speaker_sweep` measures the speaker's response and whether the audio path plays it whole |
+ 
+diff --git a/docs/spec/ui.md b/docs/spec/ui.md
+index 475d947..ec42ad2 100644
+--- a/docs/spec/ui.md
++++ b/docs/spec/ui.md
+@@ -400,7 +400,7 @@ The same on every screen (information-architecture.md, key maps 7.1 to 7.5):
+ | QUICK | Quick settings (closes them again) | lock / unlock the keys |
+ | CONTEXT | the focused item's actions; a banner's target while one is up | Recent |
+ | TALK_TARGET | the talk target picker | |
+-| digits | Find on Home, numbered rows in lists, T9 letters in filters; nothing while PTT keys the radio; on FM the input task gives them, \* and # to the radio core as DTMF and the UI never sees them (`radio-features.md` 3.7) | speed dial (a toast for now); nothing while PTT keys the radio |
++| digits | Find on Home, numbered rows in lists, T9 letters in filters; nothing while PTT keys the radio; on FM the input task gives them, \* and # to the radio core as DTMF and the UI never sees them (`radio-features.md` 3.7) | speed dial (unavailable); nothing while PTT keys the radio |
+ | PTT | talk to the focused person or talkgroup once (one-shot), else the channel's target | |
+ 
+ Radios without some keys fall back as the key maps say (few-key map F in the tests). Up / Down on Home change the
+diff --git a/docs/user/05-keys-and-navigation.md b/docs/user/05-keys-and-navigation.md
+index a12ae88..940c0e8 100644
+--- a/docs/user/05-keys-and-navigation.md
++++ b/docs/user/05-keys-and-navigation.md
+@@ -35,7 +35,7 @@ a key the radio doesn't have.
+ | **Up**, **Down** | Move the focus. Home: next or previous channel (VFO: frequency step), or zone or talk target with **Settings > Keys > Up/Down on Home** (the channel knob stays on the channel). Editors: change the value | Repeats |
+ | **\*** | Quick settings. While you transmit on FM with **PTT**: its [touch tone](08-fm.md#touch-tones-dtmf) | Lock or unlock the keys |
+ | **#** | While you transmit on FM with **PTT**: its [touch tone](08-fm.md#touch-tones-dtmf). Otherwise: actions for the focused item. Home: actions for the last caller. VFO: tunes a frequency being typed, as **OK** | DMR channels: the talk target picker (pick a talkgroup, or type an ID). Recent is **OK**, **3** |
+-| **0** to **9** | Home: start Find. Lists: pick a numbered row, or type to filter. VFO: type a frequency. While you transmit with **PTT**: FM sends the key's [touch tone](08-fm.md#touch-tones-dtmf), DMR nothing | Home: speed dial (not built yet). While you transmit with **PTT**: as a press |
++| **0** to **9** | Home: start Find. Lists: pick a numbered row, or type to filter. VFO: type a frequency. While you transmit with **PTT**: FM sends the key's [touch tone](08-fm.md#touch-tones-dtmf), DMR nothing | Home: speed dial (unavailable). While you transmit with **PTT**: as a press |
+ | **Previous zone**, **Next zone** | Home: previous or next zone | |
+ | **Monitor** | FM: opens the squelch while held. DMR, P25 and NXDN: digital monitor (every talkgroup, every NAC or RAN) on or off | |
+ | **Talk target** | Talk target picker (DMR channels) | Dual watch on or off |
+diff --git a/docs/user/09-dmr.md b/docs/user/09-dmr.md
+index 06f5bc3..7e26200 100644
+--- a/docs/user/09-dmr.md
++++ b/docs/user/09-dmr.md
+@@ -309,10 +309,10 @@ VFO, open **Quick → AES key**. When the tile reads **AES-128** or **128**, its
+ - The radio checks the algorithm and key ID in the PI header or the late-entry signaling. A channel with a missing
+   traffic key refuses **PTT**.
+ - **\***, **6** turns privacy on for your calls ("Privacy on for now"). **Back** on Home turns it off again.
+-- Home and the transmit screen show a padlock for Basic Privacy, Enhanced Privacy or either AES type with a usable transmit key.
++- Home and the transmit screen show a shield for Basic Privacy, Enhanced Privacy or either AES type with a usable transmit key.
+   The Home strip shows a hollow circle on a voice-capable DMR channel with privacy off. If privacy is selected and its
+   key is unavailable, no privacy symbol appears.
+-  The caller's name gets a padlock when the radio starts decoding protected voice. When the cipher withholds audio, the
++  The caller's name gets a shield when the radio starts decoding protected voice. When the cipher withholds audio, the
+   call says **Encrypted: not played**.
+ 
+ To set the radio-wide Basic Privacy key, open **Settings > Privacy** (**OK**, **7**, **4**).
+diff --git a/docs/user/17-settings.md b/docs/user/17-settings.md
+index af4abd6..9383823 100644
+--- a/docs/user/17-settings.md
++++ b/docs/user/17-settings.md
+@@ -49,7 +49,7 @@ Some settings are on the menu before the feature behind them exists, or don't ap
+ | Scan stop tone | On, Off | Off | A short beep when a scan stops on a signal | Works |
+ | Emergency tone | On, Off | On | The warble when the radio hears someone's emergency. Dimmed in a build without DMR emergency | Works |
+ | Voice prompts | On, Off | Off | Spoken prompts. There is no recorded speech yet | Dimmed |
+-| Message tone | On, Off | On | A three-note tone when a text message arrives | Works |
++| Message / alert tones | On, Off | On | A chime for incoming text messages and a double ring for DMR call alerts | Works |
+ | Vibrate | On, Off | On | The radio vibrates for a text message, a call alert, a private call to you and an emergency it hears. Only on radios with a vibration motor ([Radio reference](23-radios.md)) | Works |
+ 
+ ### Display (key 2)
+diff --git a/site/static/js/codeplug/bootimage.js b/site/static/js/codeplug/bootimage.js
+index 3de8066..75535b2 100644
+--- a/site/static/js/codeplug/bootimage.js
++++ b/site/static/js/codeplug/bootimage.js
+@@ -13,17 +13,16 @@ export function packBootImage(rgba) {
+ 	if (rgba.length !== BOOT_IMAGE_EDGE ** 2 * 4) throw new RangeError("Invalid image dimensions");
+ 	const image = new Uint8Array(BOOT_IMAGE_BYTES);
+ 	const luma = (i) => (0.2126 * rgba[i] + 0.7152 * rgba[i + 1] + 0.0722 * rgba[i + 2]) / 255;
+-	let coverage = 0, brightness = 0, transparent = false;
++	let transparent = false, lightArtwork = true;
+ 	for (let i = 0; i < rgba.length; i += 4) {
+-		const alpha = rgba[i + 3];
+-		transparent ||= alpha < 255;
+-		coverage += alpha;
+-		brightness += luma(i) * alpha;
++		transparent ||= rgba[i + 3] < 255;
++		lightArtwork &&= rgba[i + 3] === 0 || luma(i) >= 2 / 3;
+ 	}
+-	// A dark logo on a transparent background should use the theme foreground.
+-	const invert = transparent && brightness < coverage / 2;
++	// Keep transparent white graphics legible as theme ink. Mixed tones retain their source polarity.
++	const whiteLogo = transparent && lightArtwork;
+ 	for (let i = 0; i < rgba.length; i += 4) {
+-		const shade = (invert ? 1 - luma(i) : luma(i)) * rgba[i + 3] / 255;
++		// Shade 0 is the theme background and 3 is its ink. Alpha blends towards the background.
++		const shade = (whiteLogo ? luma(i) : 1 - luma(i)) * rgba[i + 3] / 255;
+ 		const pixel = i / 4;
+ 		image[pixel >> 2] |= Math.round(shade * 3) << (6 - 2 * (pixel & 3));
+ 	}
+diff --git a/site/tests/bootimage.test.mjs b/site/tests/bootimage.test.mjs
+index 89a9f32..97875da 100644
+--- a/site/tests/bootimage.test.mjs
++++ b/site/tests/bootimage.test.mjs
+@@ -8,9 +8,10 @@ import { decodeArea, getValue, putArea, setValue } from "../static/js/codeplug/k
+ 
+ test("a startup image round-trips alongside other settings and can be removed", () => {
+ 	const pixels = new Uint8ClampedArray(BOOT_IMAGE_EDGE ** 2 * 4);
+-	pixels.set([255, 255, 255, 255, 170, 170, 170, 255, 85, 85, 85, 255, 255, 255, 255, 0]);
++	pixels.fill(255);
++	pixels.set([255, 255, 255, 255, 170, 170, 170, 255, 85, 85, 85, 255, 0, 0, 0, 255]);
+ 	const image = packBootImage(pixels);
+-	assert.equal(image[0], 0xe4);
++	assert.equal(image[0], 0x1b);
+ 	const model = empty();
+ 	model.general.bootImage = image;
+ 	model.general.batteryTone = true;
+@@ -35,14 +36,20 @@ test("an unknown startup image record is preserved by unrelated edits", () => {
+ 	assert.deepEqual(getValue(decodeArea(encode(model).bytes).entries, BOOT_IMAGE_KEY), Uint8Array.of(1, 2, 3));
+ });
+ 
+-test("a transparent black logo is visible and can replace obsolete mode records", () => {
++test("a transparent image keeps shadows and can replace obsolete mode records", () => {
+ 	const pixels = new Uint8ClampedArray(BOOT_IMAGE_EDGE ** 2 * 4);
+-	pixels.set([0, 0, 0, 255]);
++	pixels.set([0, 0, 0, 255, 0, 0, 0, 128, 0, 0, 0, 0, 255, 255, 255, 255]);
+ 	const image = packBootImage(pixels);
+-	assert.equal(image[0], 0xc0);
++	assert.equal(image[0], 0xe0);
+ 	const saved = encode(empty());
+ 	assert.ok(putArea(saved.bytes, setValue(decodeArea(saved.bytes).entries, 0x0400, new Uint8Array(3500))));
+ 	const model = decode(saved);
+ 	model.general.bootImage = image;
+ 	assert.deepEqual(decode(encode(model)).general.bootImage, image);
+ });
++
++test("a transparent white logo uses the theme foreground", () => {
++	const pixels = new Uint8ClampedArray(BOOT_IMAGE_EDGE ** 2 * 4);
++	pixels.set([255, 255, 255, 255, 255, 255, 255, 128]);
++	assert.equal(packBootImage(pixels)[0], 0xe0);
++});
+diff --git a/tests/host/beepReel.c b/tests/host/beepReel.c
+index 3ab6ab3..612ec74 100644
+--- a/tests/host/beepReel.c
++++ b/tests/host/beepReel.c
+@@ -61,7 +61,7 @@ static const struct {
+ // The UI's beep codes and the beeps they play. This has to match ui_svc_beep() in core/ui/ui_svc_radio.c
+ static const char *const ui_beeps[] = {
+ 	[UI_BEEP_KEY] = "KEY", [UI_BEEP_ERROR] = "ERROR", [UI_BEEP_MESSAGE] = "MESSAGE",
+-	[UI_BEEP_BATTERY_LOW] = "BATTERY_LOW",
++	[UI_BEEP_BATTERY_LOW] = "BATTERY_LOW", [UI_BEEP_CALL_ALERT] = "CALL_ALERT",
+ };
+ 
+ // One step of a scene. A step waits out the gap unless it's quiet, plays its radio core beep if it has one, runs its
+@@ -94,6 +94,8 @@ static const step_t steps[] = {
+ 	{ NULL, "pttup", NULL, false, true, 300 },
+ 	{ "Text message", "msg:9991234,Net_starts_in_5_min", NULL, false, false, 0 },
+ 	{ NULL, "back", NULL, false, false, 0 },
++	{ "DMR call alert", "alert:9991234", NULL, false, false, 0 },
++	{ NULL, "back", NULL, false, false, 0 },
+ 	{ "Battery runs down", "battery:14", NULL, false, false, 0 },
+ 	{ NULL, "battery:3", "BATTERY_CRIT", false, false, 0 },
+ 	{ NULL, "back", NULL, false, false, 0 },	// close the battery warning, or it covers the scan
+diff --git a/tests/host/sim/ui_sim.c b/tests/host/sim/ui_sim.c
+index 08e81d7..ad70eaf 100644
+--- a/tests/host/sim/ui_sim.c
++++ b/tests/host/sim/ui_sim.c
+@@ -928,6 +928,23 @@ bool p25_conv_params(uint16_t number, const channel_t *ch, p25_conv_t *out)
+ 		*out = sim_air(number)->p25;	// as the editor saved it
+ 	return true;
+ }
++bool p25_conv_load(uint16_t number, const channel_t *ch, p25_conv_cfg_t *out)
++{
++	memset(out, 0, sizeof *out);
++	if (!p25_conv_params(number, ch, &out->conv))
++		return false;
++	out->target = P25_CP_TG_DEFAULT;
++	contact_t contact;
++	uint16_t idx = codeplug_channel_talk_contact(ch);
++	if (idx && codeplug_contact(idx, &contact)) {
++		out->target_unit = contact.type == CONTACT_PRIVATE;
++		if (contact.type == CONTACT_ALL_CALL)
++			out->target = P25_CP_TG_ALL;
++		else if (out->target_unit || (contact.id >= 1u && contact.id <= 0xffffu))
++			out->target = contact.id;
++	}
++	return true;
++}
+ bool radio_p25_fits(void) { return p25_radio; }
+ #endif
+ #if CONFIG_NXDN
+diff --git a/tests/host/uiFlowTest.c b/tests/host/uiFlowTest.c
+index 6701b13..9a38dfb 100644
+--- a/tests/host/uiFlowTest.c
++++ b/tests/host/uiFlowTest.c
+@@ -869,7 +869,7 @@ static const flow_t flows[] = {
+ 	  "screen=dmr-id focus=Radio_name toast=No_item_with_that_number", 2, false },
+ 	// Vibrate (Settings > Sound, radio-features.md 4.1): ui_vibe_t 0 message, 1 call, 2 emergency
+ 	{ "S vibrate on a message", "", "msg:9991234,Hi", "vibes=1 vibe=0", 0, false },
+-	{ "S vibrate on a call alert", "", "alert:91", "vibes=1 vibe=1", 0, false },
++	{ "S ring and vibrate on a call alert", "", "alert:91", "beeps=1 beep=4 vibes=1 vibe=1", 0, false },
+ 	{ "S vibrate on a private call", "", "privcall:91", "vibes=1 vibe=1", 0, false },
+ 	{ "S vibrate on an emergency", "", "emergency:91", "vibes=1 vibe=2", 0, false },
+ 	{ "S vibrate off", "ok 7 1 down down down down down down down down down down down ok long:back", "msg:9991234,Hi", "vibes=0 beep=2", 0,
+@@ -2114,7 +2114,7 @@ static void replay_key_checks(void)
+ {
+ 	char err[240];
+ 	sim_reset(&sim_geoms[3], SIM_MAP_K);
+-	if (!sim_run("replaykey expect:shows=DMR_recording_is_off", err, sizeof err)) {
++	if (!sim_run("replaykey expect:shows=Talk_&_listen:_Record_DMR", err, sizeof err)) {
+ 		printf("FAIL DMR recording off message: %s\n", err);
+ 		fails++;
+ 	}
+@@ -2224,9 +2224,15 @@ static void centered_home_checks(void)
+ 			printf("FAIL Centered Home hide zone [%s]: %s\n", sizes[i], err);
+ 			fails++;
+ 		}
++		ui_apply_setting(UI_SET_LARGE_TEXT, 1);
++		if (!sim_run("wait:200 expect:centered=COUNTY_DMR expect:centered=TG_3100", err, sizeof err)) {
++			printf("FAIL Centered Home large text [%s]: %s\n", sizes[i], err);
++			fails++;
++		}
+ #if CONFIG_DUAL_WATCH
+ 		ui_apply_setting(UI_SET_HOME_COMPACT_DUAL, 1);
+-		if (!sim_run("quick 7 ctx 3 5 ok wait:200 expect:dual=1", err, sizeof err) ||
++		if (!sim_run("quick 7 ctx 3 5 ok wait:200 expect:dual=1 expect:centered=COUNTY_DMR "
++			     "expect:centered=TG_3100", err, sizeof err) ||
+ 		    (!sim_run("expect:shows=DUAL", err, sizeof err) && !sim_run("expect:shows=DW", err, sizeof err))) {
+ 			printf("FAIL Centered Home watch indicator [%s]: %s\n", sizes[i], err);
+ 			fails++;

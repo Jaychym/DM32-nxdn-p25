@@ -1,0 +1,179 @@
+diff --git a/boards/dm32/radio_dm32.c b/boards/dm32/radio_dm32.c
+index 4978346..f8f1976 100644
+--- a/boards/dm32/radio_dm32.c
++++ b/boards/dm32/radio_dm32.c
+@@ -873,6 +873,7 @@ const hal_radio_t dm32_radio = {
+ 	.status = status,
+ 	.audio = audio,
+ 	.volume = NULL,
++	.fm_squelch_l1_margin = 2,	// weak FM can open below raw noise 41; the empty-channel floor starts at 43
+ #if CONFIG_REF_TRIM
+ 	.ref_trim = ref_trim,
+ #endif
+diff --git a/core/radio/radio_sm.c b/core/radio/radio_sm.c
+index 5d046b5..89997e2 100644
+--- a/core/radio/radio_sm.c
++++ b/core/radio/radio_sm.c
+@@ -1343,11 +1343,17 @@ static void channel_step(radio_sm_t *sm, int dir, uint32_t now_ms)
+ 	tune(sm, now_ms);
+ }
+ 
++static uint8_t fm_squelch_open_margin(const radio_sm_t *sm, uint8_t level)
++{
++	return level == 1 && sm->view.ch.mode == RADIO_MODE_FM && !sm->view.am && !sm->view.bcast ?
++	       board.radio->fm_squelch_l1_margin : 0;
++}
++
+ // Something on the channel by the noise reading, at the squelch level (the default level when the squelch is open)
+ static bool carrier_heard(const radio_sm_t *sm, uint8_t noise)
+ {
+ 	uint8_t sq = sm->view.squelch != 0 ? sm->view.squelch : RADIO_SQUELCH_DEFAULT;
+-	return noise < radio_sm_squelch_open_below(sq);
++	return noise < radio_sm_squelch_open_below(sq) + fm_squelch_open_margin(sm, sq);
+ }
+ 
+ #if CONFIG_TONE_SCAN
+@@ -10024,11 +10030,13 @@ void radio_sm_poll(radio_sm_t *sm, uint32_t now_ms)
+ 	// Open on carrier (noise below the level's threshold) and the RX tone, both; the monitor overrides (outputs())
+ 	follow_tone(sm, st.tone_ok);
+ 	uint8_t sq = sm->view.squelch;
+-	uint8_t open_below = radio_sm_squelch_open_below(sq);
++	uint8_t threshold = radio_sm_squelch_open_below(sq);
++	unsigned open_below = threshold + fm_squelch_open_margin(sm, sq);
++	unsigned close_below = threshold + RADIO_SQL_HYST_DB;
+ 	bool listening = bcast_listening(sm);
+ 	bool opens = (listening || (sm->view.tone_ok && (sq == 0 || st.noise < open_below))) && !dual_peeking(sm) &&
+ 		     !parked(&sm->view.ch);
+-	bool holds = listening || (sm->view.tone_ok && (sq == 0 || st.noise < open_below + RADIO_SQL_HYST_DB));
++	bool holds = listening || (sm->view.tone_ok && (sq == 0 || st.noise < close_below));
+ 
+ 	if (sm->view.state == RS_IDLE) {
+ 		if (opens) {
+@@ -10047,7 +10055,7 @@ void radio_sm_poll(radio_sm_t *sm, uint32_t now_ms)
+ 		activity(sm, now_ms);
+ 		sm->close_count = 0;
+ 	} else if (++sm->close_count >= close_polls() || (sq != 0 && close_polls() == RADIO_SQL_CLOSE_POLLS &&
+-			   st.noise >= open_below + RADIO_SQL_HYST_DB + RADIO_SQL_FAST_CLOSE_DB)) {
++			   st.noise >= close_below + RADIO_SQL_FAST_CLOSE_DB)) {
+ 		if (sm->view.state == RS_TX_DENIED) {
+ 			// A busy refusal over a reception (deny_rx): its audio stops where the squelch closes; the refusal
+ 			// stays until PTT is released
+diff --git a/docs/spec/hardware-dm32.md b/docs/spec/hardware-dm32.md
+index bba6f66..b70b860 100644
+--- a/docs/spec/hardware-dm32.md
++++ b/docs/spec/hardware-dm32.md
+@@ -769,6 +769,10 @@ Checked on the radio by hand (2026-10-30): 10 ppm moved the carrier 4400 Hz, as
+ | Tone generator 1 | 0x71 | tone in Hz × 10 (1750 Hz burst) |
+ | CSS status | 0x0C | b10 CTCSS detected; b14 DCS normal, b15 DCS inverted. Polled; nothing to clear. The datasheet puts the same results in 0x60 |
+ 
++FM squelch level 1 opens below raw noise 41, up from 39. The close line stays at raw noise 42, one unit below
++the lowest empty-channel reading in the FD6818 reference measurements. Verify the weak-carrier opening and return
++to idle on both RF sections. See [radio-features.md](radio-features.md) 3.5 for the shared squelch rules.
++
+ Receive sequences, in the radio's own order. CTCSS: 0x07 = the tone word, 0x07 = 0x21CE, 0x52, then 0x51. DCS: 0x07 =
+ 0x0AD7 first, the two 0x08 halves, then 0x51. Off: 0x07 = 0x0470, 0x07 = 0x21CE, 0x51 = 0.
+ 
+diff --git a/docs/spec/radio-features.md b/docs/spec/radio-features.md
+index 494e2ea..bc52c82 100644
+--- a/docs/spec/radio-features.md
++++ b/docs/spec/radio-features.md
+@@ -307,8 +307,10 @@ No reverse burst or tone-loss signal from the other station is acted on yet; clo
+ with the tone debounce (8 polls) that keeps fades from chopping audio.
+ 
+ The noise squelch shortens the tail itself. It closes after `RADIO_SQL_CLOSE_POLLS` (2) polls over the close line
+-(open threshold + `RADIO_SQL_HYST_DB`), 50 ms, but after one poll when the noise is `RADIO_SQL_FAST_CLOSE_DB` (12 dB)
++(base level threshold + `RADIO_SQL_HYST_DB`), 50 ms, but after one poll when the noise is `RADIO_SQL_FAST_CLOSE_DB` (12 dB)
+ or more over it: a carrier that goes takes the noise far over the line at once, while a fade crosses it by a little.
++A board's `fm_squelch_l1_margin` can let FM level 1 open on a weaker carrier. The close line and RX tone gate
++stay the same. Carrier detection for scan and busy-channel lockout uses the adjusted opening line at that level.
+ Squelch level 0 (always open) and the APRS hold (`RADIO_SQL_CLOSE_POLLS_APRS`) keep their own timing. On one board
+ (BK4819 receiver) the tail at the speaker went from 55 ms to 15-35 ms in three calls (measured,
+ `test_fm_rx_speaker`); what is left is the poll and the chip's noise reading lag.
+diff --git a/docs/user/08-fm.md b/docs/user/08-fm.md
+index 558ddc8..9478c9f 100644
+--- a/docs/user/08-fm.md
++++ b/docs/user/08-fm.md
+@@ -38,6 +38,8 @@ radio's levels.
+ The squelch level shows on Home as "SQ" and a number. The radio-wide default is in **Settings > Talk & listen >
+ Default squelch** (5 unless changed).
+ 
++Use **1** for weak signals and **0** to keep the carrier squelch open. A configured RX tone still applies.
++
+ The codeplug editor can also set an FM channel's squelch once: **Radio Default**, a numbered level, or **0 — always
+ open**. The last choice keeps that channel's squelch open even with no signal, so continuous noise is expected. A
+ quick-settings change is still temporary; **Clear changes**, another channel selection, or a restart returns to the
+diff --git a/hal/hal_radio.h b/hal/hal_radio.h
+index 1af1c83..a186273 100644
+--- a/hal/hal_radio.h
++++ b/hal/hal_radio.h
+@@ -50,6 +50,8 @@ typedef struct {
+ 	// With volume: true when that level also scales the PCM speaker path (beeps, DMR voice). False: beeps on the PCM
+ 	// path would ignore it, so the core caps each beep at the volume percent (radio_beep_level)
+ 	bool volume_pcm;
++	// Extra noise units allowed to open FM at squelch 1. Must be less than the core's close hysteresis.
++	uint8_t fm_squelch_l1_margin;
+ 	// Optional: during FM TX, send a single audio tone of hz instead of the microphone (1750 Hz burst, roger beep);
+ 	// 0 = the microphone again. False when the board can't (not in FM TX)
+ 	bool (*tx_tone)(uint16_t hz);
+diff --git a/tests/host/radioCoreTest.c b/tests/host/radioCoreTest.c
+index 643f472..ba9e967 100644
+--- a/tests/host/radioCoreTest.c
++++ b/tests/host/radioCoreTest.c
+@@ -1190,6 +1190,49 @@ static void test_channel_squelch(void)
+ 	setup_codeplug();
+ }
+ 
++static void test_fm_squelch_level_one_margin(void)
++{
++	setup_codeplug();
++	start();
++	req(RREQ_SQUELCH, 1 - RADIO_SQUELCH_DEFAULT);
++
++	rx_signal(65, true);
++	poll_for(RADIO_POLL_MS);
++	CHECK(sm.view.state == RS_IDLE && !hw.audio);	// the default threshold is still 64
++	fake_radio.fm_squelch_l1_margin = 2;
++	rx_signal(66, true);
++	poll_for(RADIO_POLL_MS);
++	CHECK(sm.view.state == RS_IDLE && !hw.audio);	// a reading exactly at the opening line stays shut
++	rx_signal(65, true);
++	poll_for(RADIO_POLL_MS);
++	CHECK(sm.view.state == RS_RX && hw.audio);	// a weak carrier in the board's opening margin
++	rx_signal(66, true);
++	poll_for(3 * RADIO_POLL_MS);
++	CHECK(sm.view.state == RS_RX && hw.audio);	// the hysteresis still holds through a small fade
++	rx_signal(68, true);
++	poll_for(RADIO_SQL_CLOSE_POLLS * RADIO_POLL_MS);
++	CHECK(sm.view.state == RS_IDLE && !hw.audio);	// the weakest documented idle noise still closes it
++
++	req(RREQ_SQUELCH, 1);
++	rx_signal(61, true);
++	poll_for(RADIO_POLL_MS);
++	CHECK(sm.view.state == RS_IDLE && !hw.audio);	// level 2 still opens below 61
++	rx_signal(60, true);
++	poll_for(RADIO_POLL_MS);
++	CHECK(sm.view.state == RS_RX && hw.audio);
++
++	req(RREQ_ZONE, 2);
++	req(RREQ_CH_STEP, 1);				// RX DCS 754
++	req(RREQ_SQUELCH, 1 - sm.view.squelch);
++	rx_signal(65, false);
++	poll_for(RADIO_TONE_ON_POLLS * RADIO_POLL_MS);
++	CHECK(sm.view.state == RS_IDLE && !hw.audio);
++	rx_signal(65, true);
++	poll_for(RADIO_TONE_ON_POLLS * RADIO_POLL_MS);
++	CHECK(sm.view.state == RS_RX && hw.audio);	// a larger carrier margin still requires the RX tone
++	fake_radio.fm_squelch_l1_margin = 0;
++}
++
+ static void test_tx(void)
+ {
+ 	setup_codeplug();
+@@ -11944,6 +11987,7 @@ int main(int argc, char **argv)
+ 	test_channel_step();
+ 	test_vfo_step_auto();
+ 	test_squelch();
++	test_fm_squelch_level_one_margin();
+ 	test_channel_squelch();
+ 	test_parked_kind();
+ 	test_tx();

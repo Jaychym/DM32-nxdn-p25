@@ -1,0 +1,88 @@
+diff --git a/core/position/position.c b/core/position/position.c
+index 98350ea..5215eb0 100644
+--- a/core/position/position.c
++++ b/core/position/position.c
+@@ -356,8 +356,10 @@ void position_gps_enable(bool on)
+ 	LOCK();
+ 	p.gps_off = !on;
+ 	if (!on) {
+-		p.gps.valid = false;
++		clear_fix(&p.gps);
+ 		p.gps_heard = p.gps_motion = false;
++		p.gps_sats = 0;
++		p.gps_hdop10 = 0xFFFFu;
+ #if CONFIG_GPS_SKY
+ 		nmea_sky_init(&p.sky);
+ #endif
+diff --git a/docs/spec/position.md b/docs/spec/position.md
+index 397f1aa..91bb27f 100644
+--- a/docs/spec/position.md
++++ b/docs/spec/position.md
+@@ -43,8 +43,9 @@ Position source (setting: Auto, GPS, Computer, Fixed):
+   position.
+ - GPS, Computer and Fixed take that source only. No position when it has none.
+ - The fixed position counts as unset while latitude and longitude are both 0.
+-- Settings > Location > GPS off (`position_gps_enable(false)`) drops the board fix at once and ignores later
+-  sentences, so the position falls back.
++- Settings > Location > GPS off (`position_gps_enable(false)`) clears the board fix and all GPS measurements at
++  once and ignores later sentences, so the position falls back. A new session fills its measurements from fresh
++  sentences as they arrive.
+ - The same setting goes to the board (`hal_gps_t.enable`, at start-up and on each change): the module is powered and
+   listened to at start-up whatever it says, so the radio knows whether it has one, and once heard its supply and
+   receive path follow the setting within one poll (`drivers/gps/gps_rx/gps_power`). A board whose module shares a
+diff --git a/docs/testing/dm32-bringup.md b/docs/testing/dm32-bringup.md
+index 4b421ee..ce80726 100644
+--- a/docs/testing/dm32-bringup.md
++++ b/docs/testing/dm32-bringup.md
+@@ -173,6 +173,11 @@ keying.
+ 
+ No fix needed: the module talks from about 1 s after power-up, indoors too.
+ 
++The ATGM336H supports GPS and BeiDou. The firmware listens for NMEA and leaves constellation selection to the
++module. **Tools > Position > Sky** shows the systems the module reports. For an acquisition comparison with stock,
++use the same radio position and orientation outdoors, the same power-off interval, and several starts per build.
++Record elapsed time to the first fix, which systems are reported, and the GPS diagnostics line.
++
+ | Check | Expected | If not |
+ |---|---|---|
+ | The diagnostics line `gps ...` (Settings > Diagnostics, or the debug link's diag lines) 10 s after start-up | `gps yes`, the good count rising by a few a second, bad near 0, `b` rising by about 300-600 a second | `gps no` with `b0`: no bytes on UART1: PTA9's mux (IO_DIPLEX0 bit 9 = 0), the power pin (0x2C low), the module. `gps no` with bytes but no good sentences: the baud rate (try 115200; stock may have reconfigured the module) |
+diff --git a/docs/user/13-aprs.md b/docs/user/13-aprs.md
+index 8d26c23..0ddd300 100644
+--- a/docs/user/13-aprs.md
++++ b/docs/user/13-aprs.md
+@@ -166,6 +166,8 @@ seconds, so there are three pages.
+ 
+ "No GPS, or it is off" means the radio has no GPS or **Settings > Location > GPS** is off. A first fix outdoors takes
+ from a few seconds to a few minutes; indoors there may be none.
++Turning GPS off clears the displayed measurements. After switching it back on, **Position** fills in the readings
++as the receiver sends them. Check **Sky** to see which satellite systems the receiver reports.
+ 
+ ## With a computer (KISS and iGate)
+ 
+diff --git a/tests/host/radioCoreTest.c b/tests/host/radioCoreTest.c
+index 643f472..07d187f 100644
+--- a/tests/host/radioCoreTest.c
++++ b/tests/host/radioCoreTest.c
+@@ -4296,6 +4296,22 @@ static void test_position(void)
+ 	position_nmea(still, strlen(still), true, now);
+ 	CHECK(ui_svc_position(&up) && up.fix && up.speed_kmh == 0 && up.course == 0xFFFFu);
+ 
++	// A mixed-constellation RMC can arrive before the new GGA after power-up.
++	static const char gn_rmc[] = "$GNRMC,123519,A,4807.038,N,01131.000,E,022.4,084.4,230394,003.1,W*74";
++	static const char gn_gga[] = "$GNGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*59";
++	position_gps_enable(false);
++	position_gps_enable(true);
++	position_nmea(gn_rmc, strlen(gn_rmc), true, now);
++	CHECK(ui_svc_position(&up) && up.fix && up.sats == 0 && up.hdop10 == 0xFFFFu && !up.alt_ok);
++	position_nmea(gn_gga, strlen(gn_gga), true, now);
++	CHECK(ui_svc_position(&up) && up.fix && up.sats == 8 && up.hdop10 == 9 && up.alt_ok && up.alt_m == 545);
++	position_gps_enable(false);
++	position_gps_enable(true);
++	position_nmea(gn_gga, strlen(gn_gga), true, now);
++	CHECK(dmrDataServiceOwnPosition(&lp) && lp.utcYear == 0);
++	position_gps_enable(false);
++	position_gps_enable(true);
++
+ 	// A radio without a GPS: the fixed position typed in Settings > Location is what LRRP answers with and what
+ 	// goes out in calls, after a restart too
+ 	gps_here = false;

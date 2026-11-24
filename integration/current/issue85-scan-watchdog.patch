@@ -1,0 +1,143 @@
+diff --git a/core/radio/radio_deadline.h b/core/radio/radio_deadline.h
+new file mode 100644
+index 0000000..b485fd3
+--- /dev/null
++++ b/core/radio/radio_deadline.h
+@@ -0,0 +1,17 @@
++// SPDX-License-Identifier: MIT
++// Copyright (c) 2026 The RadioFoundry Authors
++// Copyright (c) 2026 lyra XE1POC
++#ifndef RADIO_DEADLINE_H
++#define RADIO_DEADLINE_H
++
++#include <stdint.h>
++
++// Preserve periodic scheduling until an operation overruns, then allow a full interval for other tasks to run.
++// The RTOS counter wraps. The subtraction compares deadlines within half a counter period.
++static inline uint32_t radio_deadline_advance(uint32_t due, uint32_t period, uint32_t finished)
++{
++	uint32_t next = due + period;
++	return (int32_t)(finished - next) >= 0 ? finished + period : next;
++}
++
++#endif
+diff --git a/core/radio/radio_task.c b/core/radio/radio_task.c
+index 3c20e90..facc10e 100644
+--- a/core/radio/radio_task.c
++++ b/core/radio/radio_task.c
+@@ -6,6 +6,7 @@
+ // so the host link's MMDVM replies stay fast (docs/testing/mmdvm-audit.md A-15).
+ #include <string.h>
+ #include "radio/radio.h"
++#include "radio/radio_deadline.h"
+ #include "radio/radio_sm.h"
+ #include "radio/radio_trunk.h"
+ #include "hal_time.h"
+@@ -222,20 +223,17 @@ static void radio_task(void *arg)
+ 		TickType_t now = xTaskGetTickCount();
+ 		if (woken || (int32_t)(now - next_tick) >= 0) {
+ 			radio_sm_tick(&sm, hal_millis());
+-			next_tick += tick_period;
+-			if (woken || (int32_t)(now - next_tick) >= 0) {
+-				next_tick = now + tick_period;	// a wake's tick counts as the next one
+-			}
++			now = xTaskGetTickCount();
++			next_tick = radio_deadline_advance(woken ? now : next_tick, tick_period, now);
+ 		}
+ 		if ((int32_t)(now - next_poll) >= 0) {
+ 			radio_sm_poll(&sm, hal_millis());
+ #if CONFIG_HOTSPOT
+ 			radio_hs_watch(&sm, hal_millis());
+ #endif
+-			next_poll += period;
+-			if ((int32_t)(now - next_poll) >= 0) {	// fell behind: don't try to catch up
+-				next_poll = now + period;
+-			}
++			// A scan retune can take a whole poll period. Check the clock after it so repeated retunes
++			// leave CPU time for the UI and the watchdog's idle task.
++			next_poll = radio_deadline_advance(next_poll, period, xTaskGetTickCount());
+ 		}
+ 		publish();
+ 	}
+diff --git a/docs/spec/radio-features.md b/docs/spec/radio-features.md
+index f5de033..5f5df81 100644
+--- a/docs/spec/radio-features.md
++++ b/docs/spec/radio-features.md
+@@ -91,6 +91,9 @@ The view counts the stops probed (`scan_probes`) and those with sync (`scan_sync
+ (`scan_phase=hold`), then follows `scan_resume`; after the signal ends it waits `scan_delay_ms` (`resume`) and picks
+ up again if the signal comes back. MONITOR held pauses the scan (`paused`).
+ 
++If a retune or other radio poll outlasts its next scheduled poll, the radio task waits one polling interval from
++completion. This leaves time for the UI and the idle task to run during a scan with repeated slow retunes.
++
+ Stopping: STOP stays where the scan is. CANCEL goes back to the starting channel or frequency. PTT on a held signal
+ stops there and talks back on it; PTT while still searching goes back to the start channel and transmits there. A
+ channel, zone, VFO or frequency change by the user ends the scan where the user put it. **Nuisance delete** skips
+diff --git a/tests/hil/test_radio_features.py b/tests/hil/test_radio_features.py
+index a5705df..3ea885e 100644
+--- a/tests/hil/test_radio_features.py
++++ b/tests/hil/test_radio_features.py
+@@ -23,9 +23,9 @@ Pass criteria:
+   unavailable. knob: step 3 gives volume.src=override, volume.override=3 and volume.sent=19 (round(3 * 100 / volume.max))
+   within 1 s, then "knob" gives volume.src=knob and override -1. soft: step 3 gives volume.step=3 and
+   volume.sent=19, and the old step is put back (the op stores it like the UI).
+-- test_zone_scan_cancel: (zone of 2+ channels) scan=zone within 1 s; at least 2 different zone positions within 4 s
+-  unless the scan stopped on a busy channel (scan_phase probe / hold / resume); CANCEL: scan=off and back on the
+-  starting position within 1 s.
++- test_zone_scan_cancel: (zone of 2+ channels) scan=zone within 1 s; at least 2 different zone positions during 6 s
++  of scanning unless the scan stopped on a busy channel (scan_phase probe / hold / resume). The radio's uptime
++  continues advancing through the scan. CANCEL: scan=off and back on the starting position within 1 s.
+ - test_zone_scan_nuisance: (zone of 3+ channels) NUISANCE while scanning: scan_skipped=1 within 1 s; STOP: scan=off,
+   scan_skipped=0.
+ - test_vfo_scan: (FM VFO) SCAN_VFO over the VFO frequency + 0..10 steps: rx_hz takes 3+ values, all inside the range,
+@@ -292,10 +292,13 @@ def test_zone_scan_cancel(radio):
+     on_channel(radio, 2)
+     start = radio.core()["zone_pos"]
+     with settings(radio, scan_resume=1):
++        up_before = as_int(radio.link.view(["link"])["uptime_ms"])
+         radio.link.scan("zone")
+         try:
+             wait_features(radio, lambda v: v.get("scan") == "zone", 1.0, "scan=zone")
+-            seen, f = collect(radio, "zone_pos", 4.0)
++            seen, f = collect(radio, "zone_pos", 6.0)
++            up_after = as_int(radio.link.view(["link"])["uptime_ms"])
++            assert up_after - up_before >= 5000, (up_before, up_after)
+             print("positions:", seen, "phase:", f.get("scan_phase"))
+             assert len(set(seen)) >= 2 or f.get("scan_phase") in ("probe", "hold", "resume"), (seen, f)
+         finally:
+diff --git a/tests/host/radioFeaturesTest.c b/tests/host/radioFeaturesTest.c
+index 01b6ffd..d394ef3 100644
+--- a/tests/host/radioFeaturesTest.c
++++ b/tests/host/radioFeaturesTest.c
+@@ -11,6 +11,7 @@
+ #include "board.h"
+ #undef board
+ #include "radio/radio_sm.h"
++#include "radio/radio_deadline.h"
+ #include "radio/scan.h"
+ #include "radio/beep.h"
+ #include "radio/vibe.h"
+@@ -3870,8 +3871,23 @@ static void test_host_audio(void)
+ 	run(500);
+ }
+ 
++static void test_radio_task_deadlines(void)
++{
++	uint32_t due = 100;
++	CHECK(radio_deadline_advance(due, RADIO_POLL_MS, 105) == 125);
++	CHECK(radio_deadline_advance(due, RADIO_POLL_MS, 125) == 150);
++	for (int i = 0; i < 200; i++) {
++		uint32_t finished = due + 35;	// a retune that outlasts the polling period
++		due = radio_deadline_advance(due, RADIO_POLL_MS, finished);
++		CHECK(due == finished + RADIO_POLL_MS);
++	}
++	CHECK(radio_deadline_advance(UINT32_MAX - 19, RADIO_POLL_MS, UINT32_MAX - 3) == 5);
++	CHECK(radio_deadline_advance(UINT32_MAX - 19, RADIO_POLL_MS, 9) == 34);
++}
++
+ int main(void)
+ {
++	test_radio_task_deadlines();
+ 	test_scan_engine();
+ 	test_battery_module();
+ 	test_beep_module();

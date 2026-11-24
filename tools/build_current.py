@@ -138,6 +138,12 @@ PATCHES = (
 	'dm32-ram-defaults.patch',
 	'tier3-codeplug-rx.patch',
 	'optional-access-pins.patch',
+	# DM-32UV issue regressions: keep scan scheduling responsive and refresh FM, GPS and YSF receive state.
+	'issue85-scan-watchdog.patch',
+	'issue82-fm-squelch.patch',
+	'issue81-gps-session.patch',
+	'issue79-ysf-caller.patch',
+	'issue80-display-cps.patch',
 )
 
 
