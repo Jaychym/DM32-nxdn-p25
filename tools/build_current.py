@@ -89,6 +89,17 @@ PATCHES = (
 	'rx-ext-ghz-channels.patch',
 	# NXDN48/NXDN96 Type-C trunking, listen only: CAC decode, VCALL_ASSGN follower (DFA or channel plan), editor fields
 	'nxdn-trunking.patch',
+	# The APRS preset uses a new ID so saved Custom settings remain compatible.
+	'aprs-brazil.patch',
+	# Preserve Fusion channel settings in CSV and use the same deviation rule as the radio.
+	'ysf-csv-mode.patch',
+	'ysf-cps-deviation.patch',
+	'ysf-csv-interop.patch',
+	# Restore the selected channel's digital monitor before starting its modem.
+	'dual-vfo-monitor.patch',
+	'dual-air-monitor.patch',
+	'dual-watch-dwell.patch',
+	'battery-voltage.patch',
 )
 
 
@@ -103,6 +114,8 @@ def out(*args, cwd=None):
 def prepare(tree):
 	if not (tree / '.git').exists():
 		tree.mkdir(parents=True, exist_ok=True)
+		if any(tree.iterdir()):
+			raise SystemExit(f'{tree} is not empty: choose a separate build tree')
 		run('git', 'init', '-q', tree)
 		run('git', 'config', 'core.autocrlf', 'false', cwd=tree)
 		run('git', 'remote', 'add', 'origin', UPSTREAM, cwd=tree)
@@ -120,7 +133,8 @@ def prepare(tree):
 
 def main():
 	ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-	ap.add_argument('--tree', type=Path, default=ROOT / 'build/current')
+	ap.add_argument('--tree', type=Path, default=ROOT / 'build/current',
+	                help='dedicated build directory (must be empty on first use)')
 	ap.add_argument('--cross', default=os.environ.get('CROSS', str(ROOT / 'toolchain/bin/csky-elf-')))
 	ap.add_argument('--jobs', type=int, default=min(os.cpu_count() or 2, 8))
 	ap.add_argument('--no-m17', action='store_true', help='build with CONFIG_M17=n (M17 voice; Codec 2 real time on the MCU unverified)')

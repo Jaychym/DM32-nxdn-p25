@@ -102,6 +102,9 @@ make -C build/current/tests/host voiceCipherTest nxdnEngineTestAes p25EngineTest
 
 La imagen queda en `build/current/build/dm32/rfoundry_dm32.bin`. Detalle del cifrado: `docs/spec/air-encryption.md` dentro del árbol `build/current`.
 
+Si usas `--tree`, elige un directorio dedicado y vacío la primera vez. Al volver a compilar en ese directorio,
+la herramienta restablece el commit base y elimina los archivos sin seguimiento fuera de `build/`.
+
 **Compilación y release automáticas:** cada commit a `main` hace que la acción `Firmware` (`.github/workflows/firmware.yml`) compile la imagen sin códec, pase las pruebas host y publique una release `v<AAAA.MM.DD>-<commit>` con `rfoundry-dm32-<versión>.bin`, su manifiesto `.json` y `SHA256SUMS`. Después solicita la sincronización inmediata del web flasher (o la deja para su sincronización programada si no está configurado el secreto correspondiente). Nunca descarga el firmware de fábrica ni el AMBE.
 
 ## Apoya el proyecto

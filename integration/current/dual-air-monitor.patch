@@ -1,0 +1,20 @@
+diff --git a/core/radio/radio_sm.c b/core/radio/radio_sm.c
+index 5bd8088..d768c69 100644
+--- a/core/radio/radio_sm.c
++++ b/core/radio/radio_sm.c
+@@ -856,7 +856,14 @@ static void tune(radio_sm_t *sm, uint32_t now_ms)
+ 	// No sub-audio squelch in DMR, P25, NXDN or YSF, whatever tone the channel or the VFO still holds from its FM settings
+ 	static const subtone_t no_tone = { TONE_NONE, 0 };
+ 	if (sm->board_mode == RADIO_MODE_DMR && mode != RADIO_MODE_DMR && !air_same) {
+-		dmr_end(sm);		// DMR or another air mode lets go; a same-mode retune keeps the per-channel latches
++#if CONFIG_DMR
++		// Channel selection has already restored the destination's latch. Stopping the old modem clears it.
++		bool monitor = air && sm->hear_all_latch;
++#endif
++		dmr_end(sm);
++#if CONFIG_DMR
++		sm->hear_all_latch = monitor;
++#endif
+ 	}
+ #if CONFIG_AIR
+ 	if (!air && air_running()) {

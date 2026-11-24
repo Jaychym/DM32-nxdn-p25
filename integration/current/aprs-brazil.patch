@@ -1,0 +1,166 @@
+diff --git a/core/aprs/aprs.h b/core/aprs/aprs.h
+index 5e17540..c410aea 100644
+--- a/core/aprs/aprs.h
++++ b/core/aprs/aprs.h
+@@ -34,7 +34,7 @@
+ 
+ typedef enum {
+ 	APRS_REGION_NA, APRS_REGION_EU, APRS_REGION_AU, APRS_REGION_NZ, APRS_REGION_JP, APRS_REGION_CN,
+-	APRS_REGION_CUSTOM, APRS_REGION_COUNT,
++	APRS_REGION_CUSTOM, APRS_REGION_BR, APRS_REGION_COUNT,
+ } aprs_region_t;
+ 
+ typedef enum {
+diff --git a/core/aprs/aprs_ax25.c b/core/aprs/aprs_ax25.c
+index 74a90a5..f85630c 100644
+--- a/core/aprs/aprs_ax25.c
++++ b/core/aprs/aprs_ax25.c
+@@ -39,10 +39,10 @@ static uint8_t rf_block(void);
+ // --- Configuration ---
+ 
+ static const uint32_t region_hz[APRS_REGION_COUNT] = {
+-	144390000u, 144800000u, 145175000u, 144575000u, 144660000u, 144640000u, 0u,
++	144390000u, 144800000u, 145175000u, 144575000u, 144660000u, 144640000u, 0u, 145570000u,
+ };
+ static const char *const region_names[APRS_REGION_COUNT] = { "N America", "Europe", "Australia", "New Zealand",
+-							      "Japan", "China", "Custom" };
++							      "Japan", "China", "Custom", "Brazil" };
+ static const char *const path_texts[APRS_PATH_COUNT] = { "", "WIDE1-1", "WIDE1-1,WIDE2-1", "WIDE2-1", "WIDE2-2" };
+ 
+ uint32_t aprs_region_hz(uint8_t region)
+diff --git a/core/ui/lang/es.po b/core/ui/lang/es.po
+index 8e4a6a8..4d46920 100644
+--- a/core/ui/lang/es.po
++++ b/core/ui/lang/es.po
+@@ -757,6 +757,11 @@ msgctxt "APRS_VALUE_REGION_CUSTOM"
+ msgid "Custom"
+ msgstr "Propio"
+ 
++#: core/ui/ui_aprs.c
++msgctxt "APRS_VALUE_REGION_BRAZIL"
++msgid "Brazil"
++msgstr "Brasil"
++
+ #: core/ui/ui_aprs.c
+ msgctxt "APRS_WHY_NO_CALLSIGN"
+ msgid "Set your callsign (the radio name) in qdmr."
+diff --git a/core/ui/lang/fr.po b/core/ui/lang/fr.po
+index 57ba942..2354aa4 100644
+--- a/core/ui/lang/fr.po
++++ b/core/ui/lang/fr.po
+@@ -757,6 +757,11 @@ msgctxt "APRS_VALUE_REGION_CUSTOM"
+ msgid "Custom"
+ msgstr "Personnalisé"
+ 
++#: core/ui/ui_aprs.c
++msgctxt "APRS_VALUE_REGION_BRAZIL"
++msgid "Brazil"
++msgstr "Brésil"
++
+ #: core/ui/ui_aprs.c
+ msgctxt "APRS_WHY_NO_CALLSIGN"
+ msgid "Set your callsign (the radio name) in qdmr."
+diff --git a/core/ui/lang/it.po b/core/ui/lang/it.po
+index 996961f..50275a9 100644
+--- a/core/ui/lang/it.po
++++ b/core/ui/lang/it.po
+@@ -757,6 +757,11 @@ msgctxt "APRS_VALUE_REGION_CUSTOM"
+ msgid "Custom"
+ msgstr "Personal."
+ 
++#: core/ui/ui_aprs.c
++msgctxt "APRS_VALUE_REGION_BRAZIL"
++msgid "Brazil"
++msgstr "Brasile"
++
+ #: core/ui/ui_aprs.c
+ msgctxt "APRS_WHY_NO_CALLSIGN"
+ msgid "Set your callsign (the radio name) in qdmr."
+diff --git a/core/ui/lang/zh.po b/core/ui/lang/zh.po
+index 37f3380..92537b6 100644
+--- a/core/ui/lang/zh.po
++++ b/core/ui/lang/zh.po
+@@ -759,6 +759,11 @@ msgctxt "APRS_VALUE_REGION_CUSTOM"
+ msgid "Custom"
+ msgstr "自定义"
+ 
++#: core/ui/ui_aprs.c
++msgctxt "APRS_VALUE_REGION_BRAZIL"
++msgid "Brazil"
++msgstr "巴西"
++
+ #: core/ui/ui_aprs.c
+ msgctxt "APRS_WHY_NO_CALLSIGN"
+ msgid "Set your callsign (the radio name) in qdmr."
+diff --git a/core/ui/ui_aprs.c b/core/ui/ui_aprs.c
+index a44e147..0619975 100644
+--- a/core/ui/ui_aprs.c
++++ b/core/ui/ui_aprs.c
+@@ -79,7 +79,8 @@ static const tr_id_t pos_names[] = { TRN(VALUE_AUTO, "Auto"), TRX(WORD_GPS, "GPS
+ static const tr_id_t region_names[APRS_REGION_COUNT] = { TRN(APRS_VALUE_REGION_N_AMERICA, "N America"),
+ 	TRN(APRS_VALUE_REGION_EUROPE, "Europe"), TRN(APRS_VALUE_REGION_AUSTRALIA, "Australia"),
+ 	TRN(APRS_VALUE_REGION_NEW_ZEALAND, "New Zealand"), TRN(APRS_VALUE_REGION_JAPAN, "Japan"),
+-	TRN(APRS_VALUE_REGION_CHINA, "China"), TRN(APRS_VALUE_REGION_CUSTOM, "Custom") };
++	TRN(APRS_VALUE_REGION_CHINA, "China"), TRN(APRS_VALUE_REGION_CUSTOM, "Custom"),
++	TRN(APRS_VALUE_REGION_BRAZIL, "Brazil") };
+ 
+ // The radio can send APRS on RF (a board with an AFSK transmit path; some only receive)
+ static bool rf_send(void)
+diff --git a/docs/user/13-aprs.md b/docs/user/13-aprs.md
+index 624ecef..8d26c23 100644
+--- a/docs/user/13-aprs.md
++++ b/docs/user/13-aprs.md
+@@ -32,7 +32,7 @@ frequency, your position and its source, and when the next beacon goes out. If t
+ |---|---|
+ | Send position now | One position at once |
+ | Automatic beacons | On: positions go out by themselves (see Triggers) |
+-| Frequency | Your region: N America 144.390, Europe 144.800, Australia 145.175, New Zealand 144.575, Japan 144.660, China 144.640 MHz, or Custom (`tools/rfoundry_debug.py aprs set region custom`, then `aprs set freq_hz 144390000`) |
++| Frequency | Your region: N America 144.390, Europe 144.800, Australia 145.175, New Zealand 144.575, Japan 144.660, China 144.640, Brazil 145.570 MHz, or Custom (`tools/rfoundry_debug.py aprs set region custom`, then `aprs set freq_hz 144390000`) |
+ | Power | As channel: APRS transmits at the radio's current power level. Or pick a level of its own, for example a low one for a nearby digipeater. Dimmed on radios that can't send APRS over the air |
+ | Path | How far digipeaters pass your packets on: None, WIDE1-1, WIDE1-1,WIDE2-1 (the default), WIDE2-1 or WIDE2-2. See Path below. Dimmed on radios that can't send APRS over the air |
+ | Interval | How often: Off, 1, 2, 5, 10 or 30 minutes |
+diff --git a/tests/host/aprsRadioTest.c b/tests/host/aprsRadioTest.c
+index f21b2d3..686b51e 100644
+--- a/tests/host/aprsRadioTest.c
++++ b/tests/host/aprsRadioTest.c
+@@ -1466,6 +1466,14 @@ static void test_cfg_store(void)
+ 	CHECK(pb.fix_lat == -337000000 && pb.fix_lon == 1512000000 && pb.fix_alt_m == -12 && b.interval_s == 900 &&
+ 	      b.distance_m == 2500 && b.level == 63 && b.txdelay == 45 && b.via == APRS_VIA_BOTH && b.dmr_dst == 5057 &&
+ 	      b.digi == 2);
++	// The appended preset persists without changing the stored Custom region ID.
++	CHECK(APRS_REGION_CUSTOM == 6 && aprs_region_hz(APRS_REGION_CUSTOM) == 0);
++	c.region = APRS_REGION_BR;
++	aprs_set_cfg(&c, now);
++	reload_settings();
++	run(200);
++	aprs_get_cfg(&b);
++	CHECK(b.region == APRS_REGION_BR && aprs_cfg_freq(&b) == 145570000u && b.freq_hz == 145825000u);
+ 	// Out of range on the way in: kept in range
+ 	c.ssid = 40;
+ 	c.level = 200;
+diff --git a/tests/host/sim/ui_sim.c b/tests/host/sim/ui_sim.c
+index da6d559..c3e7ca1 100644
+--- a/tests/host/sim/ui_sim.c
++++ b/tests/host/sim/ui_sim.c
+@@ -478,7 +478,7 @@ static void aprs_sim_reset(void)
+ }
+ bool ui_svc_aprs_view(aprs_view_t *v)
+ {
+-	static const uint32_t hz[APRS_REGION_COUNT] = { 144390000, 144800000, 145175000, 144575000, 144640000, 144640000, 0 };
++	static const uint32_t hz[APRS_REGION_COUNT] = { 144390000, 144800000, 145175000, 144575000, 144660000, 144640000, 0, 145570000 };
+ 	memset(v, 0, sizeof *v);
+ 	if (aprs_sim.off)
+ 		return false;
+diff --git a/tools/rfoundry_debug.py b/tools/rfoundry_debug.py
+index 7535380..0d29e3b 100644
+--- a/tools/rfoundry_debug.py
++++ b/tools/rfoundry_debug.py
+@@ -156,7 +156,7 @@ APRS_FIELDS = {name: i for i, name in enumerate(
+     ["tx", "region", "freq_hz", "ssid", "lat", "lon", "pos_src", "interval_s", "smart", "via", "dmr_dst", "level",
+      "path", "kiss", "dmr_udt", "after_ptt", "distance_m", "rx", "igate", "igate_tx", "digi", "txdelay",
+      "dmr_gps", "to_is", "power", "ambiguity"])}
+-APRS_REGIONS = {"na": 0, "eu": 1, "au": 2, "nz": 3, "jp": 4, "cn": 5, "custom": 6}
++APRS_REGIONS = {"na": 0, "eu": 1, "au": 2, "nz": 3, "jp": 4, "cn": 5, "custom": 6, "br": 7}
+ APRS_POS_SRCS = {"auto": 0, "gps": 1, "host": 2, "fixed": 3}
+ APRS_VIAS = {"rf": 0, "dmr": 1, "both": 2}
+ STORAGE_OP_INFO, STORAGE_OP_READ, STORAGE_OP_CLAIM = range(3)

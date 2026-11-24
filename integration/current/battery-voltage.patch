@@ -1,0 +1,59 @@
+diff --git a/core/ui/ui_menus.c b/core/ui/ui_menus.c
+index 204ddf7..1715418 100644
+--- a/core/ui/ui_menus.c
++++ b/core/ui/ui_menus.c
+@@ -5148,6 +5148,10 @@ static const char *info_body(void)
+ 		sb_u32(&b, ui_st.battery_pct, 1);
+ 		sb_str(&b, ui_st.battery_pct <= (ui_st.low_batt_pct ? ui_st.low_batt_pct : 15) ?
+ 			TR(BATT_PART_CHARGE_SOON, "%: charge soon") : "%");
++		if (ui_view()->battery_mv != 0) {
++			sb_chr(&b, '\n');
++			sb_volts(&b, ui_view()->battery_mv);
++		}
+ 		break;
+ 	case INFO_CODEPLUG: {
+ 		static const tr_id_t src[] = { TRN(CPLUG_VALUE_NONE_BUILT_IN, "None: built-in channels"),
+diff --git a/tests/host/sim/ui_sim.c b/tests/host/sim/ui_sim.c
+index c3e7ca1..cda3603 100644
+--- a/tests/host/sim/ui_sim.c
++++ b/tests/host/sim/ui_sim.c
+@@ -3552,6 +3552,11 @@ static bool run_token(char *t, char *err, size_t len)
+ 		advance(1100);
+ 		return true;
+ 	}
++	if (strcmp(t, "battery-mv") == 0 && arg != NULL) {
++		view.battery_mv = (uint16_t)atoi(arg);
++		advance(1100);
++		return true;
++	}
+ 	if (strcmp(t, "supply") == 0 && arg != NULL) {
+ 		board.caps |= CAP_NO_BATTERY;
+ 		power.supply_mv = p_supply;
+diff --git a/tests/host/uiFlowTest.c b/tests/host/uiFlowTest.c
+index 9056aa4..25bb8c6 100644
+--- a/tests/host/uiFlowTest.c
++++ b/tests/host/uiFlowTest.c
+@@ -1823,6 +1823,7 @@ static void no_battery_checks(void)
+ 		{ "strip", "nobattery", "hides=%" },
+ 		{ "no warning", "nobattery battery:14", "banner=none" },
+ 		{ "Tools with a battery", "ok 6 9", "screen=info shows=Battery" },
++		{ "Battery voltage", "battery-mv:7600 ok 6 9", "screen=info shows=7.6_V" },
+ 		{ "Tools", "nobattery ok 6", "hides=Battery" },
+ 		{ "Tools keep their numbers", "nobattery ok 6 7", "screen=diag" },
+ 		{ "Tools: Roaming is 6", "nobattery ok 6 6", "screen=roaming" },
+diff --git a/core/radio/radio_sm.c b/core/radio/radio_sm.c
+index d768c69..0efb7e0 100644
+--- a/core/radio/radio_sm.c
++++ b/core/radio/radio_sm.c
+@@ -9080,8 +9080,10 @@ static void battery_poll(radio_sm_t *sm, uint32_t now_ms)
+ 	uint16_t mv = board.power->battery_mv();
+ 	uint8_t pct = board.power->battery_pct != NULL ? board.power->battery_pct() : 0;
+ 	batt_event_t ev = batt_update(&sm->batt, mv, board.battery_low_mv, board.battery_critical_mv, now_ms);
++	// Publish changes large enough to change the Battery page's displayed tenth of a volt.
++	bool voltage_changed = (sm->view.battery_mv + 50u) / 100u != (mv + 50u) / 100u;
+ 	sm->view.battery_mv = mv;
+-	if (sm->view.battery != sm->batt.level || sm->view.battery_pct != pct) {
++	if (voltage_changed || sm->view.battery != sm->batt.level || sm->view.battery_pct != pct) {
+ 		sm->view.battery = sm->batt.level;
+ 		sm->view.battery_pct = pct;
+ 		changed(sm);

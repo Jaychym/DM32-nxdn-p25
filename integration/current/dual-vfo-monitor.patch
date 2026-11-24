@@ -1,0 +1,92 @@
+diff --git a/core/radio/radio_sm.c b/core/radio/radio_sm.c
+index fb67e17..5bd8088 100644
+--- a/core/radio/radio_sm.c
++++ b/core/radio/radio_sm.c
+@@ -1030,7 +1030,7 @@ static void vfo_set_hz(radio_sm_t *sm, uint32_t hz)
+ 	}
+ }
+ 
+-static void enter_vfo(radio_sm_t *sm, uint32_t now_ms)
++static void load_vfo(radio_sm_t *sm)
+ {
+ 	if (!sm->vfo_seeded) {
+ 		bool keep = !sm->view.vfo && board_in_band(sm->view.ch.rx_hz, false);
+@@ -1050,6 +1050,11 @@ static void enter_vfo(radio_sm_t *sm, uint32_t now_ms)
+ 	sm->view.channel_number = 0;
+ 	clear_temporary(sm);
+ 	apply_tot(sm);
++}
++
++static void enter_vfo(radio_sm_t *sm, uint32_t now_ms)
++{
++	load_vfo(sm);
+ 	tune(sm, now_ms);
+ }
+ 
+@@ -4324,13 +4329,9 @@ static bool dual_tune(radio_sm_t *sm, uint8_t i, uint32_t now_ms)
+ 			return false;
+ 		}
+ 		vfo_use(sm, (uint8_t)r->pos);	// each channel its own VFO
+-		enter_vfo(sm, now_ms);
++		load_vfo(sm);
+ 		dual_keep_load(sm, i, sm->dual_at != i);
+-#if CONFIG_DMR
+-		if (sm->dmr_running) {
+-			dmr_configure(sm);	// a talk target or the hear all latch kept
+-		}
+-#endif
++		tune(sm, now_ms);	// both DMR and air engines take the restored latch when starting
+ 		sm->dual_at = i;
+ 		return true;
+ 	}
+diff --git a/core/ui/ui_screens.c b/core/ui/ui_screens.c
+index c045a7b..9193820 100644
+--- a/core/ui/ui_screens.c
++++ b/core/ui/ui_screens.c
+@@ -2991,7 +2991,8 @@ static void dual_pane(const radio_view_t *v, const ui_state_t *s, int i, int y,
+ 		else if (ft->detail == NULL)
+ 			sb_str(&rb, p->detail);
+ 	} else if (p->vfo) {
+-		sb_str(&b, "VFO FM");
++		sb_str(&b, "VFO ");
++		sb_str(&b, ui_mode_name(p->mode));
+ 		if (ft->detail == NULL)
+ 			sb_str(&rb, p->detail);
+ 	} else {
+diff --git a/tests/host/radioCoreTest.c b/tests/host/radioCoreTest.c
+index 5f55d65..eb89c06 100644
+--- a/tests/host/radioCoreTest.c
++++ b/tests/host/radioCoreTest.c
+@@ -9036,6 +9036,32 @@ static void test_nxdn_dual(void)
+ 	CHECK(sm.dual_at == 1 && sm.view.channel_number == 3 && sm.view.dmr.hear_all_latch);
+ 	CHECK(!sm.dual_keep[0].hear_all_latch);
+ 	CHECK(ui_svc_dual(NULL, 0) && sm.view.scan == SCAN_OFF);
++
++	// A stored DMR channel and a VFO NXDN channel must each restore their own monitor latch before tune.
++	add(1, "DMR A", 446100000, RADIO_MODE_DMR, false, 0);
++	start();
++	nxdn_defaults();
++	sm.vfo_ch.rx_hz = sm.vfo_ch.tx_hz = 446200000;
++	sm.vfo_ch.mode = RADIO_MODE_NXDN;
++	sm.vfo_seeded = true;
++	const ui_dual_ref_t mixed[2] = { a, { true, 0, sm.vfo_idx } };
++	CHECK(ui_svc_dual(mixed, 1) && sm.view.scan == SCAN_DUAL);
++	req(RREQ_MONITOR, 1);
++	req(RREQ_MONITOR, 0);
++	CHECK(sm.view.vfo && sm.view.ch.mode == RADIO_MODE_NXDN && sm.view.dmr.hear_all_latch);
++	uint8_t returned = 0;
++	for (int i = 0; i < 150; i++) {
++		run(RADIO_POLL_MS);
++		if (sm.view.vfo) {
++			CHECK(sm.view.ch.mode == RADIO_MODE_NXDN && sm.view.dmr.hear_all_latch);
++			returned |= 1;
++		} else {
++			CHECK(sm.view.ch.mode == RADIO_MODE_DMR && !sm.view.dmr.hear_all_latch);
++			returned |= 2;
++		}
++	}
++	CHECK(returned == 3 && sm.view.scan == SCAN_DUAL);
++	CHECK(ui_svc_dual(NULL, 0) && sm.view.scan == SCAN_OFF);
+ 	setup_codeplug_nxdn();
+ 	far_hz = 0;
+ 	nfar_stop();

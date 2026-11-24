@@ -1,0 +1,17 @@
+diff --git a/site/static/js/codeplug/mode_ysf.js b/site/static/js/codeplug/mode_ysf.js
+index deefb72..ec3a8e8 100644
+--- a/site/static/js/codeplug/mode_ysf.js
++++ b/site/static/js/codeplug/mode_ysf.js
+@@ -35,9 +35,10 @@ export function decodeConv(b) {
+ 	let rx = u8(b, 1);
+ 	if (rx > DGID_MAX) rx = 0;
+ 	const t = u8(b, 2);
++	const dt = f & DT_MASK;
+ 	return {
+-		dt: f & DT_MASK,
+-		narrow: (f & NARROW) !== 0,
++		dt,
++		narrow: dt !== DT_VW || (f & NARROW) !== 0,
+ 		rxDgid: rx,
+ 		txDgid: (t & TX_DGID_SET) !== 0 ? t & DGID_MAX : rx,
+ 		// a destination of all spaces or all zeros reads as ALL
