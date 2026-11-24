@@ -136,6 +136,7 @@ PATCHES = (
 	'issue29-p25-rx-wrap.patch',
 	'remaining-user-features.patch',
 	'dm32-ram-defaults.patch',
+	'tier3-codeplug-rx.patch',
 )
 
 
