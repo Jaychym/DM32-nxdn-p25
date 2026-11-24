@@ -111,19 +111,23 @@ index 878ddeb..1cc239b 100644
  	}
  	uint32_t khz = hz / 1000u;
 diff --git a/core/radio/radio_sm.c b/core/radio/radio_sm.c
-index c417f68..2d3a350 100644
+index c417f68..894c590 100644
 --- a/core/radio/radio_sm.c
 +++ b/core/radio/radio_sm.c
-@@ -664,6 +664,8 @@ static bool channel_read(uint16_t number, channel_t *ch)
+@@ -664,6 +664,12 @@ static bool channel_read(uint16_t number, channel_t *ch)
  	if (!codeplug_channel(number, ch)) {
  		return false;
  	}
 +	if (radio_apply_nfm_rx(ch))
 +		return true;
++	// A saved broadcast preset outside the active FM bands must not leave the receiver on its previous channel.
++	if (board.nfm_rx_band != NULL && ch->mode == RADIO_MODE_FM && ch->kind == CODEPLUG_KIND_NONE &&
++	    !board_in_band(ch->rx_hz, false))
++		return false;
  #if CONFIG_P25
  	radio_p25_take(ch);
  #endif
-@@ -887,8 +889,9 @@ static void tune(radio_sm_t *sm, uint32_t now_ms)
+@@ -887,8 +893,9 @@ static void tune(radio_sm_t *sm, uint32_t now_ms)
  	cw_cancel(sm);		// the repeater's ID: the board is set up for the channel below
  #endif
  	end_reception(sm, now_ms);
@@ -134,7 +138,7 @@ index c417f68..2d3a350 100644
  		// own mode follows, so FM there is not a temporary change (dual watch brings a pane back already FM)
  		sm->view.ch.mode = RADIO_MODE_FM;
  		if (sm->view.vfo)
-@@ -1104,6 +1107,10 @@ static void vfo_set_hz(radio_sm_t *sm, uint32_t hz)
+@@ -1104,6 +1111,10 @@ static void vfo_set_hz(radio_sm_t *sm, uint32_t hz)
  	sm->vfo_ch.tx_hz = tx;
  	sm->vfo_seeded = true;
  	if (sm->view.vfo) {
@@ -145,7 +149,7 @@ index c417f68..2d3a350 100644
  		sm->view.ch.rx_hz = hz;
  		sm->view.ch.tx_hz = tx;
  	}
-@@ -1467,6 +1474,8 @@ static const trunk_ops_t *trunk_ops(void)
+@@ -1467,6 +1478,8 @@ static const trunk_ops_t *trunk_ops(void)
  static uint8_t tx_check(const radio_sm_t *sm)
  {
  	const channel_t *ch = &sm->view.ch;
@@ -154,7 +158,7 @@ index c417f68..2d3a350 100644
  	// A trunked channel's frequencies are the system's: checked when it keys (p25t_tick, p25t_burst)
  #if AIR_TRUNK
  	const trunk_ops_t *tk = trunk_ops();
-@@ -7213,6 +7222,8 @@ static void ptt_up(radio_sm_t *sm, uint32_t now_ms)
+@@ -7213,6 +7226,8 @@ static void ptt_up(radio_sm_t *sm, uint32_t now_ms)
  
  bool radio_sm_hotspot_freq_ok(uint32_t rx_hz, uint32_t tx_hz)
  {
@@ -163,7 +167,7 @@ index c417f68..2d3a350 100644
  #if CONFIG_AM_RX
  	if (radio_am_tx_refused(tx_hz)) {
  		return false;	// never a transmitter in the air band
-@@ -8807,7 +8818,7 @@ void radio_sm_request(radio_sm_t *sm, const radio_req_t *req, uint32_t now_ms)
+@@ -8807,7 +8822,7 @@ void radio_sm_request(radio_sm_t *sm, const radio_req_t *req, uint32_t now_ms)
  		// The receiver stays as it is: TX is set up at the next key-up. DMR works out repeater or direct from the
  		// split, so the call stack is set up again (it publishes the view)
  		uint32_t tx = req->arg > 0 ? (uint32_t)req->arg : sm->vfo_ch.rx_hz;
@@ -172,7 +176,7 @@ index c417f68..2d3a350 100644
  			break;
  		}
  		sm->vfo_ch.tx_hz = tx;
-@@ -8967,7 +8978,8 @@ void radio_sm_request(radio_sm_t *sm, const radio_req_t *req, uint32_t now_ms)
+@@ -8967,7 +8982,8 @@ void radio_sm_request(radio_sm_t *sm, const radio_req_t *req, uint32_t now_ms)
  		sm->retune_due_ms = now_ms + RADIO_RETUNE_SETTLE_MS;
  		break;
  	case RREQ_BANDWIDTH:
@@ -220,7 +224,7 @@ index 938ffa3..d9d4bec 100644
  			{ RADIO_MODE_FM, 0, 0 }, { RADIO_MODE_DMR, 0, 0 }, { RADIO_MODE_P25, 0, UI_FEAT_P25 },
  			{ RADIO_MODE_NXDN, VFO_VARIANT_FIRST, UI_FEAT_NXDN },
 diff --git a/core/ui/ui_menus.c b/core/ui/ui_menus.c
-index 0d0a4f9..7329be3 100644
+index 0d0a4f9..7a04316 100644
 --- a/core/ui/ui_menus.c
 +++ b/core/ui/ui_menus.c
 @@ -2744,6 +2744,8 @@ static bool ced_changed(uint8_t r)
@@ -252,7 +256,23 @@ index 0d0a4f9..7329be3 100644
  				 (am && (tone || r == CE_VOX || r == CE_BURST || r == CE_TX || r == CE_RX_ONLY || r == CE_POWER ||
  					 r == CE_TOT))))
  			continue;
-@@ -4198,7 +4204,9 @@ static void chinfo_select(uint16_t i, bool hold)
+@@ -3176,6 +3182,7 @@ static void chinfo_enter(void)
+ 			ced_num = 0;
+ 		ced_src = src;
+ 		ced_air_read(src, &ced_ch);
++		radio_apply_nfm_rx(&ced_ch);
+ 		ced_ch.roam = false;
+ 		char name[CODEPLUG_NAME_LEN + 1];
+ 		zone_copy_name(name, ced_ch.name);
+@@ -3201,6 +3208,7 @@ static void chinfo_enter(void)
+ #if CONFIG_CHANNEL_EDIT
+ 	ced_orig = ced_ch;
+ #endif
++	radio_apply_nfm_rx(&ced_ch);
+ }
+ 
+ static uint16_t chinfo_count(void)
+@@ -4198,7 +4206,9 @@ static void chinfo_select(uint16_t i, bool hold)
  		// band (AM in the air band, FM on the broadcast receiver: the channel's mode is moot there). A channel of
  		// a kind (P25, any other mode) is written as the new one when saved: its tag goes (channel-modes.md 2.4),
  		// after Save asks where a system or fallback goes with it
@@ -280,7 +300,7 @@ index 382849c..d04cab8 100644
  
  A radio has air band receive when its build has `CONFIG_AM_RX` and its board sets `CAP_AM_RX` and `rx_am`, and
 diff --git a/docs/spec/hardware-dm32.md b/docs/spec/hardware-dm32.md
-index b70b860..e5ff21a 100644
+index b70b860..f2d072a 100644
 --- a/docs/spec/hardware-dm32.md
 +++ b/docs/spec/hardware-dm32.md
 @@ -752,6 +752,10 @@ Band select by frequency (f in 10 Hz units; first matching row wins):
@@ -294,8 +314,18 @@ index b70b860..e5ff21a 100644
  Reference trim ([radio-features.md](radio-features.md) 6.1): the modem's DC bias stays the factory's tune. RadioFoundry
  programs the FD6818 at f x (1 + trim), in receive, FM transmit and every DMR burst; the next tune applies a new trim.
  Checked on the radio by hand (2026-10-30): 10 ppm moved the carrier 4400 Hz, as expected at 440 MHz.
+@@ -1094,7 +1098,8 @@ works on noise_sq plus 17 (`fd6818_am_noise`): level 1 opens under 47, as the ch
+ 3 dB tighter; the factory rows are not read. The RSSI shown adds the gain the loop took off back. The RDA5807M runs
+ through the shared HR_C7000 glue (`platform/hrc7000/bcast_hrc.c`)
+ on PTA25 / PTA26 with no enable pin; its audio path turns the amplifier on and leaves the speaker source alone (B4).
+-The air band is an RX-only band of 108-136 MHz and the broadcast range 65-108 MHz in `boards/dm32/board.c`.
++The board table has an RX-only AM air band of 108–136 MHz. An explicit `CONFIG_BCAST_FM=y` build selects the
++65–108 MHz broadcast range in place of the default 66–88 MHz narrow FM range.
+ 
+ **Where the gain loop settles.** Measured on a DM-32UV (rf A): a steady AM carrier from the SDR bench at four levels
+ 10 dB apart (30 dB in all) (on a 2 m frequency, which a bench build received as AM: same set-up and VHF path), 0x67 read over the
 diff --git a/docs/user/23-radios.md b/docs/user/23-radios.md
-index 8c2fe1f..e6c9779 100644
+index 8c2fe1f..9288af2 100644
 --- a/docs/user/23-radios.md
 +++ b/docs/user/23-radios.md
 @@ -392,6 +392,9 @@ A 160 x 128 color screen, every row visible.
@@ -308,6 +338,17 @@ index 8c2fe1f..e6c9779 100644
  As a [standalone SFR](14-hotspot.md#standalone-sfr) repeater it repeats calls on air 90 ms later and sends its CW ID; its repeated voice carries more bit errors than the original, though it plays.
  Installing: [Moving from stock DM-32UV firmware](19-moving-from-stock-dm32.md).
  
+@@ -464,9 +467,7 @@ A 240 x 320 color screen. RadioFoundry uses its full resolution, with smooth (an
+ - The GPS module is checked at start-up (it must answer within 5 s) and is then powered only while **Settings >
+   Location > GPS** is on, which takes effect at once. A fix outdoors hasn't been checked yet.
+ - While APRS listens, FM on the APRS frequency plays through a different audio path, which may sound different.
+-- Air band and FM broadcast receive
+-  ([Air band and FM broadcast](07-channels-zones-vfo.md#air-band-and-fm-broadcast)) are built in but not checked on
+-  the radio yet. Broadcast covers 65 to 108 MHz.
++- [Air-band AM receive](07-channels-zones-vfo.md#air-band-and-fm-broadcast) remains available on RF section A.
+ - No VOX yet: the board code that reads the microphone level isn't written.
+ - Audio linking (USRP) carries DMR only: the FM transmit path from the processor isn't written.
+ - No beeps while transmitting: the radio's beep path would put them on the air. A beep still playing when the
 diff --git a/hal/board.h b/hal/board.h
 index 433f4c1..bcc4111 100644
 --- a/hal/board.h
@@ -340,7 +381,7 @@ index 433f4c1..bcc4111 100644
  		const band_t *b = &board.bands[i];
  		if (hz >= b->lo_hz && hz <= b->hi_hz && (b->tx || !need_tx)) {
 diff --git a/tests/host/radioListenBandsTest.c b/tests/host/radioListenBandsTest.c
-index c2e8799..00f174f 100644
+index c2e8799..7083ab5 100644
 --- a/tests/host/radioListenBandsTest.c
 +++ b/tests/host/radioListenBandsTest.c
 @@ -29,6 +29,7 @@ static struct {
@@ -380,7 +421,7 @@ index c2e8799..00f174f 100644
  	.bcast = &fake_bcast,
  	.power_count = 3,
  	.power_names = power_names,
-@@ -759,6 +762,57 @@ static void test_bcast_scan(void)
+@@ -759,6 +762,61 @@ static void test_bcast_scan(void)
  }
  #endif
  
@@ -433,12 +474,16 @@ index c2e8799..00f174f 100644
 +	ptt(false);
 +	CHECK(!radio_sm_hotspot_freq_ok(70125000, 146520000));
 +	CHECK(!radio_sm_hotspot_freq_ok(146520000, 70125000));
++
++	add(4, "Unavailable FM", 9000000, 9000000, RADIO_MODE_FM);
++	req(RREQ_ZONE_POS, 3);
++	CHECK(sm.view.zone_pos == 4 && hw.rx_hz == 146520000);
 +}
 +
  int main(void)
  {
  	test_helpers();
-@@ -772,6 +826,7 @@ int main(void)
+@@ -772,6 +830,7 @@ int main(void)
  	test_bcast_dead();
  	test_bcast_step();
  	test_bcast_vfo();
