@@ -1,4 +1,4 @@
-# DM32-nxdn-p25 — NXDN-P25-DM32 multimodo (FM · AM · DMR · P25 · NXDN · YSF) para el Baofeng DM-32UV
+# DM32-nxdn-p25 — NXDN-P25-DM32 multimodo para el Baofeng DM-32UV
 
 [![Regálame un radio en Throne](https://img.shields.io/badge/Throne-Reg%C3%A1lame%20un%20radio-ff69b4?style=for-the-badge)](https://throne.com/lyraarsgoetia) [![Apóyame en Ko-fi](https://img.shields.io/badge/Ko--fi-Ap%C3%B3yame-ff5e5b?style=for-the-badge&logo=ko-fi&logoColor=white)](https://ko-fi.com/lyraarsgoetia)
 
@@ -6,8 +6,8 @@
 
 Unete a mi grupo de telegram <https://t.me/+fGNVb8mR-eliYmMx>
 
-Firmware abierto y multimodo para el **Baofeng DM-32UV**: FM, AM, DMR (Tier II y **Tier III troncal**), **APCO P25 fase 1**,
-**NXDN48/NXDN96** y **YSF (V/D-1, DN y VW)**, con **AES-256** en DMR, P25 y NXDN y **AES-128** y **ARC4 Motorola** en DMR. Desde el 17 de noviembre de 2026 se compila sobre
+Firmware abierto para el **Baofeng DM-32UV** con **DMR, P25, NXDN48, NXDN96, M17, YSF y D-STAR**.
+También incluye FM, AM de recepción y FM comercial. Desde el 17 de noviembre de 2026 se compila sobre
 [RadioFoundry](https://github.com/RadioFoundry/RadioFoundry) actual (commit `e89121e9`), que ya trae P25 y NXDN, más
 los cambios de esta rama en [`integration/current/base.patch`](integration/current/base.patch). Deriva de
 [Open25-DM32](https://github.com/tylerwatt12/Open25-DM32) (tylerwatt12). La mantiene **lyra XE1POC**.
@@ -16,7 +16,19 @@ los cambios de esta rama en [`integration/current/base.patch`](integration/curre
 >
 > **Sobre AES-256:** solo para sistemas comerciales / Part 90 autorizados para cifrar. No lo uses en bandas de radioaficionado: el servicio de aficionados es en claro, aun con licencia.
 
-## Estado (22 de noviembre de 2026)
+## Modos digitales
+
+| Modo | Disponible en la compilación oficial |
+|---|---|
+| DMR | Tier II convencional y Tier III troncal con RX y TX |
+| P25 | Fase 1 convencional y troncal con RX y TX |
+| NXDN48 | 4 800 bit/s, canal de 6.25 kHz, convencional y troncal Type-C |
+| NXDN96 | 9 600 bit/s, canal de 12.5 kHz, convencional y troncal Type-C |
+| M17 | Voz con Codec 2, selección de CAN y destino. Experimental |
+| YSF | System Fusion V/D-1, DN y VW |
+| D-STAR | DV simplex en el VFO y en memorias. Guardado verificado en software, con pruebas de RF pendientes |
+
+## Estado (24 de noviembre de 2026)
 
 La release instalable más reciente está en [Releases](../../releases); el flasher sincroniza la imagen publicada por CI. Las pruebas host no sustituyen una medición acústica o de RF.
 
@@ -33,7 +45,7 @@ La release instalable más reciente está en [Releases](../../releases); el flas
 | NXDN96 en el aire | DSD+ sincroniza y decodifica llamadas NXDN96 de este firmware (18 nov, 13:45: TG 91, RID 321, RAN 22, tramas de voz fluyendo) |
 | NXDN48/NXDN96 troncal (Type-C) | **Nuevo** (`nxdn-trunking.patch`). Un canal NXDN con *Troncal* (o el VFO NXDN) acampa en el canal de control (su frecuencia de RX), decodifica el CAC y sigue las asignaciones `VCALL_ASSGN` de su grupo, las llamadas a todos y las de su ID de unidad (o todos los grupos). **Con TX**: se registra (`REG_REQ`) y con PTT pide canal de voz (`VCALL_REQ`, Long CAC por la frecuencia de TX del canal); al asignarse transmite en RTCH en la frecuencia de entrada del canal de voz. Frecuencias por DFA (`SITE_INFO`, OFN/IFN) o por un plan lineal base + número × separación. **Radio**: fila *Troncal* (Off/Grupo/Todos los grupos) en el editor de canal y mosaico 9 *Tronc* en el menú rápido del VFO NXDN (`?` sin registro, `*` en canal de voz). **CPS web**: Troncal, Todos los grupos, base y separación del plan. Pruebas host (CAC y Long CAC, registro, petición, cola, rechazo, concesión, flujos de UI). Codificación del CAC idéntica a DSD-FME; Long CAC y mensajes según SDRTrunk. **Sin probar contra un sitio NEXEDGE/Type-C real**: úsalo solo en un sistema autorizado. Detalles en `docs/spec/nxdn-trunking.md` del parche |
 | NXDN TX | El monitor de servicio de KN4SWB midió FSK error 19,3 % y desviación de símbolo 993 Hz (nominal 1050 Hz) en 441,1125 MHz. **All-call portado:** un canal sin talkgroup ya transmite destino all-call (`e6c105f`, `fix_dst()` en el engine NXDN, con test host). **40 Hz no portable:** el fix candidato (`d30230a`, `.flat_tx_hpf_hz = 40` en el tap de audio plano de la serie vieja) no tiene equivalente en este build — el TX NXDN va por el engine 4FSK nativo del HR_C7000 y la TX RAM lleva símbolos, no audio, así que no hay high-pass que pre-compensar (`3e83541`, documentado en `docs/spec/nxdn.md`). No se toca el gain ni la desviación. Re-medición de KN4SWB pendiente |
-| Modo por canal | Fila **Modo** en cada canal: FM, AM, DMR, P25, NXDN 4800, NXDN 9600 y YSF |
+| Modo por canal | Fila **Modo** en cada canal con FM, AM, DMR, P25, NXDN 4800, NXDN 9600, YSF, M17 y D-STAR. |
 | AM | Tipo de canal AM propio, solo RX, en cualquier frecuencia que sintonice el receptor (p. ej. banda aérea) |
 | Recepción ampliada | Activada por defecto. Solo RX fuera de las bandas de TX |
 | Monitor digital (DMon) | En P25 y NXDN: oye llamadas de cualquier grupo, NAC o RAN del canal. El popup sigue el estado publicado por radio; `uiFlowTest` ejercita el orden real radio→UI |
@@ -94,9 +106,12 @@ Si necesitas el archivo original, Baofeng ofrece el [firmware oficial DM-32UV v1
 ## D-STAR DV experimental
 
 Selecciona **D-STAR** en **Canales → Editar canal → Modo** y mantén **OK** para guardar.
-En el VFO también se puede elegir en **Menú rápido → Modo**. Para simplex, configura el
-indicativo en **Ajustes → Mi radio → Nombre de radio**. El firmware usa destino `CQCQCQ`
-y enrutamiento `DIRECT`. Consulta las [pruebas y el alcance](docs/dstar-experimental.md).
+En el VFO se puede elegir en **Menú rápido → Modo**. En el [CPS web](https://donttellmeimcute.github.io/dm32-web-cps-flasher/codeplug/),
+abre un canal, elige **D-STAR** en **Modo** y escribe el codeplug. Para NXDN, la opción **Velocidad** del editor permite
+elegir 4800 o 9600 bit/s.
+
+Para D-STAR simplex, configura el indicativo en **Ajustes → Mi radio → Nombre de radio**.
+El firmware usa destino `CQCQCQ` y enrutamiento `DIRECT`. Consulta las [pruebas y el alcance](docs/dstar-experimental.md).
 
 ## Compilar
 
@@ -138,11 +153,11 @@ El proyecto se distribuye bajo [GPL-3.0-or-later](LICENSE) salvo que un archivo 
 
 ## English summary
 
-Multi-mode open firmware for the Baofeng DM-32UV: FM, AM, DMR (Tier II and Tier III trunking), P25 Phase 1,
-NXDN48/NXDN96 and YSF (V/D-1, DN and VW), with AES-256 voice on DMR (Motorola layout, verified with stock DM-32UV firmware), P25
+Open firmware for the Baofeng DM-32UV with DMR (Tier II and Tier III), P25 Phase 1, NXDN48/NXDN96,
+M17, YSF (V/D-1, DN and VW), D-STAR DV simplex, FM and AM receive. D-STAR is available in the VFO and stored
+channels. M17 and D-STAR are experimental. The build includes AES-256 voice on DMR (Motorola layout, verified with stock DM-32UV firmware), P25
 (TIA-102.AAAD-A layout, matches OP25's keystream) and NXDN (matches the NXDN TS 1-D test vectors), plus Motorola ARC4 on DMR. Since 2026-11-17 it builds on [RadioFoundry](https://github.com/RadioFoundry/RadioFoundry)
-(`e89121e9`) plus `integration/current/*.patch`; the old patch series no longer builds. Quick Code/TG/Dest selectors cover P25, NXDN and YSF. YSF RX follows the received VW/AMBE data type and restores the configured TX voice path (host-tested); Pi-Star and on-radio confirmation remain open in #64. The dual-watch DMR row keeps the complete color code beside the PTT pill (RadioFoundry #856). Motorola-style talk permit tones. DMR PCM recovery after NXDN/FM/P25 is host-tested (`3f1c173`); hotspot wake-up and on-air confirmation remain open in #62. DSD+ decodes NXDN96 calls from this firmware (18 Nov: TG 91, RID 321, RAN 22). A talkgroup-less NXDN channel now transmits all-call (`e6c105f`). The 40 Hz NXDN TX pre-compensation (`d30230a`) has no equivalent in this build — NXDN TX goes through the HR_C7000 native 4FSK slot engine, not an audio path — so it was documented as not portable (`3e83541`), not ported. Lost
-in the switch: P25 Phase 2, P25 trunking TX; AES keys must be loaded again. The pink theme is back as the Kawaii layer (`7c972f0`). Releases ship the image **without** the proprietary AMBE
+(`e89121e9`) plus `integration/current/*.patch`; the old patch series no longer builds. Quick Code/TG/Dest selectors cover P25, NXDN and YSF. YSF RX follows the received VW/AMBE data type and restores the configured TX voice path (host-tested); Pi-Star and on-radio confirmation remain open in #64. The dual-watch DMR row keeps the complete color code beside the PTT pill (RadioFoundry #856). Motorola-style talk permit tones. DMR PCM recovery after NXDN/FM/P25 is host-tested (`3f1c173`); hotspot wake-up and on-air confirmation remain open in #62. DSD+ decodes NXDN96 calls from this firmware (18 Nov: TG 91, RID 321, RAN 22). A talkgroup-less NXDN channel now transmits all-call (`e6c105f`). The 40 Hz NXDN TX pre-compensation (`d30230a`) has no equivalent in this build — NXDN TX goes through the HR_C7000 native 4FSK slot engine, not an audio path — so it was documented as not portable (`3e83541`), not ported. The current build supports P25 Phase 1 trunking TX. Reload AES keys when migrating from the older patch series. The pink theme is back as the Kawaii layer (`7c972f0`). Releases ship the image **without** the proprietary AMBE
 codec; the [web flasher](https://donttellmeimcute.github.io/dm32-web-cps-flasher/) takes it from your own radio.
 DMR AES-256 group calls were verified over the air in both directions with stock Baofeng DM-32UV firmware, on simplex and through a repeater. In Baofeng CPS, **Encryption ID** is the on-air key ID. Use that ID and the same full 32-byte key when entering the key manually in the web CPS. [Interoperability report](../../issues/42)
 
