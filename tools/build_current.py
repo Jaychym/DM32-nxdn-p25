@@ -118,6 +118,10 @@ PATCHES = (
 	'issue54-startup-image.patch',
 	'issue32-spanish-name-option.patch',
 	'issue24-broadcast-fm-vfo.patch',
+	'issue53-aes-bulk.patch',
+	'issue61-p25-talkgroup.patch',
+	'issue33-dmr-dial.patch',
+	'issue50-tone-search.patch',
 )
 
 

@@ -1,0 +1,1398 @@
+diff --git a/core/ui/lang/es.po b/core/ui/lang/es.po
+index 892318d..2dd639c 100644
+--- a/core/ui/lang/es.po
++++ b/core/ui/lang/es.po
+@@ -582,6 +582,11 @@ msgctxt "LIST_EMPTY_NO_MATCH"
+ msgid "No match: Back deletes a key"
+ msgstr "Sin coincidencia: Atrás borra"
+ 
++#: core/ui/ui_app.c
++msgctxt "DMR_DIAL_TITLE"
++msgid "DMR dial: "
++msgstr "Marcar DMR: "
++
+ #: core/ui/ui_app.c
+ msgctxt "SET_TOAST_RX_PAST_BANDS"
+ msgid "Receive only. Sensitivity not rated"
+@@ -1322,6 +1327,16 @@ msgctxt "FIND_HINT"
+ msgid "PTT talk  OK open  # more"
+ msgstr "PTT hablar  OK abrir  # más"
+ 
++#: core/ui/ui_find.c
++msgctxt "DMR_DIAL_HINT"
++msgid "PTT once  OK use  # more"
++msgstr "PTT una vez  OK usar  # más"
++
++#: core/ui/ui_find.c
++msgctxt "DMR_DIAL_EMPTY"
++msgid "Enter 1 to 16777214"
++msgstr "Marca de 1 a 16777214"
++
+ #: core/ui/ui_gps.c
+ msgctxt "GPS_TITLE_STATUS"
+ msgid "Status"
+@@ -4343,9 +4358,9 @@ msgid "Listen"
+ msgstr "Escuchar"
+ 
+ #: core/ui/ui_menus.c
+-msgctxt "PICKER_ROW_TYPE_NUMBER"
+-msgid "Type a number..."
+-msgstr "Escribe un número..."
++msgctxt "PICKER_ROW_DIAL_NUMBER"
++msgid "Dial a number..."
++msgstr "Marcar un número..."
+ 
+ #: core/ui/ui_menus.c
+ msgctxt "PICKER_ROW_SELECT_CONTACT"
+diff --git a/core/ui/lang/fr.po b/core/ui/lang/fr.po
+index eec664b..5dd971f 100644
+--- a/core/ui/lang/fr.po
++++ b/core/ui/lang/fr.po
+@@ -582,6 +582,11 @@ msgctxt "LIST_EMPTY_NO_MATCH"
+ msgid "No match: Back deletes a key"
+ msgstr "Aucun rés: Retour eff"
+ 
++#: core/ui/ui_app.c
++msgctxt "DMR_DIAL_TITLE"
++msgid "DMR dial: "
++msgstr "Numéro DMR : "
++
+ #: core/ui/ui_app.c
+ msgctxt "SET_TOAST_RX_PAST_BANDS"
+ msgid "Receive only. Sensitivity not rated"
+@@ -1322,6 +1327,16 @@ msgctxt "FIND_HINT"
+ msgid "PTT talk  OK open  # more"
+ msgstr "PTT Parler OK #+"
+ 
++#: core/ui/ui_find.c
++msgctxt "DMR_DIAL_HINT"
++msgid "PTT once  OK use  # more"
++msgstr "PTT une fois  OK utiliser  # plus"
++
++#: core/ui/ui_find.c
++msgctxt "DMR_DIAL_EMPTY"
++msgid "Enter 1 to 16777214"
++msgstr "Entrez de 1 à 16777214"
++
+ #: core/ui/ui_gps.c
+ msgctxt "GPS_TITLE_STATUS"
+ msgid "Status"
+@@ -4343,9 +4358,9 @@ msgid "Listen"
+ msgstr "Écouter"
+ 
+ #: core/ui/ui_menus.c
+-msgctxt "PICKER_ROW_TYPE_NUMBER"
+-msgid "Type a number..."
+-msgstr "Entrer un numéro..."
++msgctxt "PICKER_ROW_DIAL_NUMBER"
++msgid "Dial a number..."
++msgstr "Composer un numéro..."
+ 
+ #: core/ui/ui_menus.c
+ msgctxt "PICKER_ROW_SELECT_CONTACT"
+diff --git a/core/ui/lang/it.po b/core/ui/lang/it.po
+index adbbc80..d44b408 100644
+--- a/core/ui/lang/it.po
++++ b/core/ui/lang/it.po
+@@ -582,6 +582,11 @@ msgctxt "LIST_EMPTY_NO_MATCH"
+ msgid "No match: Back deletes a key"
+ msgstr "Nessun risultato: Indietro cancella"
+ 
++#: core/ui/ui_app.c
++msgctxt "DMR_DIAL_TITLE"
++msgid "DMR dial: "
++msgstr "Componi DMR: "
++
+ #: core/ui/ui_app.c
+ msgctxt "SET_TOAST_RX_PAST_BANDS"
+ msgid "Receive only. Sensitivity not rated"
+@@ -1322,6 +1327,16 @@ msgctxt "FIND_HINT"
+ msgid "PTT talk  OK open  # more"
+ msgstr "PTT parla  OK apri  # altro"
+ 
++#: core/ui/ui_find.c
++msgctxt "DMR_DIAL_HINT"
++msgid "PTT once  OK use  # more"
++msgstr "PTT una volta  OK usa  # altro"
++
++#: core/ui/ui_find.c
++msgctxt "DMR_DIAL_EMPTY"
++msgid "Enter 1 to 16777214"
++msgstr "Digita da 1 a 16777214"
++
+ #: core/ui/ui_gps.c
+ msgctxt "GPS_TITLE_STATUS"
+ msgid "Status"
+@@ -4343,9 +4358,9 @@ msgid "Listen"
+ msgstr "Ascolta"
+ 
+ #: core/ui/ui_menus.c
+-msgctxt "PICKER_ROW_TYPE_NUMBER"
+-msgid "Type a number..."
+-msgstr "Digita un numero..."
++msgctxt "PICKER_ROW_DIAL_NUMBER"
++msgid "Dial a number..."
++msgstr "Componi un numero..."
+ 
+ #: core/ui/ui_menus.c
+ msgctxt "PICKER_ROW_SELECT_CONTACT"
+diff --git a/core/ui/lang/zh.po b/core/ui/lang/zh.po
+index 31878bf..b56b13c 100644
+--- a/core/ui/lang/zh.po
++++ b/core/ui/lang/zh.po
+@@ -584,6 +584,11 @@ msgctxt "LIST_EMPTY_NO_MATCH"
+ msgid "No match: Back deletes a key"
+ msgstr "无匹配：返回删一位"
+ 
++#: core/ui/ui_app.c
++msgctxt "DMR_DIAL_TITLE"
++msgid "DMR dial: "
++msgstr "DMR 拨号： "
++
+ #: core/ui/ui_app.c
+ msgctxt "SET_TOAST_RX_PAST_BANDS"
+ msgid "Receive only. Sensitivity not rated"
+@@ -1324,6 +1329,16 @@ msgctxt "FIND_HINT"
+ msgid "PTT talk  OK open  # more"
+ msgstr "PTT 通话  OK 打开  # 更多"
+ 
++#: core/ui/ui_find.c
++msgctxt "DMR_DIAL_HINT"
++msgid "PTT once  OK use  # more"
++msgstr "PTT 单次  OK 使用  # 更多"
++
++#: core/ui/ui_find.c
++msgctxt "DMR_DIAL_EMPTY"
++msgid "Enter 1 to 16777214"
++msgstr "请输入 1 至 16777214"
++
+ #: core/ui/ui_gps.c
+ msgctxt "GPS_TITLE_STATUS"
+ msgid "Status"
+@@ -4345,9 +4360,9 @@ msgid "Listen"
+ msgstr "监听"
+ 
+ #: core/ui/ui_menus.c
+-msgctxt "PICKER_ROW_TYPE_NUMBER"
+-msgid "Type a number..."
+-msgstr "输入号码……"
++msgctxt "PICKER_ROW_DIAL_NUMBER"
++msgid "Dial a number..."
++msgstr "拨打号码…"
+ 
+ #: core/ui/ui_menus.c
+ msgctxt "PICKER_ROW_SELECT_CONTACT"
+diff --git a/core/ui/ui_app.c b/core/ui/ui_app.c
+index ad619c1..a08e16c 100644
+--- a/core/ui/ui_app.c
++++ b/core/ui/ui_app.c
+@@ -2098,7 +2098,7 @@ static void list_draw(const ui_scr_def_t *d)
+ 	if (d->flags & SF_FIND) {
+ 		sbuf_t b;
+ 		sb_init(&b, header, sizeof header);
+-		sb_str(&b, TR(LIST_TITLE_FIND, "Find: "));
++		sb_str(&b, CONFIG_DMR && f->scr == SCR_DMR_DIAL ? TR(DMR_DIAL_TITLE, "DMR dial: ") : TR(LIST_TITLE_FIND, "Find: "));
+ 		sb_str(&b, ui_find_query());
+ 		sb_chr(&b, '_');
+ 		l.header = header;
+@@ -2434,7 +2434,7 @@ void ui_app_key(const input_event_t *ev)
+ 	if (ev->action == ACT_CONTEXT && ev->gesture == GESTURE_LONG) {
+ 		if (!CONFIG_DMR || view->ch.mode != RADIO_MODE_DMR)
+ 			ui_toast(TR(TALK_WHY_DMR_CHANNELS_ONLY, "Talk target: DMR channels only"));
+-		else if (stack[sp].scr != SCR_PICKER)
++		else if (stack[sp].scr != SCR_PICKER && stack[sp].scr != SCR_DMR_DIAL)
+ 			ui_push(SCR_PICKER, 0);
+ 		return;
+ 	}
+@@ -3014,7 +3014,7 @@ void ui_app_status(ui_app_status_t *s)
+ 		gfx_text_alt(s->toast, 0, toast_text, sizeof toast_text, &more);
+ 		s->toast = toast_text;
+ 	}
+-	s->query = stack[sp].scr == SCR_FIND ? ui_find_query() : (d->flags & SF_FILTER) ? filter_keys : "";
++	s->query = (d->flags & SF_FIND) ? ui_find_query() : (d->flags & SF_FILTER) ? filter_keys : "";
+ 	s->draws = draws;
+ 	s->strip_drawn = strip_ok;
+ #if CONFIG_DUAL_WATCH
+diff --git a/core/ui/ui_find.c b/core/ui/ui_find.c
+index 14f2bee..57d1c06 100644
+--- a/core/ui/ui_find.c
++++ b/core/ui/ui_find.c
+@@ -57,14 +57,33 @@ typedef struct {
+ 	uint32_t ref;
+ } find_result_t;
+ 
+-static char query[FIND_KEYS + 1];
+-static find_result_t results[FIND_MAX];
+-static uint8_t n_results;
++typedef struct {
++	char query[FIND_KEYS + 1];
++	find_result_t *results;
++	uint8_t count, limit;
++#if CONFIG_DMR
++	uint16_t group_index, priv_index;	// exact contacts, 0 for none
++#endif
++} search_t;
++
++static find_result_t find_results[FIND_MAX];
++static search_t find = { .results = find_results, .limit = FIND_MAX };
+ static zone_t zone;		// the current zone's channels, for the search and the rows (one copy: RAM is short)
+ #if CONFIG_DMR
+-static uint16_t priv_index;	// the private contact whose ID is the digits (its name on that row), 0 for none
++static find_result_t dial_results[2];
++// The picker can open from Find, so the dial keeps its two rows and digits separate.
++static search_t dial = { .results = dial_results, .limit = 2 };
+ #endif
+ 
++static search_t *current_search(void)
++{
++#if CONFIG_DMR
++	if (ui_frame()->scr == SCR_DMR_DIAL)
++		return &dial;
++#endif
++	return &find;
++}
++
+ // Settings and places reachable by name (ui_menus.c)
+ uint8_t ui_set_group_count(void);
+ tr_id_t ui_set_group_name(uint8_t g);
+@@ -113,22 +132,21 @@ bool ui_t9_match(const char *text, const char *keys)
+ 	return false;
+ }
+ 
+-const char *ui_find_query(void) { return query; }
++const char *ui_find_query(void) { return current_search()->query; }
+ 
+ static bool add(uint8_t kind, uint32_t ref)
+ {
+-	if (n_results >= FIND_MAX)
++	search_t *s = current_search();
++	if (s->count >= s->limit)
+ 		return false;
+-	for (uint8_t i = 0; i < n_results; i++)
+-		if (results[i].kind == kind && results[i].ref == ref)
++	for (uint8_t i = 0; i < s->count; i++)
++		if (s->results[i].kind == kind && s->results[i].ref == ref)
+ 			return true;
+-	results[n_results].kind = kind;
+-	results[n_results].ref = ref;
+-	n_results++;
++	s->results[s->count++] = (find_result_t){ .kind = kind, .ref = ref };
+ 	return true;
+ }
+ 
+-static uint32_t query_number(void)
++static uint32_t query_number(const char *query)
+ {
+ 	uint32_t n = 0;
+ 	for (const char *p = query; *p; p++) {
+@@ -153,10 +171,13 @@ static bool id_prefix(uint32_t id, const char *keys)
+ #if CONFIG_DMR
+ typedef struct {
+ 	uint32_t num;
++	const char *keys;
+ 	size_t len;
+ 	uint8_t found;
+ 	bool number;	// the digits are an ID: the rows for the number itself follow
+ 	bool known;	// a contact has the number as its ID
++	bool exact;	// the dial needs only exact group and private matches
++	uint16_t tg;	// the group contact with it
+ 	uint16_t priv;	// the private contact with it
+ } contact_scan_t;
+ 
+@@ -169,8 +190,12 @@ static bool contact_match(uint16_t index, const contact_t *c, void *ctx)
+ 		cs->known = true;
+ 		if (c->type == CONTACT_PRIVATE && cs->priv == 0)
+ 			cs->priv = index;
++		if (c->type == CONTACT_GROUP && cs->tg == 0)
++			cs->tg = index;
+ 	}
+-	if (cs->found < 6 && (ui_t9_match(c->name, query) || (cs->len >= 3 && id_prefix(c->id, query)))) {
++	if (cs->exact)
++		return cs->tg == 0 || cs->priv == 0;
++	if (cs->found < 6 && (ui_t9_match(c->name, cs->keys) || (cs->len >= 3 && id_prefix(c->id, cs->keys)))) {
+ 		add(FR_CONTACT, index);
+ 		cs->found++;
+ 	}
+@@ -178,17 +203,44 @@ static bool contact_match(uint16_t index, const contact_t *c, void *ctx)
+ 	// needs no scan of its own each time it is drawn
+ 	return cs->found < 6 || (cs->number && cs->priv == 0);
+ }
++
++static void dial_run(uint32_t num)
++{
++	if (num == 0 || num > 0xFFFFFEu)
++		return;
++	contact_scan_t cs = { .num = num, .exact = true };
++	codeplug_contacts_each(contact_match, &cs);
++	dial.group_index = cs.tg;
++	dial.priv_index = cs.priv;
++	add(FR_TG, num);
++	add(FR_PRIVATE, num);
++}
++
++void ui_open_dmr_dial(const char *digits)
++{
++	dial.count = 0;
++	ui_push(SCR_DMR_DIAL, 0);
++	ui_find_set(digits);
++}
+ #endif
+ 
+ void ui_find_run(void)
+ {
+ 	char rec_name[CODEPLUG_NAME_LEN + 1];
+ 	const radio_view_t *v = ui_view();
++	search_t *s = current_search();
++	const char *query = s->query;
+ 	size_t len = strlen(query);
+-	uint32_t num = query_number();
+-	n_results = 0;
++	uint32_t num = query_number(query);
++	s->count = 0;
+ 	if (len == 0)
+ 		return;
++#if CONFIG_DMR
++	if (ui_frame()->scr == SCR_DMR_DIAL) {
++		dial_run(num);
++		return;
++	}
++#endif
+ 
+ 	bool have_zone = codeplug_zone(v->zone_index, &zone);
+ 	// 1. Channel by position in the zone
+@@ -211,10 +263,10 @@ void ui_find_run(void)
+ #if CONFIG_DMR
+ 	// Contacts and talkgroups: by name, or by ID for 3 digits and more. One scan, many records per flash read
+ 	// (codeplug_contacts_each): read one at a time, 1024 slots kept the UI and the idle task busy for 0.7 s a key
+-	contact_scan_t cs = { .num = num, .len = len, .number = num >= 1 && num <= 0xFFFFFEu };
++	contact_scan_t cs = { .num = num, .keys = query, .len = len, .number = num >= 1 && num <= 0xFFFFFEu };
+ 	codeplug_contacts_each(contact_match, &cs);
+ 	bool known = cs.known;
+-	priv_index = cs.priv;
++	find.priv_index = cs.priv;
+ #endif
+ 	// Zones by name
+ 	uint16_t zn = codeplug_zone_count();
+@@ -264,6 +316,7 @@ void ui_find_run(void)
+ 
+ void ui_find_set(const char *q)
+ {
++	char *query = current_search()->query;
+ 	if (q != query) {
+ 		strncpy(query, q, FIND_KEYS);
+ 		query[FIND_KEYS] = 0;
+@@ -277,14 +330,15 @@ void ui_find_set(const char *q)
+ 
+ // --- the Find screen ---
+ 
+-static uint16_t find_count(void) { return n_results; }
++static uint16_t find_count(void) { return current_search()->count; }
+ 
+ static bool find_target(uint16_t i, ui_target_t *t)
+ {
+-	if (i >= n_results)
++	const search_t *s = current_search();
++	if (i >= s->count)
+ 		return false;
+ 	memset(t, 0, sizeof *t);
+-	const find_result_t *r = &results[i];
++	const find_result_t *r = &s->results[i];
+ 	switch (r->kind) {
+ #if CONFIG_DMR
+ 	case FR_CONTACT: {
+@@ -301,14 +355,23 @@ static bool find_target(uint16_t i, ui_target_t *t)
+ 	case FR_TG:
+ 		t->id = r->ref;
+ 		t->group = true;
++#if CONFIG_DMR
++		if (s->group_index != 0) {
++			contact_t c;
++			if (codeplug_contact(s->group_index, &c) && c.id == r->ref && c.type == CONTACT_GROUP) {
++				t->saved = true;
++				strcpy(t->name, c.name);
++			}
++		}
++#endif
+ 		return true;
+ #if CONFIG_DMR_TRUNK_GW
+ 	case FR_PHONE:
+ 		// The row focused (PTT talks to it) or chosen: the radio holds these digits for the gateway's request, and
+ 		// a search typed without calling leaves the system's dial alone
+ 		t->id = T3_ID_PSTNI;
+-		str_copy(t->name, sizeof t->name, query);
+-		ui_svc_t3_dial(query);
++		str_copy(t->name, sizeof t->name, s->query);
++		ui_svc_t3_dial(s->query);
+ 		return true;
+ #endif
+ 	case FR_PRIVATE: {
+@@ -316,7 +379,7 @@ static bool find_target(uint16_t i, ui_target_t *t)
+ #if CONFIG_DMR
+ 		// The contact the search found (no scan here: the row is drawn every frame)
+ 		contact_t c;
+-		if (priv_index != 0 && codeplug_contact(priv_index, &c) && c.id == r->ref && c.type == CONTACT_PRIVATE) {
++		if (s->priv_index != 0 && codeplug_contact(s->priv_index, &c) && c.id == r->ref && c.type == CONTACT_PRIVATE) {
+ 			t->saved = true;
+ 			strcpy(t->name, c.name);
+ 		}
+@@ -331,9 +394,10 @@ static bool find_target(uint16_t i, ui_target_t *t)
+ static void find_item(uint16_t i, ui_item_t *it)
+ {
+ 	char rec_name[CODEPLUG_NAME_LEN + 1];
+-	if (i >= n_results)
++	const search_t *s = current_search();
++	if (i >= s->count)
+ 		return;
+-	const find_result_t *r = &results[i];
++	const find_result_t *r = &s->results[i];
+ 	sbuf_t b;
+ 	sb_init(&b, it->label, sizeof it->label);
+ 	sbuf_t vb;
+@@ -374,7 +438,12 @@ static void find_item(uint16_t i, ui_item_t *it)
+ 	case FR_TG:
+ 		sb_str(&b, TR(FIND_ROW_TALK_TO_TG, "Talk to TG "));
+ 		sb_u32(&b, r->ref, 1);
+-		sb_str(&vb, TR(CHIP_NOT_SAVED, TEXT_ALT_OPEN "Not saved" TEXT_ALT_NEXT TEXT_ALT_CLOSE));
++		if (find_target(i, &t) && t.saved) {
++			sb_chr(&b, ' ');
++			sb_str(&b, t.name);
++		} else {
++			sb_str(&vb, TR(CHIP_NOT_SAVED, TEXT_ALT_OPEN "Not saved" TEXT_ALT_NEXT TEXT_ALT_CLOSE));
++		}
+ 		break;
+ 	case FR_PRIVATE:
+ 		sb_str(&b, TR(FIND_ROW_PRIVATE_CALL, "Private call "));
+@@ -395,7 +464,7 @@ static void find_item(uint16_t i, ui_item_t *it)
+ 		break;
+ 	case FR_PHONE:
+ 		sb_str(&b, TR(TRUNK_ROW_PHONE_CALL, "Phone call "));
+-		sb_str(&b, query);
++		sb_str(&b, s->query);
+ 		break;
+ 	case FR_SETTING: {
+ 		const char *syn;
+@@ -417,9 +486,10 @@ static void find_item(uint16_t i, ui_item_t *it)
+ 
+ static void find_select(uint16_t i, bool hold)
+ {
+-	if (i >= n_results)
++	const search_t *s = current_search();
++	if (i >= s->count)
+ 		return;
+-	const find_result_t *r = &results[i];
++	const find_result_t *r = &s->results[i];
+ 	const radio_view_t *v = ui_view();
+ 	ui_target_t t;
+ 	switch (r->kind) {
+@@ -450,7 +520,7 @@ static void find_select(uint16_t i, bool hold)
+ 	case FR_TG:
+ 	case FR_PRIVATE:
+ 		if (find_target(i, &t))
+-			ui_talk(&t, hold);
++			ui_talk(&t, hold && ui_frame()->scr != SCR_DMR_DIAL);
+ 		break;
+ 	case FR_PHONE:
+ 		if (find_target(i, &t))
+@@ -470,7 +540,8 @@ static void find_select(uint16_t i, bool hold)
+ static void find_context(uint16_t i)
+ {
+ 	ui_target_t t;
+-	if (i < n_results && results[i].kind != FR_PHONE && find_target(i, &t))
++	const search_t *s = current_search();
++	if (i < s->count && s->results[i].kind != FR_PHONE && find_target(i, &t))
+ 		ui_open_actions(&t);
+ 	else
+ 		ui_toast(TR(FIND_TOAST_NO_ACTIONS, "No actions for this result"));
+@@ -478,6 +549,7 @@ static void find_context(uint16_t i)
+ 
+ static bool find_key(const input_event_t *ev)
+ {
++	char *query = current_search()->query;
+ 	int d = ev->action >= ACT_DIGIT_0 && ev->action <= ACT_DIGIT_9 ? ev->action - ACT_DIGIT_0 : -1;
+ 	if (d >= 0 && (ev->gesture == GESTURE_PRESS || ev->gesture == GESTURE_LONG)) {
+ 		size_t len = strlen(query);
+@@ -509,3 +581,13 @@ const ui_scr_def_t ui_find_screen = {
+ 	.count = find_count, .item = find_item, .select = find_select, .context = find_context, .target = find_target,
+ 	.key = find_key,
+ };
++
++#if CONFIG_DMR
++const ui_scr_def_t ui_dmr_dial_screen = {
++	.name = "dmr-dial", .flags = SF_LIST | SF_FIND | SF_FIELD,
++	.hint = TRN(DMR_DIAL_HINT, "PTT once  OK use  # more"),
++	.empty = TRN(DMR_DIAL_EMPTY, "Enter 1 to 16777214"),
++	.count = find_count, .item = find_item, .select = find_select, .context = find_context, .target = find_target,
++	.key = find_key,
++};
++#endif
+diff --git a/core/ui/ui_menus.c b/core/ui/ui_menus.c
+index b605213..806ce01 100644
+--- a/core/ui/ui_menus.c
++++ b/core/ui/ui_menus.c
+@@ -56,6 +56,9 @@
+ #endif
+ 
+ extern const ui_scr_def_t ui_find_screen;
++#if CONFIG_DMR
++extern const ui_scr_def_t ui_dmr_dial_screen;
++#endif
+ extern const ui_scr_def_t ui_aprs_screen, ui_aprs_heard_screen, ui_aprs_station_screen;	// ui_aprs.c
+ #if CONFIG_POSITION
+ extern const ui_scr_def_t ui_fixed_pos_screen;	// ui_position.c
+@@ -8270,7 +8273,7 @@ static void picker_enter(void)
+ #endif
+ }
+ 
+-// After the targets: Type a number..., then Select contact... (every contact, as Contacts lists them)
++// After the targets: Dial a number..., then Select contact... (every contact, as Contacts lists them)
+ #define PICK_CONTACTS	(CONFIG_DMR ? 1u : 0u)
+ 
+ static uint16_t picker_count(void) { return (uint16_t)(n_picks + 1u + PICK_CONTACTS); }
+@@ -8278,7 +8281,7 @@ static uint16_t picker_count(void) { return (uint16_t)(n_picks + 1u + PICK_CONTA
+ static void picker_item(uint16_t i, ui_item_t *it)
+ {
+ 	if (i >= n_picks) {
+-		str_copy(it->label, sizeof it->label, i == n_picks ? TR(PICKER_ROW_TYPE_NUMBER, "Type a number...") :
++		str_copy(it->label, sizeof it->label, i == n_picks ? TR(PICKER_ROW_DIAL_NUMBER, "Dial a number...") :
+ 			TR(PICKER_ROW_SELECT_CONTACT, "Select contact..."));
+ 		return;
+ 	}
+@@ -8305,8 +8308,9 @@ static void picker_select(uint16_t i, bool hold)
+ 		return;
+ 	}
+ 	if (i == n_picks) {
+-		ui_push(SCR_FIND, 0);	// digits then OK / PTT: talk to the number typed
+-		ui_find_set("");
++#if CONFIG_DMR
++		ui_open_dmr_dial("");
++#endif
+ 		return;
+ 	}
+ 	ui_talk(&picks[i].t, hold);
+@@ -8323,12 +8327,27 @@ static const char *picker_title(void)
+ 	return ui_view()->ch.name;
+ }
+ 
++#if CONFIG_DMR
++static bool picker_key(const input_event_t *ev)
++{
++	if (ev->action < ACT_DIGIT_0 || ev->action > ACT_DIGIT_9 ||
++	    (ev->gesture != GESTURE_PRESS && ev->gesture != GESTURE_LONG))
++		return false;
++	char digits[] = { (char)('0' + ev->action - ACT_DIGIT_0), 0 };
++	ui_open_dmr_dial(digits);
++	return true;
++}
++#endif
++
+ static const ui_scr_def_t picker_screen = {
+ 	.name = "picker", .flags = SF_LIST | SF_FIELD, .prefix = TRN(PICKER_TITLE, "Talk to"),
+ 	.hint = TRN(PICKER_HINT, TEXT_ALT_OPEN "PTT once  OK use  Hold OK set"
+ 		TEXT_ALT_NEXT "OK use  Hold OK set" TEXT_ALT_CLOSE),
+ 	.count = picker_count, .item = picker_item, .select = picker_select, .context = picker_context,
+ 	.target = picker_target, .enter = picker_enter, .title = picker_title,
++#if CONFIG_DMR
++	.key = picker_key,
++#endif
+ };
+ 
+ // ======================= Scan: what to do with the channel that stopped it =======================
+@@ -8469,7 +8488,11 @@ static const ui_scr_def_t cpf_screen = {
+ 
+ const ui_scr_def_t *const ui_scr[SCR_COUNT] = {
+ 	[SCR_HOME] = &home_screen, [SCR_QUICK] = &quick_screen, [SCR_HUB] = &hub_screen,
+-	[SCR_FIND] = &ui_find_screen, [SCR_ACTIONS] = &actions_screen, [SCR_CONTACTS] = &contacts_screen,
++	[SCR_FIND] = &ui_find_screen,
++#if CONFIG_DMR
++	[SCR_DMR_DIAL] = &ui_dmr_dial_screen,
++#endif
++	[SCR_ACTIONS] = &actions_screen, [SCR_CONTACTS] = &contacts_screen,
+ 	[SCR_MESSAGES] = &messages_screen, [SCR_MESSAGE] = &message_screen, [SCR_COMPOSE] = &compose_screen,
+ 	[SCR_MESSAGE_READ] = &message_read_screen,
+ 	[SCR_RECENT] = &recent_screen, [SCR_ZONES] = &channels_screen, [SCR_ZONE] = &zone_screen,
+diff --git a/core/ui/ui_nav.h b/core/ui/ui_nav.h
+index 3452254..88a3d22 100644
+--- a/core/ui/ui_nav.h
++++ b/core/ui/ui_nav.h
+@@ -46,6 +46,7 @@ typedef enum {
+ 	SCR_BL_TEST,			// Settings > Advanced > Backlight tests
+ #endif
+ 	SCR_SPLASH_PREVIEW,
++	SCR_DMR_DIAL,
+ 	SCR_COUNT
+ } ui_scr_t;
+ 
+@@ -198,6 +199,9 @@ bool ui_t9_match(const char *text, const char *keys);
+ // Find: rerun the search for ui_st query; the screen's rows
+ void ui_find_run(void);
+ void ui_find_set(const char *q);
++#if CONFIG_DMR
++void ui_open_dmr_dial(const char *digits);
++#endif
+ const char *ui_find_query(void);
+ 
+ // Recent (ui_app.c): newest first
+diff --git a/docs/spec/ui.md b/docs/spec/ui.md
+index 126665c..66203bd 100644
+--- a/docs/spec/ui.md
++++ b/docs/spec/ui.md
+@@ -142,7 +142,8 @@ without its label, for the cursor's steps. With 1024 channels a key took 0.34 s
+ | Unsaved Changes | `discard` | BACK in the channel editor with unsaved changes (2.1), or in the contact editor (2.4); titled "Save as FM?" or "Save as DMR?" before a save that would remove a channel's own mode (2.1) |
+ | New Contact | `contactedit` | New contact in Contacts, Find's "Create contact 3100", or Save as contact in a station's or talkgroup's actions (`CONFIG_CONTACT_EDIT`): the contact editor (2.4) |
+ | List picker | `chpick` | OK on a channel's TX contact or RX group list row: "None", then every stored contact or list, T9 filtered |
+-| Talk target picker | `picker` | long CONTEXT on a DMR channel (else "Talk target: DMR channels only"), TALK_TARGET (a side key set to it), Quick 8. Its last rows: "Type a number..." (Find) and "Select contact..." (Contacts, whose keys are the picker's) |
++| Talk target picker | `picker` | long CONTEXT on a DMR channel (else "Talk target: DMR channels only"), TALK_TARGET (a side key set to it), Quick 8. Digits go straight to the DMR dial. Its last rows are "Dial a number..." and "Select contact..." (Contacts, whose keys are the picker's) |
++| DMR dial | `dmr-dial` | a digit or "Dial a number..." in the Talk target picker. The digits (1–16777214) give two rows, the group first and the private call second, with exact contact names if stored. PTT uses the focused destination once. OK uses it temporarily on a memory channel, even on a hold. In the VFO the target remains the VFO's own. The dial never saves a contact or changes the channel's default |
+ | Diagnostics | `diag` | Tools 7, Settings > Advanced |
+ | Share | `zone_share` | without `CONFIG_ZONE_EDIT`: CONTEXT in a zone's channels (`zone`): Share zone to..., Share channel to... ([zone-share.md](zone-share.md) 7). With the zone editor these are rows of Zone options and Channel actions (2.2) |
+ | Share To | `zone_share_to` | a pick in Share, Channel actions, Zone options or the channel editor: the contacts, T9 filtered. Digits that make an ID add "Private ID 9991234" and "TG 9991234" after the contacts ("Not saved"), so a station that isn't a contact can be sent to. OK sends and returns to the zone's list (to the channel editor from there) |
+diff --git a/docs/user/05-keys-and-navigation.md b/docs/user/05-keys-and-navigation.md
+index 743dc2d..a12ae88 100644
+--- a/docs/user/05-keys-and-navigation.md
++++ b/docs/user/05-keys-and-navigation.md
+@@ -98,6 +98,9 @@ Then:
+ | **#** | Actions for the focused talkgroup or person |
+ | **Back** | Delete the last digit. With one digit left, leave Find |
+ 
++To see only the group and private call options, use the [DMR dial](09-dmr.md#typing-a-talkgroup-or-id).
++Hold **#** on DMR, then start typing the destination.
++
+ Settings also answer to other names. For example, "promiscuous" finds Digital monitor and "TOT" finds TX timeout.
+ 
+ <img src="../ux/screens/160x120i5/find_name.png" width="200" alt="Find, matching a name">
+diff --git a/docs/user/09-dmr.md b/docs/user/09-dmr.md
+index 5c8e61d..d7d45db 100644
+--- a/docs/user/09-dmr.md
++++ b/docs/user/09-dmr.md
+@@ -47,19 +47,19 @@ Home shows the result after "PTT→".
+ ## Choosing a talk target
+ 
+ Hold **#** on a DMR channel to open the talk target picker: the channel's default, the reply target, the RX group
+-list's talkgroups, recent talkgroups, and "Type a number..." to dial an ID or talkgroup by hand. The **Talk target**
++list's talkgroups, recent talkgroups, and "Dial a number..." to enter an ID or talkgroup. The **Talk target**
+ side key opens the same picker.
+ 
+ A talk target has three lifetimes.
+ 
+ | Lifetime | How | Lasts |
+ |---|---|---|
+-| Once | Focus a talkgroup or person in any list (Contacts, Recent, Find, the picker, actions) and press **PTT** | This call and its reply window |
++| Once | Focus a talkgroup or person in any list (Contacts, Recent, Find, DMR dial, the picker, actions) and press **PTT** | This call and its reply window |
+ | For now | Focus it and press **OK**. The radio shows "Talking to ..." | Until you change the channel or press **Back** on Home |
+ | Permanent | Focus it and hold **OK**. The radio shows "... is the default now" | Written to the channel |
+ 
+-A permanent talk target must be a contact in the codeplug. A typed number is used for now only. The radio shows
+-"Not a stored contact: for now only".
++A permanent talk target must be a contact in the codeplug. The [DMR dial](#typing-a-talkgroup-or-id) sets temporary
++targets, including when you hold **OK** on a saved contact.
+ 
+ ### The talk target picker
+ 
+@@ -71,7 +71,7 @@ Press **Talk target** on a DMR channel (or **\***, **8**). The picker lists, in
+ | The last call heard: its talkgroup, or the caller for a private call | reply |
+ | The talkgroups of the channel's listen list | listen |
+ | Talkgroups from Recent | recent |
+-| Type a number... | |
++| Dial a number... | |
+ | Select contact... | |
+ 
+ The focus starts on the reply row when there is one.
+@@ -83,7 +83,8 @@ The focus starts on the reply row when there is one.
+ | Hold **OK** | Makes it the channel's default |
+ | **#** | Opens its actions |
+ 
+-"Type a number..." opens Find. Type the talkgroup or ID, focus the line you want and press **PTT** or **OK**.
++Type directly in the picker or select **Dial a number...** first. The dial shows the group call on the first row and
++the private call on the second. A saved contact appears with its name.
+ 
+ "Select contact..." opens [Contacts](#contacts), every contact and talkgroup in the codeplug. Turn the knob, or press
+ **Up** and **Down**, to go through them, or type letters of the name or digits of the ID to find one. The keys are the
+@@ -95,9 +96,20 @@ On an FM channel **Talk target** shows "Talk target: DMR channels only".
+ 
+ ### Typing a talkgroup or ID
+ 
+-On Home, type the number. Find lists "Talk to TG 3100" and "Private call 3100" (with a name when the ID is a contact).
+-Focus one and press **PTT** for one call, or **OK** for now.
++From DMR Home, hold **#** (or press **\***, **8**), then type the number. The group call starts focused.
++Press **Down** to select the private call. Press **PTT** to send one call or **OK** to use the destination for now.
++On a memory channel, **Back** on Home or a channel change restores the programmed target. On the DMR VFO, **OK**
++sets the VFO target. Both rows accept numbers absent from Contacts.
+ 
++<img src="../ux/screens/160x120i5/dmr_dial.png" width="200" alt="The DMR dial">
++
++On a hotspot or repeater with reflector control by private call, dial the reflector ID and use **PTT** from the
++private row. Use the talkgroup and timeslot documented by your network to speak after linking. For example,
++[openSPOT documents](https://manuals.sharkrf.com/openspot4/en/dmr-usage-notes.html) private calls for linking
++on supporting networks and group calls to TG9 after linking. [BrandMeister](https://news.brandmeister.network/brandmeister-dmr-reflectors-support-ending-by-end-of-2020/)
++retired this reflector function. Dial an ordinary talkgroup there.
++
++Digits typed directly on memory Home still open Find, which includes typed DMR destinations along with other results.
+ On a trunked channel, Find also lists "Phone call 5551234" last: **PTT** on it calls that number through the system's
+ telephone gateway (the system refuses it when it has none). A call from the telephone network shows the caller's
+ number, or "Phone line" when the system didn't send one.
+diff --git a/docs/ux/screens/128x64/dmr_dial.png b/docs/ux/screens/128x64/dmr_dial.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..9f325aa2ea133748bc2bd47124f3c2461b944fc3
+GIT binary patch
+literal 511
+zcmV<b0RaAqP)<h;3K|Lk000e1NJLTq004jh002M%0{{R3=osxh00006P)t-s$k4bH
+z7!ZwYzpDTM0kla(K~#9!W2pcCzkvY(m>51vKR)LT7cvrJ_?><KWR(Mi%l^k}3Q*uU
+zOn`}n&8P*e0;+|J^_lkxuz(jt1s4mOM;F6KndEa&0WJ1F29p@jtQBCu0vH)MkhxEG
+zFbZ%mC>(>UoxX&fv4cTV(*PmBY2cxtnGIJlWe2C=2?pD>2!SP>LLLm9ns9+9OV}lk
+zDR3OKK)0Ov0G!#u2oD?(W<LNFV86p**dhcGV3g=&?qO8m^74^NXL#m$j)9S-i&2PC
+zhb!uc)FehmuOJ3SnI52k3V*hX*d&JI-j^5{RX{3Kn7lv&n!rG2l*wc`!zjaK*e8_O
+zc--(DW@!BX|Ns5}|KIojhXRKF-w=WOmhT|~+w60W%O5M>f9=|Nh``p(`FZ#EZ{L4y
+z3RFe!@0>jOedhZQ1wjS&{+^xpfA9AF->$&~e$FYDKW2IUyXA3+z<)HrFbW0*z=)S(
+zaMbWj0OdKb3Xc|Mi{}hN6I7lv$g|9N4iaEl%E=(~K$Vk$i+!mk1498&fFGpdJV=0_
+zfx!VNzyT7_0BQlUfC9`w?K~4?j{`IEOm<9X0084N+hfgPtZ@JU002ovPDHLkV1fWp
+B;<Nw&
+
+literal 0
+HcmV?d00001
+
+diff --git a/docs/ux/screens/160x120i5/dmr_dial.png b/docs/ux/screens/160x120i5/dmr_dial.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..a0a3d7f0a3b9a49103e1624f7636542d529393e7
+GIT binary patch
+literal 1053
+zcmV+&1mgRNP)<h;3K|Lk000e1NJLTq005Q%004Lh0ssI2pDmn6000BzNkl<Zc-rlk
+zS#I1g5C!KbzM6f!!CWO5$cK-S-^9iMvchgYHWw|_R6#Ig4M|a5Y%aIkHhlj6<l5)*
+z<8C!9PqeN0^W=4+?nKwe`^VQc#D|TNTi7v@w36K03a(UlOt>#jZrt+oDy*Hc+$iPD
+zokgK-e@2DNCs>8?x>}+BsaK&Gbj9&y|6Wg_9^dW~X3g1vj8xb^MNGOD+O?olVK57A
+z$rCA@D+~8gDB^kiS~#gfcO$mZS||eO8z~+tawm;kQr8|TuBWi}44qp_wA~Hi+`aeF
+z9)&2x--Q$s*^5l1um^wcKiBeP{i|E1*rt15EFAB%_z>}=?R66<bcH21RUxPf(-4L3
+zSJ+?Uqwop}*F!j{&`oHY1U6Ti`|RE%eeQqVlnULyIs~~g#qzmXu|Z)^|1YSpb}bAl
+z)Jtzq7FwNRb$>;LL$WZpKJ{$DYWs}BQz+DpyrRO$p`vX&<L)MkW#WO>M~L7t11>Ur
+z@d^O&()|4&QB3?Btkv9~Vh`Qtwu;+GuFc2&;ogg4yWzaF80*~>+KQ1zY#G~v+ol*6
+zUtwAzHJ?Iv{JQ0J;<`g#r+cSD_a;%OKTRuqKFs|qBCadC882#8WMNK~9oMzFtLwTs
+z6q!hq8~ryjk=nmD(A61}c}wk+P!<Y>4f9)%!rGx`JD>ZUtrfb-n&i`9g}F83*eon6
+zOom->EsShuM4)Te!YW}!%>xuxnb=gJ?%4Si+MjH*y%TA}M3mb*)NW@Yhl-q=;@d^D
+zdW(_U_(b+H;$d(TbjUUs007{WyuJV8n)>=yxZdpP(!~Npsx-IU)_?o$ZZx+0kTD9k
+z>*&c9+HZHG5gFg7Q)pAu4pmW059eai=iaVITU?=glPD~{?$ip4s*1U5V-%?s30AJ<
+z9)<ev9187_F9tWByF(O4I@zYs>U3W*O&0bj%t_6eh%1b=98{RRy=?}%h(i0#L4}?B
+zlpck;kylZumADy}+p@Q9XGF{Kt)o6d1dkafQph#^(Vh#1Tqxw~Q3wD40000000000
+z0000000000000000000000000000000000000000000000000}@CK9ft?+SwEZ6ht
+z`pNU5eR4Rq&+DIFPNDnpHW23tjqT^*3T-#0R4B69meIwU6^cgOuN&2$Vl5qw=J<?M
+z7|9IXW~ahp(6{SPBn#ICBJl~%E;k{0I)$BCcs7N>{@lb{cT+faA`N~~?(3R2ZrdrW
+zn@Eq%!mYP6L4`frW4#t`5ucF?gOk#b?L+efC=N?{-!Uo+<I{MsKOF5ZaV`WD!jb#~
+XW0VJjTz#&g00000NkvXXu0mjf@J;nO
+
+literal 0
+HcmV?d00001
+
+diff --git a/docs/ux/screens/160x120i5/talk_target_picker.png b/docs/ux/screens/160x120i5/talk_target_picker.png
+index 98d206d14501a1aab12c41f92d6b91842ba7d270..44aaeff967ca3d1081d3922138eee5a0d301c838 100644
+GIT binary patch
+delta 1381
+zcmV-r1)BQu3it|;B!53iL_t(|+U;F!j@=*(%u)7gy<W9f=>_^@uhOd8Hhmj|8JmyT
+zWJXbyC6EAvjqx+|`1tw3EA@5smj4PRoAM`E%2B0DihS+oeKF<o9+?OHwDRT<6oP%d
+zj6zuiC#;rVzi)m^-gJ)96%@)*R-;fCTsc&&;vR%Tt276a!haf7vN2ZKMLN+$q4Kno
+zLh$`TrBI;|seLF4k!j32%Lbhbi}xv{P>wD9D~@l)l|r1tW*bOhAVmtA3^k($H)oJV
+zh0Fuae~2;VSipp!kXPcRJugzoixiSVVh8;C3Ypj}cuCarAg`78N)7Mrz4!0$=LP08
+zy}X&y=s2DDT7O3?d62K@rF^xWN+Hs}Cgv7Vh?JGo*2vzBLMfU>GHMxWr5bWv?6{_;
+z(iQ0|0kwaviZnij#T2FYYo&%sp<Ah52!0(FRz)hG7U%D<6zWnKox&k=VUfbfQrJ|a
+zJ;V>A5U1^d6gCZ$=@hyb6}}XGol{#;#Gz2mb0%{}F@J*2L|KrFVS*qCg7}BGZ$EgY
+zzWz{nStfrzkSX#iW>E59p6WT3g7~8#7t)#TrXB9iE#`05^05>SZ}lt+eNre#Xi+PS
+z8rnf9ywtzg97V&O_Zo$I2aTc-NdX&^h{A!bK6)rY22Qat^50rxOye=pTo{EypA<?3
+z@&pQN8h=jdhtL#WZk|aYIA1y`bT2B9B29BfnSFJWXFqcWX*HMj5otE%CxxVt*Fp-5
+z%9a%7_mL7iU|=-2FH#$Mb0XBDB9L(JULrfA*1*uF&LG6R6wWI+IPh==g+-O%(;RnE
+zSc_tMjU&bLl*zV6b0guuwNln-Zaoq_a#*4scz-w~P!Xa83>5^W5TQ^8A(|*mF&7r&
+z4Odg>Q>0B{1*Nb^b4GKfxd}!O+8;@wDN@_LvkBSjv<-zeRXi!0+c8kUc`mFJ9za}n
+z%`nlU!oj_a1VIo4K@jP%^3W1wgY~XH(gbeq!+2<kJ~ED$uPz;h^9l|a`}m?Br?7cY
+z5P#j=kWZxZ(2^pB;PPMh!esZ(L~(N?`4z%^=guH<nPM)C>*mJG_V`Hk_r(9PshGan
+z&29B|lERd3?&42ELry{rYs(bP5NXlS%}o#lK@bFiJG6$M&29R6r-kgO&-z8hFe7t~
+zo7?9cSYMwR6wWI+pn3S&-18_LTc6<+W`A{aBZ0qTDI8Uw*@`rcn;Y3dQ7hFGVAx-u
+z1#@9OH+LvS8i7KY9^K7-i#d~>LYpdHb~bm90kW(<{VdYWO%Mb@5CmabMIjDi-Hcpc
+zXA;*o=p*+dDQr_%6iUVMkFV95IsiGeB-b$}w@D$gU%p>%@SXM6Lrb!6uNhCFE`Ki8
+ziFPrC51k7Ur&s?hJCMT22Plxj+{c*Qxu|GHuUP*xNs}>ElqdXDHsp(V3PBJAK@bFS
+zi&5Hdq|Gz!qSYtLx-e0fk-|o+5O-SBt&GP$>3b@WO&15S6JuwWck{P`qvSGe`bQ4e
+zkB<0xr20F3_1Q!slTwIyXC6dhQ-6_yZslbZjv7)MN@1<>pkI*`-nODZoZ6-z(>u+X
+z8dXE;L&rBk5ClOG1VIo4kr!`7a{Q(6+|YggdFFV%Ujy*#?njeay1t|SQz)CUD}_^A
+z8k9n?n_lzFVSY*RQ7B&`U)cPXucb)4tZiIDVY5Q|i0)BSmm_l&Qmx<WZ(gZB$hMNg
+zP6`oqH;O`&6y~GQ)E)Avl&7#1f*dIA+Lpp0=1f2eW0^B<1z4NXFU2RBGiRddTaK3E
+n?YhOH;nIGWr9D9kiQDiSvb?+G@C1<S00000NkvXXu0mjfG24<+
+
+delta 1375
+zcmV-l1)%!)3i1k&B!4+cL_t(|+U=a{ZQU>og*{4E>v~02=>q+cRaz8j-5XP)4ylJp
+z`5YL5BTKfVPfuRj$H&hP9;uI`H~m*B(UgC|RE{iNLgZ~f&x;|K`^Y%pqm?^{KnT|L
+zGK4Y-4y+bmKW{!uo^-a+6$oW3t0B}ou57B-?j8i8wKoUqg?}|vvM|=Zi&UZsp>nko
+zA$b3wy--1j<USNaWE!*1vO(v<;(3Z*DBBkP6vwmT_Cg$CvkXKSXdnfb47EiKzMMfe
+z6*3Mu{~?Ph#|9<@LLP~?_B@D?2N4n>wS#_rl?-eqyaeiTklV_0C5QLc-uw6W^8jO-
+zZr%)ORGbdJR)5h-9ONl_Dqn7=B1G!fL~ap6B&|eSgS{C-*)@wWY7uIw8vVFfam|rR
+zA4p#T)c#rr()b9AAxiDnQVr{c?m_he__bMB2U2;pIDdylsQ1F?2#3stMTC)iVRInu
+z0Y3~Oj_rX6n+uca2;G|sUx>cXsqHA@Ae8f*X*r`Tf`86HnUI@dilQir`lq*VKX{}*
+z{vf<;lRq!W5P1|MDDf{>^_WUR{8EqusZ4j#4tM1i<2Q5pScJn%Jqw|)7s?h|92G`2
+z?H~v*`7ahn8R5=z4WV8^qYxq?U||v=99Zh32MN+}iiMGXYlShj$3$~s6okHBC<l-y
+zAgqmWN`F0sMtC`SCPHw&bRu+bDv%`2<%}}>>Pw#emNQ7HxwVgo*%Y4$iIB%agvG&@
+z2=m)WsU0-Xo7?B9jodkrYF-hDyLT_hPOml4wW-qyF)zY-2?skK&Olfk5_}`aT?lJl
+zOs{^Vc$_k9t2Z~|{##3B_2$++!6UmR>W+s)9DfxdB%rGx*b5Pa(h1RoFvVP0^fz3M
+z&^M4aJ1f`=i<mPmXPPg;=uZ115t=-;-ETG_?>cRR&^8oL^5%9l6mXsk+Y1lCFT1ud
+z(Y?aKcNr;)q9}@@(rM*KOOO|=ceRlwFmoTqkCx~y<7nCH(jlCea6sF~H}yEe=7)l4
+z=6{B4BAp*CDIx^7|GE_>yLBdtnH!0(0P}r!2I-e6=EAsUZai&|ja0u+{2!Z&;j7Ku
+zR%<5_rZjUGe-aw<CB(36nc^};u4riHrYMS{D2l=jTEoB1ZF+j=3fYmL^_z-ei_A4<
+zZl7^reST&joR@Gw@$heR&qFviKf@7bHGgv>j=y6Oj>^yMfi#Vo8+n7Gma50Wus=Tw
+z=E8ht?ob111cWj?x|#cy<xF;jwxM|0x4C;3Aj|U8PmyMBilQirqA1fYDwNlPb>~N=
+ztP~>jY_13X0Hkj~k*DYSj7b!P%@AL|!JlRQXi4_hYoZ`@yvH;HAqUdN;MVh+*?&NU
+zkw2giy%$>V=|gDE&!Z6@fcLa@In(nJjBj~`JP{8`kCuygBBbuK*KjLMQ55AHIdSuf
+z&nPo|34MEh0&ORVa1(^cil%8+#(kgkcPfyVE)L*LjGay1&EE=&dw*o(Ve(zW?KMZs
+zFze3GhP%K-2odYdgAg_cQqZit41eLMCbhFIrumg8B8;`8Py+GgOfi*jIa5P5BtMTc
+zd{Y!fQ4~c{6h%=R>5WRRzX;D4y3c>l7_aAR1U}t;X;MkoSJZ!mvKYG}oLbVL2*GN4
+zjW3(|CB%nN-bCK8`7B>ak#bqfxB_7_Lwbwu8Ky3u%u%3PpVePdy^(Fz3s^f5BE#J%
+zgr;7Y522|#<W<?9!XgA2DCOD~;gID_K!mZDGwuPfHl<&ZPg>5Lfu?6UN{W~3mK6=R
+h_PcEDDI%n9({I`C=(jg?hPeO$002ovPDHLkV1gZIh=BkA
+
+diff --git a/docs/ux/screens/160x128/dmr_dial.png b/docs/ux/screens/160x128/dmr_dial.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..e51b22b76cdf9c91d0d90759fb112620eedc0944
+GIT binary patch
+literal 1073
+zcmeAS@N?(olHy`uVBq!ia0vp^3xK$Rg9%77Gk)~}l0Q6M978H@y`2%6_t-#ywRTF3
+zuI0RktDi7^o|t^*y-yQE-=RD^Gx6LIQ5NTEo?R&$cm61gZtu63k8$5oqaAkXb7z@k
+z{k%PXPv$<Ws;>RLr|rh3+81hNHL6QhzMD0#z9Vb+u6wey`QJ57+0UJ}^B2eUE8Uo8
+zKmS2G^V$a$ak>%zuV_c`oP6|R^Zan(HOYr#t=5L$j#Xy;?yn!b?qC`3D-oHVgxQ}Q
+zn$o)-<g#?%yI0RUFKEN=%9u=EvAeH-YspP6N?(4bC7{}8*Q^J(>P3pYXO!(%`g6Wu
+zjlGpXPr@4|iQU&{E=sKbcdvfk^T|)w=gmr*`L5QmaL>6#ijO>RzxLC=adqaMkkWuq
+zbw0s2+YbGcl3)CpJC5)Ff`oFT4U8#|*X%s^&Nt}!zw5plH~wCco#GwrGk<ozG|TrZ
+z|BITkuRmCju=mM#mkm>O%S1W!)~E9}6~9h8e{93Ha~yV!39%ea(S4q|vvtb*gMEar
+zFW`4Q*eo2ARFEvoz)<$!e!h#*N7EUrciJ75+I2oxZ2N>Zuewh=?C(@h%rTxbT}*oC
+z%!Jv7K^?xy-UX+x9F8h~v|0YV`VHCNc~!Ds@^-lV+7h{;dNRi~-`9eF{u+D_6<0Od
+zwYl{~sNg}%iDqh9kK>+~KGrvKRX6{&xxQ=L{4nRzEvff{eyfNabSgM}=BDzFGKE{G
+zp3mC6KEeFL<OmrZi|t`=r4PCuJh^~p-NC=Jbrvox<6U<tQig?@CA=~!bi=wEH(77b
+z&)K*)xa6~lxaA5LH@DmG*8KREu<>B>q}|6a{?;i^pHeMxXV%+IrR>0D#;U*meT;B?
+zeA9I4kh!~NBzR1FHtF`O{M+xo9joHK>GYxMti_Im+hyC$l@|X`Y08bbov2szGC;#m
+zV(0eP8zscw+*4`lUT?ke!J-pMcW%q|Jn1S)UH3%p;ICq~gJv;ZvGV=D6`Pc&<_PDc
+z?p{AbrKy_b`IP52M_Jvy__+M;-7~9>b=vTD;(`a~?gsaRV&Z;xJG;46ar=aAzSA@;
+z_uakPzUaZhmnKa+)&4JT<~|t1@yu#j0x)Bc4OTp1UG~iT!{dJyargbF`|p##rM^4)
+z^`1YRTlcf<j!oYE(n2=<_0HW1(Y>6k-7^m?yLfUIYq!&#YrU)d4X3~B-S~HN*8`7`
+zmqymC;=2>}{&G>On5l5d-Z^dAYzc+s!gnMOx(nN+<QEFxG!wQd>*Cv{aeddbw@<2?
+z-2E>8cKdK^_L>C`=IQQ@Yc_v9Ka_=i`R>5k9otrh%KZP5ml48pT)gAluRk1ZC(j>j
+dNU+fU&&c{uFLSfy(L*5bdb;|#taD0e0ss{&@<RXs
+
+literal 0
+HcmV?d00001
+
+diff --git a/docs/ux/screens/160x128/talk_target_picker.png b/docs/ux/screens/160x128/talk_target_picker.png
+index f6d34226aeba1da817f72aa2924161ac2d70a1b0..8b1100cd39f39e7e9a11f2795f1eb1d02e42dd85 100644
+GIT binary patch
+delta 1407
+zcmV-_1%UdD3z7?vB!5{+L_t(|+U;F!Zsi~h%u#x^z22%<*$eECUS+GQtLQZbGd6}`
+zGNY(U2_(Q^W6Z}pKK_32+W0zxU-uJAH056~l_N`+5c%5g`(nuDJu(jXY30oc2nLy$
+zMzBnR(^-qJ-#5P{Z#rA>{RGPvS|eB&dfCjas$vm>t(qW>1b^3vlts15JyOLcf|aM8
+z1cUESDZvWCNZFPm80kK(y?e?&xOksJf@RCYzvB2-Rtd%lZkCV)r%}<MAyYH8a3c#D
+zCdoKpzl)f7jv-kBf_ZK0=-@?yd68gV!<@&&j`;TzGO(HO5~#;PUMugF9Ijlq@4w&A
+z3yf)cc{8L@t$%v6sL`OrLB67=^5ynMf|1%c@j8iMB&{UA))XE^uoUYeRkaAUR1F<a
+ztk$Lu)K&B=J+;496`h^nVu->`EmfEVyVdoD{?|rhRnhWk(QZgeur9%?6CBb97YWWQ
+z!A%w2(=5UW#z`f?HL7aF3@6w<O!9^3Be&WZDGR}}e}6R@S&C_P2FipS{1XI05X9Yh
+z`}K#{#@83Y7pKAZ0~sQ(Vgx1r<*6Q1Nr*p6aUoUhF8JZD`eOWME=lm5IvGW<Pl9Fp
+zEozjghM$7qOX-S*RdnZhuMw<QUlhSe2w0eH2o9{1qlYl0SrrQ-|JDj)YOUM!!K)DL
+zlVGWQNPlomcPh2CG{Kh}65OnTV1nJlBqT}G$WnTJ-4J`4k%iO=9Ub`^fhj%-Cc(Ut
+z5L{H_BzSjUG_gMdcQ*KTEg)~+2DSAx$kvBmnmbogf(z<8m(A`<@VJCw1S?DUItebS
+z6Q9;uli=Fgxz}~kc${)mu<mR?7Q5F{S$8(*yMH3`E~Kr62QICJ2tzt=T!ImT<+525
+z!5j3!#TBx%3HGVzrl5loTx<mU8ClJ(X8QJ)NP<nf7TmiFk^P1bA=swm2kmTdG$XKo
+zO)9|$ut%Y0F6lcYz`e)>K@bE%5JU)O9;1XDz3@z5bb`r-!+4C6-foVT*K;$1$0ZDq
+z8-LuzffL+3_KcGaV<#JmB8w0VIzx1i)!v@0RVEvd_zIoAbFvVb-k=X&cd`Lb+vAJY
+z-;;g1uoymjvcc+ACc)tZ+m!r>$%f*jUdU;)NiD3RaU|_5PBst(K@bE%tdGgR*<kv5
+zr&aIB&uYV@FvEDxWP{IDGCx1_2_Ba)pnvfAZ#Il0I5t0%3C=p%fGl&5B{(WS_p0bL
+zlMTpDq*|(;C9(baxxEk0H`%b1ie8^!8NT{t!!1VE-UQo}{IuU}=rN0?<!3a<oNOQn
+zf*=Tj$c~zUYBGK2=b6Oyx&>CQWfI&=a8aO@$r*fX+SDJ&F-kiftaO_MBj;@N%YPhx
+zB8T-DrM)+?#S^THnze(UOfXfn=icpr97J&5V_8V>&Ic>qIZSG<in9LHv&qCO$|8Px
+zCGtf)gdhllAP9mWthTP(upDQOu9lx1<KRRUN`kw}j5sEn&V78voxV2-*}QZBJDQ$5
+z@z9*lIZCc+>3ncVjP7L6&x_XI>3_@5BcwSg!H6e|1eYE6hdQ~m0>M!Y?r{=as~XUM
+zOM(|2BOy}@riB)rMpli;ko<7^fglKiAP9mW2!bF8f*=TjAP9mW2!hClH)3o2C-^+_
+z@cj3T@p?Z8;Md)c29<PvMWF=CLhefN(2}Mk7_7wC_)<hJAwGiTOXLfi-+1zs6e*Xr
+zjQ11V%&smCJqqx0)U`sn^;`WV)tlghB)F4cM3F`jY?9#J2sTxgd@5yeS%N`^lyW_k
+z;1DBgL4q?GS#H%@Gc+#A2N_vspy^wVlH%oB(9WWx;~9<)f&>#O@d-e2;>!2L4)Op1
+N002ovPDHLkV1mncs@MPk
+
+delta 1401
+zcmV-<1%~>P3ycepB!5#$L_t(|+U=cdZsi~hg|n1yZMHY+R%Qe9qg$D(>L|L6!5kYy
+zFgZt2l@dsRkB7q}_xSkx!DHj&2)^A<Dc+QS!BCDUU0mdCzt4*<m-|RR;G>m0CjbnR
+zm<Ct|!Ex67>*vj9$&=0!d_Q1WLTiBaN-vAKwW(MHu(c&fQ-6bNAZ1dm^&ZJ$6JX_P
+zCt&dYDQmC-7)jewfRXOg+PkOhgNx@WYOpMM_){Fu%36bQz|9mAaGE9>G-PU~7H(uA
+zuSwDm*zY1Hp5v7)0bm~64s`G!U>*d_W7yy^wWI$1lyqzcyg2H9klV_0C59{K?fdWd
+z^8kICZr*fhWPht(ENU1OKgd(`P`=pS2pGwI6W2+Ak+2ecttdPSu&mZaR5cH^P>nXA
+zn61q=P;a7N@znlWo9OI-i!KVATBxuZ>~5|v_+JZ+wTYHji*`d&z<Lc{9dJk=Tm+oA
+z1~;4No?;OO7>7#0HB>b)!vVWrlYB1vn_KN2DGOlPzkiyHEX6cC9c4hi{8JP~QPkaf
+z`}K#%#>W@n%b>yc1?eJ>q6fwQ<*M#e35Z`xaUfakPWa)@`lA14ED3l{o{R$QtHHAT
+z7F(34f}aBLC3VHbDsAU^t^wAwFA6Z?0w!h~z=3&k^Z-MORWUL0Z!IyV(z;C_yb54n
+z4VH}$0e{!pP9>L?27Eao;ARd419rbAAwil(meT9%hS<}LEF@1j(2=hYnEVqk0rN-#
+zxY&#n@a|*L)cy+G+2Gr?fZTZ-)z;G>TOWEccdn!a7u0nwo81-gxPW1Rl_h+gfQ!wE
+zuhm%-aBc0}>$+&%Pq`>qcQzo4-D{z&I~(*}5r26X($?Gqm)1hSkj@*g!3bcvY}N#L
+zgFd*pLUuM_UlZM|=wJ;l7J~hZtmalTeS1qJVAHMz_wGVuzu`jw+Zy>nI~yFu2<%^z
+z*5Cu!qfj%K^c@o5USx`*D2k#eDnv6sqlA2V;hAI62__p3<7brga&xpsJvRe9E?_{t
+z!GDK1aKO#ao^i5a>|{f+$|8Wl!4Q4KYVVP(RVEt{{|Zjuce0Q=y+I$m?qmZVwr4C_
+zzfbn*!lL`^$p-7FG69DJwl(r2CL4;AdLdt%O=@8kjU#Diak7D;D2k#eYJE-q%?8uc
+zJFR+0d{%o+3Nwu7Og8w2O6JFBKHzZy1Ah{a|7OEDz_Ia}3^?m#1G3CL7I0L2?roye
+zOg11pk!qoOmc;hQ=k`80-(<s5P4xPJrTglW4YwFsdjqyL^3#5^p~ozm7N60KIoUu_
+z6h%=Km0ekW=uxrxsok=SfV;BH{UIad-Bf8m@Tc$eVWm|7H(h*n4u6*QGfI1JVt-o&
+zuwyUb2*8vFaL7i`K)`uF%d&b6w%*eR*cu-K*0KZHkzg{idbXPRj6URvxXb3?SsMtL
+z$~m^h{*0n1YPB{QF+Lr}`8c!x_V}cEK_cKs07mSr=HNcQ;!fY2glt|qfE`WGop@-@
+z=M+amkXI?wdP?NZh+*FopU1uRCVv8qjARjTbs|9-%Ul6)RDpY34X$MkIDSjOi@qZ%
+zj<}Ik4COPjY9K@6!|4Z#q9}@@D2k#eilQirq9}@@D2k#eDx2P@t@R)9`N_lc-_ytI
+z`5b{ycV8Nm()k&M0+xx~74XoMrUVRT;;VmIMJ_Hr!15;YhRtXBQi`O@nsUbb0XL(o
+z*M^=3@bal^1-bQE{VCOp;Dc&#Ct#!@jRI_{!Mg!AWtO}u>*BJ2K|)Hp9tt?b$XXC^
+zCL_z;wAKubOYlKP*6C<^mLsKjx)!vvIMDHofewm*sg(Kz!PgJ0uktj300000NkvXX
+Hu0mjf;F+-c
+
+diff --git a/docs/ux/screens/240x320/dmr_dial.png b/docs/ux/screens/240x320/dmr_dial.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..bd9053bedaca5288f7117cc4d39c9af13150f3b2
+GIT binary patch
+literal 2452
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/docs/ux/screens/240x320/talk_target_picker.png b/docs/ux/screens/240x320/talk_target_picker.png
+index 29caa085689b4e2016f554201802a61e285a8e99..4699d8c5deda600a82e5aec8c69ba3f81106837b 100644
+GIT binary patch
+literal 3870
+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
+C6->MU
+
+literal 3865
+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
+
+diff --git a/docs/ux/screens/240x320i10x5/dmr_dial.png b/docs/ux/screens/240x320i10x5/dmr_dial.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..6bf410770923cc49345ae682fe3133433098c8fc
+GIT binary patch
+literal 2594
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/docs/ux/screens/240x320i10x5/talk_target_picker.png b/docs/ux/screens/240x320i10x5/talk_target_picker.png
+index a0e19a685fbab284d81d698f71a22c3282e3b063..8a8aaba7f3dd9884fab94516110a4bd91cae6f52 100644
+GIT binary patch
+delta 3968
+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
+
+delta 3934
+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
+Xzfg2>^2Wu#rEG0(2PXXP{rLX?*Y)9}
+
+diff --git a/tests/host/uiFlowTest.c b/tests/host/uiFlowTest.c
+index 7cfe314..dfebdaf 100644
+--- a/tests/host/uiFlowTest.c
++++ b/tests/host/uiFlowTest.c
+@@ -1371,7 +1371,24 @@ static const flow_t flows_k[] = {
+ 	{ "K call back skips what we sent", CALLER "ptt wait:3000", "cbkey", "talk=91 toast=Talking_to", 1, false },
+ 	{ "K call back: only our own call so far", "ptt wait:3000", "cbkey", "toast=No_calls", 1, false },
+ 	{ "H hold # opens the talk target picker", "", "long:ctx", "screen=picker", 1, false },
+-	{ "H hold # then a typed TG", "", "long:ctx up ok 3 1 0 0 ptt", "txid=3100 txpriv=0", 8, false },
++	{ "H DMR dial bypasses Find's channel matches", "", "long:ctx 2",
++	  "screen=dmr-dial query=2 shows=Talk_to_TG_2 shows=Private_call_2 hides=Ch_2", 2, false },
++	{ "H DMR dial: one-shot unsaved group", "", "long:ctx 2 ptt", "txid=2 txpriv=0 writes=0", 3, false },
++	{ "H DMR dial: named group", "", "long:ctx 9 1", "screen=dmr-dial shows=World", 3, false },
++	{ "H DMR dial: named private contact", "", "long:ctx 9 9 9 1 2 3 4 down",
++	  "screen=dmr-dial focus=Private_call_9991234 shows=Q1ABC", 9, false },
++	{ "H DMR dial: one-shot private reflector ID", "", "long:ctx 4 0 0 1 down ptt",
++	  "txid=4001 txpriv=1 writes=0", 7, false },
++	{ "H DMR dial: long OK is temporary", "", "long:ctx 9 1 long:ok",
++	  "screen=home talk=91 writes=0", 4, false },
++	{ "H DMR dial: Back restores the channel default", "long:ctx 9 ok", "back",
++	  "screen=home talk=3100 temporary=0 writes=0", 1, false },
++	{ "H DMR dial: invalid number and correction", "", "long:ctx 1 6 7 7 7 2 1 5 expect:hides=Talk_to_TG back",
++	  "screen=dmr-dial query=1677721 shows=Talk_to_TG", 10, false },
++	{ "H DMR dial: picker row opens dial without digits", "", "tt up up ok",
++	  "screen=dmr-dial count=0 shows=Enter_1", 4, false },
++	{ "H DMR dial: returning to Find keeps its query", "", "2 long:ctx 9 back back",
++	  "screen=find query=2", 5, false },
+ 	{ "H hold # on FM: DMR only", "down", "long:ctx", "screen=home toast=Talk_target:_DMR", 1, false },
+ 	{ "H FM monitor held: the pill says RX, MON stays", "down", "mondown", "shows=RX shows=MON", 1, false },
+ 	{ "H FM monitor released: IDLE again", "down mondown", "monup", "shows=IDLE hides=MON", 0, false },
+diff --git a/tests/host/uiSim.c b/tests/host/uiSim.c
+index b702b07..a5203c8 100644
+--- a/tests/host/uiSim.c
++++ b/tests/host/uiSim.c
+@@ -80,6 +80,7 @@ static const struct { const char *name, *script; } gallery[] = {
+ 	{ "quick_vfo_cc_editor", "ok 4 up ok quick 4 3 7" },
+ 	{ "find_name", "5 6 3" },
+ 	{ "find_number", "3 1 0 0" },
++	{ "dmr_dial", "long:ctx 4 0 0 1 down" },
+ 	{ "find_channel", "1 2" },
+ 	{ "find_frequency", "4 6 1 4 6 2" },	// Tune VFO to 461.462
+ 	{ "find_new_contact", "9 9 9 9 8 7 6 down down" },	// Create contact 9999876

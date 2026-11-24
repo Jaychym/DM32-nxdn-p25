@@ -1,0 +1,110 @@
+diff --git a/docs/user/04-programming.md b/docs/user/04-programming.md
+index 6e797ec..ec85205 100644
+--- a/docs/user/04-programming.md
++++ b/docs/user/04-programming.md
+@@ -86,7 +86,7 @@ TFTP ([USB network](15-usb-network.md#programming-over-the-network)).
+ In a table, double-click a cell or type on it to edit it in place. Click a column heading to sort, and type in the
+ filter to narrow the rows. Check rows and choose **Bulk Edit** to set one field on all of them (not on Zones or RX Lists, whose members are
+ edited in their own dialog). **Undo** and **Redo**
+-cover every change, including an import.
++cover every change, including an import. Select channels of the same supported DMR, P25 conventional or NXDN mode to assign an AES-256 key from the codeplug’s Keys tab. The selector only shows key IDs loaded for that mode. Choose None to remove AES.
+ 
+ **ARS server** is the DMR ID of the presence server the radio registers with
+ ([ARS](10-messages-and-signaling.md#registration-ars-and-location-lrrp)). **IP gateway** is the DMR ID of the radio
+diff --git a/site/static/js/editor/app.js b/site/static/js/editor/app.js
+index 81c2015..3543b01 100644
+--- a/site/static/js/editor/app.js
++++ b/site/static/js/editor/app.js
+@@ -322,7 +322,7 @@ function renumber(tab) {
+ 
+ function bulkSet(tab, g) {
+ 	const rows = g.selection();
+-	const cols = bulkColumns(tab, S.model, t, { features: features() });
++	const cols = bulkColumns(tab, S.model, t, { features: features(), rows });
+ 	if (!cols.length) return;
+ 	const pickCol = h("select", { id: "bulk-field" }, ...cols.map((c, i) => h("option", { value: String(i) }, c.label)));
+ 	const slot = h("div", { class: "form-row" });
+diff --git a/site/static/js/editor/views.js b/site/static/js/editor/views.js
+index 0986c3b..0616464 100644
+--- a/site/static/js/editor/views.js
++++ b/site/static/js/editor/views.js
+@@ -166,7 +166,29 @@ const refLabel = (v, t) => (v == null ? "" : typeof v === "number" ? t("editor.m
+ 
+ // The columns Bulk Edit can set: every editable one but the name and number, which must differ per record. None on a
+ // table whose members are edited in its own dialog (zones, RX lists): Bulk Edit isn't offered there
+-export const bulkColumns = (table, m, t, opts) => columns(table, m, t, opts).filter((c) => c.readOnly !== true && c.key !== "name" && c.key !== "number");
++export function bulkColumns(table, m, t, { rows = [], ...opts } = {}) {
++	const out = columns(table, m, t, opts).filter((c) => c.readOnly !== true && c.key !== "name" && c.key !== "number");
++	if (table !== "channels" || rows.length === 0) return out;
++	const first = rows[0];
++	const token = first.kind ? kindRow(first.kind)?.token.toLowerCase() : first.mode;
++	const alg = ["dmr", "p25", "nxdn"].includes(token) ? KEY_ALGS.find((a) => a.token === token) : undefined;
++	if (!alg || !rows.every((r) => first.kind ? r.kind === first.kind : !r.kind && r.mode === "dmr")) return out;
++	const dmr = !first.kind;
++	out.push({
++		key: "bulkAes", label: t(`editor.keys.alg.${alg.token}`), type: "select",
++		options: () => aesOptions(m, t, alg, null, "editor.none"),
++		set: (r, id) => {
++			if (!dmr) {
++				r.params = { ...r.params, aes: id != null, keyId: id ?? 0 };
++			} else if (id != null || r.dmrPrivacy === DMR_PRIV.aes || r.dmrAesKid) {
++				r.dmrPrivacy = id != null ? DMR_PRIV.aes : DMR_PRIV.off;
++				r.dmrPrivacyKey = id ?? 0;
++				delete r.dmrAesKid;
++			}
++		},
++	});
++	return out;
++}
+ 
+ export function columns(table, m, t, { features = null } = {}) {
+ 	const col = (key, label, type, parse, extra = {}) => ({
+diff --git a/site/tests/editor.test.mjs b/site/tests/editor.test.mjs
+index d41d326..d7829c0 100644
+--- a/site/tests/editor.test.mjs
++++ b/site/tests/editor.test.mjs
+@@ -8,6 +8,8 @@ import assert from "node:assert/strict";
+ 
+ import { bulkColumns, channelForm, columns, parseAreaKey } from "../static/js/editor/views.js";
+ import { empty, newChannel } from "../static/js/codeplug/model.js";
++import { DMR_PRIV } from "../static/js/codeplug/records.js";
++import { KEY_ALGS } from "../static/js/codeplug/channelmodes.js";
+ import { KEYS } from "../static/js/codeplug/kv.js";
+ import { Grid } from "../static/js/editor/grid.js";
+ 
+@@ -88,6 +90,35 @@ test("Bulk Edit RX Only applies Yes and No to every selected channel without a f
+ 	}
+ });
+ 
++test("Bulk Edit AES selects installed keys of one scheme and clears only AES", () => {
++	const m = empty();
++	const byAlg = (token) => KEY_ALGS.find((x) => x.token === token);
++	m.keyring = ["dmr", "p25", "nxdn"].map((name, n) => ({ alg: byAlg(name).alg, id: n + 1, key: "ce".repeat(32) }));
++	const modes = [[0, "dmr"], [2, "p25"], [4, "nxdn"]];
++	for (const [n, [kind, mode]] of modes.entries()) {
++		const rows = [newChannel({ name: "One", mode: "dmr" }), newChannel({ name: "Two", mode: "dmr" })];
++		rows.forEach((r) => { r.kind = kind; });
++		const f = bulkColumns("channels", m, t, { rows }).find((c) => c.key === "bulkAes");
++		assert.equal(f.label, `editor.keys.alg.${mode}`);
++		assert.deepEqual(f.options().map(([k]) => k), [null, n + 1]);
++		for (const r of rows) assert.equal(f.set(r, n + 1), undefined);
++		for (const r of rows) {
++			assert.equal(kind ? r.params.aes : r.dmrPrivacy === DMR_PRIV.aes, true);
++			assert.equal(kind ? r.params.keyId : r.dmrPrivacyKey, n + 1);
++			f.set(r, null);
++			assert.equal(kind ? r.params.aes : r.dmrPrivacy === DMR_PRIV.aes, false);
++		}
++		if (!kind) {
++			rows[0].dmrPrivacy = DMR_PRIV.basic;
++			rows[0].dmrPrivacyKey = 23;
++			f.set(rows[0], null);
++			assert.equal(rows[0].dmrPrivacyKey, 23);
++		}
++		rows.push(newChannel({ name: "FM" }));
++		assert.equal(bulkColumns("channels", m, t, { rows }).some((c) => c.key === "bulkAes"), false);
++	}
++});
++
+ test("Bulk Edit sets no names or numbers, and has nothing to set on zones and RX lists", () => {
+ 	const keys = (table) => bulkColumns(table, empty(), t).map((c) => c.key);
+ 	assert.deepEqual([keys("zones"), keys("rxLists")], [[], []]);

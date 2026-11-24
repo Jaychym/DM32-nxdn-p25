@@ -1,0 +1,274 @@
+diff --git a/core/ui/lang/es.po b/core/ui/lang/es.po
+index 892318d..0c170bb 100644
+--- a/core/ui/lang/es.po
++++ b/core/ui/lang/es.po
+@@ -2272,6 +2272,11 @@ msgctxt "CHAN_LABEL_TALKAROUND"
+ msgid "Talkaround"
+ msgstr "Directo"
+ 
++#: core/ui/ui_menus.c
++msgctxt "CHAN_LABEL_P25_TARGET"
++msgid "Talkgroup / unit"
++msgstr "Grupo / unidad"
++
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_LABEL_DATA_TYPE"
+ msgid "Data type"
+@@ -2718,15 +2723,20 @@ msgid "OK choose  Back cancel"
+ msgstr "OK elegir  Atrás cancelar"
+ 
+ #: core/ui/ui_menus.c
+-msgctxt "CHAN_TITLE_TX_CONTACT"
+-msgid "TX Contact"
+-msgstr "Contacto TX"
++msgctxt "CHAN_TOAST_P25_TG_RANGE"
++msgid "P25 talkgroups: 1-65535"
++msgstr "Grupos P25: 1-65535"
+ 
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_TITLE_RX_GROUP_LIST"
+ msgid "RX Group List"
+ msgstr "Lista grupos RX"
+ 
++#: core/ui/ui_menus.c
++msgctxt "CHAN_TITLE_TX_CONTACT"
++msgid "TX Contact"
++msgstr "Contacto TX"
++
+ #: core/ui/ui_menus.c
+ msgctxt "HINT_OK_PICK_FIND_BACK"
+ msgid "OK pick  0-9 find  Back"
+diff --git a/core/ui/lang/fr.po b/core/ui/lang/fr.po
+index eec664b..5dd7d84 100644
+--- a/core/ui/lang/fr.po
++++ b/core/ui/lang/fr.po
+@@ -2272,6 +2272,11 @@ msgctxt "CHAN_LABEL_TALKAROUND"
+ msgid "Talkaround"
+ msgstr "Direct"
+ 
++#: core/ui/ui_menus.c
++msgctxt "CHAN_LABEL_P25_TARGET"
++msgid "Talkgroup / unit"
++msgstr "Groupe / unité"
++
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_LABEL_DATA_TYPE"
+ msgid "Data type"
+@@ -2718,15 +2723,20 @@ msgid "OK choose  Back cancel"
+ msgstr "OK choix  Ret annule"
+ 
+ #: core/ui/ui_menus.c
+-msgctxt "CHAN_TITLE_TX_CONTACT"
+-msgid "TX Contact"
+-msgstr "Contact TX"
++msgctxt "CHAN_TOAST_P25_TG_RANGE"
++msgid "P25 talkgroups: 1-65535"
++msgstr "Groupes P25 : 1-65535"
+ 
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_TITLE_RX_GROUP_LIST"
+ msgid "RX Group List"
+ msgstr "Groupes RX"
+ 
++#: core/ui/ui_menus.c
++msgctxt "CHAN_TITLE_TX_CONTACT"
++msgid "TX Contact"
++msgstr "Contact TX"
++
+ #: core/ui/ui_menus.c
+ msgctxt "HINT_OK_PICK_FIND_BACK"
+ msgid "OK pick  0-9 find  Back"
+diff --git a/core/ui/lang/it.po b/core/ui/lang/it.po
+index adbbc80..384146d 100644
+--- a/core/ui/lang/it.po
++++ b/core/ui/lang/it.po
+@@ -2272,6 +2272,11 @@ msgctxt "CHAN_LABEL_TALKAROUND"
+ msgid "Talkaround"
+ msgstr "Diretto"
+ 
++#: core/ui/ui_menus.c
++msgctxt "CHAN_LABEL_P25_TARGET"
++msgid "Talkgroup / unit"
++msgstr "Gruppo / unità"
++
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_LABEL_DATA_TYPE"
+ msgid "Data type"
+@@ -2718,15 +2723,20 @@ msgid "OK choose  Back cancel"
+ msgstr "OK scegli  Indietro annulla"
+ 
+ #: core/ui/ui_menus.c
+-msgctxt "CHAN_TITLE_TX_CONTACT"
+-msgid "TX Contact"
+-msgstr "Contatto TX"
++msgctxt "CHAN_TOAST_P25_TG_RANGE"
++msgid "P25 talkgroups: 1-65535"
++msgstr "Gruppi P25: 1-65535"
+ 
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_TITLE_RX_GROUP_LIST"
+ msgid "RX Group List"
+ msgstr "Lista gruppi RX"
+ 
++#: core/ui/ui_menus.c
++msgctxt "CHAN_TITLE_TX_CONTACT"
++msgid "TX Contact"
++msgstr "Contatto TX"
++
+ #: core/ui/ui_menus.c
+ msgctxt "HINT_OK_PICK_FIND_BACK"
+ msgid "OK pick  0-9 find  Back"
+diff --git a/core/ui/lang/zh.po b/core/ui/lang/zh.po
+index 31878bf..ce5a571 100644
+--- a/core/ui/lang/zh.po
++++ b/core/ui/lang/zh.po
+@@ -2274,6 +2274,11 @@ msgctxt "CHAN_LABEL_TALKAROUND"
+ msgid "Talkaround"
+ msgstr "直通"
+ 
++#: core/ui/ui_menus.c
++msgctxt "CHAN_LABEL_P25_TARGET"
++msgid "Talkgroup / unit"
++msgstr "通话组 / 单元"
++
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_LABEL_DATA_TYPE"
+ msgid "Data type"
+@@ -2720,15 +2725,20 @@ msgid "OK choose  Back cancel"
+ msgstr "OK 选  返回取消"
+ 
+ #: core/ui/ui_menus.c
+-msgctxt "CHAN_TITLE_TX_CONTACT"
+-msgid "TX Contact"
+-msgstr "发射联系人"
++msgctxt "CHAN_TOAST_P25_TG_RANGE"
++msgid "P25 talkgroups: 1-65535"
++msgstr "P25 通话组：1-65535"
+ 
+ #: core/ui/ui_menus.c
+ msgctxt "CHAN_TITLE_RX_GROUP_LIST"
+ msgid "RX Group List"
+ msgstr "接收组列表"
+ 
++#: core/ui/ui_menus.c
++msgctxt "CHAN_TITLE_TX_CONTACT"
++msgid "TX Contact"
++msgstr "发射联系人"
++
+ #: core/ui/ui_menus.c
+ msgctxt "HINT_OK_PICK_FIND_BACK"
+ msgid "OK pick  0-9 find  Back"
+diff --git a/core/ui/ui_menus.c b/core/ui/ui_menus.c
+index b605213..f12dfef 100644
+--- a/core/ui/ui_menus.c
++++ b/core/ui/ui_menus.c
+@@ -3315,6 +3315,7 @@ static void chinfo_item(uint16_t i, ui_item_t *it)
+ 		it->flags |= UI_ITEM_TEMP;
+ #endif
+ 	str_copy(it->label, sizeof it->label, r == CE_DMO && ced_is_p25(ch) ? TR(CHAN_LABEL_TALKAROUND, "Talkaround") :
++		r == CE_CONTACT && ced_is_p25(ch) ? TR(CHAN_LABEL_P25_TARGET, "Talkgroup / unit") :
+ 		r == CE_CODE && ced_is_nxdn(ch) ? "RAN" : r == CE_CODE && ced_is_ysf(ch) ? "DG-ID" :
+ 		r == CE_CODE && ced_is_m17(ch) ? "CAN" :
+ 		r == CE_RATE && ced_is_ysf(ch) ? TR(CHAN_LABEL_DATA_TYPE, "Data type") : tr(labels[r]));
+@@ -3518,6 +3519,27 @@ static void chinfo_item(uint16_t i, ui_item_t *it)
+ #if CONFIG_DMR
+ 	case CE_CONTACT: {
+ 		static contact_t c;
++#if CONFIG_P25
++		if (ced_is_p25(ch)) {
++			uint16_t contact = codeplug_channel_talk_contact(ch);
++			bool have = contact != 0 && codeplug_contact(contact, &c);
++			bool unit = have && c.type == CONTACT_PRIVATE;
++			uint32_t dst = P25_CP_TG_DEFAULT;
++			if (have) {
++				if (c.type == CONTACT_ALL_CALL)
++					dst = P25_CP_TG_ALL;
++				else if (unit || (c.id != 0 && c.id <= UINT16_MAX))
++					dst = c.id;
++			}
++			sb_str(&b, unit ? "ID " : "TG ");
++			sb_u32(&b, dst, 1);
++			if (have && (unit || dst == c.id || c.type == CONTACT_ALL_CALL)) {
++				sb_chr(&b, ' ');
++				sb_str(&b, c.name);
++			}
++			break;
++		}
++#endif
+ 		if (ch->contact != 0 && codeplug_contact(ch->contact, &c))
+ 			sb_str(&b, c.name);
+ 		else
+@@ -5034,15 +5056,28 @@ static void chpick_select(uint16_t i, bool hold)
+ {
+ 	(void)hold;
+ 	uint16_t raw = ui_filter_raw(i);
+-	if (ui_frame()->arg == 0)
++	if (ui_frame()->arg == 0) {
++#if CONFIG_P25
++		if (raw != 0 && ced_is_p25(&ced_ch) && codeplug_contact(raw, &chpick_c) &&
++		    chpick_c.type == CONTACT_GROUP && (chpick_c.id == 0 || chpick_c.id > UINT16_MAX)) {
++			ui_toast(TR(CHAN_TOAST_P25_TG_RANGE, "P25 talkgroups: 1-65535"));
++			return;
++		}
++#endif
+ 		ced_ch.contact = raw;
+-	else
++	} else {
+ 		ced_ch.listen_list = raw;
++	}
+ 	ui_pop();
+ }
+ 
+-static const char *chpick_title(void) { return ui_frame()->arg == 0 ? TR(CHAN_TITLE_TX_CONTACT, "TX Contact") :
+-	TR(CHAN_TITLE_RX_GROUP_LIST, "RX Group List"); }
++static const char *chpick_title(void)
++{
++	if (ui_frame()->arg != 0)
++		return TR(CHAN_TITLE_RX_GROUP_LIST, "RX Group List");
++	return ced_is_p25(&ced_ch) ? TR(CHAN_LABEL_P25_TARGET, "Talkgroup / unit") :
++		TR(CHAN_TITLE_TX_CONTACT, "TX Contact");
++}
+ 
+ static const ui_scr_def_t chpick_screen = {
+ 	.name = "chpick", .flags = SF_LIST | SF_FILTER, .hint = TRN(HINT_OK_PICK_FIND_BACK, "OK pick  0-9 find  Back"),
+diff --git a/docs/spec/p25-codeplug.md b/docs/spec/p25-codeplug.md
+index 985877b..9a2824d 100644
+--- a/docs/spec/p25-codeplug.md
++++ b/docs/spec/p25-codeplug.md
+@@ -82,7 +82,12 @@ A P25 channel the radio saves (a VFO in P25 stored as a channel, a mode changed
+ system, transmit allowed from the channel and a full parameter block: the RX and TX NAC, and the squelch selective
+ where the settings name a talk group to hear, else normal. Its contact is the stored contact of the talk target, if
+ any (else none: talk group 1). Talkaround on sets the direct-mode bit; automatic and off leave it clear (automatic, 2.2).
+-A session unit ID is not stored. Editing a channel that is P25 already rewrites its record and lets the tag follow,
++A session unit ID is not stored. On the radio, open Channels, choose the conventional channel, choose
++**Talkgroup / unit**, and pick a stored contact. The row shows the numeric destination: TG for a group, ID for a unit.
++Hold OK to save. In the VFO or on a conventional channel, Quick menu key 8 **TG** lets you type a group from 1 to
++65535. The VFO setting is for the current session. On a memory channel it is temporary until you hold **OK** on Home to save,
++which requires the talkgroup to be a stored contact.
++Editing a channel that is P25 already rewrites its record and lets the tag follow,
+ the block kept byte for byte; a copy at another number takes the source's tag ([channel-modes.md](channel-modes.md)
+ 2.4). When the channel editor changed the NAC ([ui.md](ui.md) 2.1), the record is written as the safe stand-in and
+ the tag follows it, then the edited NACs and the squelch as read are written over the front of its block
+diff --git a/tests/host/uiFlowTest.c b/tests/host/uiFlowTest.c
+index 7cfe314..1a4ce16 100644
+--- a/tests/host/uiFlowTest.c
++++ b/tests/host/uiFlowTest.c
+@@ -87,6 +87,8 @@ static const flow_t flows[] = {
+ #if CONFIG_P25
+ 	{ "P25 Quick: hexadecimal NAC", "dlmode:p25", "quick 2 1 9 up 5 ok", "screen=quick shows=NAC aircode=1A5 temporary=1", 7, false },
+ 	{ "P25 Quick: TG", "dlmode:p25", "quick 8 3 1 0 0 ok", "screen=quick shows=TG airtalk=3100 temporary=1", 7, false },
++	{ "P25 VFO Quick: TG", "p25 vfokey dlmode:p25", "quick 8 3 1 0 0 ok",
++	  "screen=quick shows=TG airtalk=3100 vfo=1 temporary=0", 7, false },
+ 	{ "P25 Quick: repeater NAC refused", "dlmode:p25",
+ 	  "quick 2 7 up up up up up up up up 7 7 up up up up up up up up ok",
+ 	  "screen=quick toast=F7F_is_for_repeaters shows=F7F_", 22, false },
+@@ -139,6 +141,9 @@ static const flow_t flows[] = {
+ 	{ "P25 channel's mode: back to P25", "p25 nxdn dlmode:p25 ok 5 up up up ok down down", "ok ok ok ok ok",
+ 	  "focus=Mode shows=P25 shows=NAC shows=293", 5, false },
+ 	// A stored P25 channel: stepping all the way round (NXDN twice, FM, DMR) is back to it, nothing to save
++	{ "P25 edit: pick and save talkgroup", "chkind:3,p25 ok 5 ok down down down down down down down down",
++	  "expect:focus=Talkgroup_/_unit expect:shows=TG_3100 ok expect:screen=chpick down ok long:ok",
++	  "screen=channel shows=TG_91 writes=1", 4, true },
+ 	{ "stored P25 channel: Mode steps back to P25", "p25 nxdn chkind:3,p25 ok 5 ok down down", "ok ok ok ok ok long:ok",
+ 	  "focus=Mode shows=P25 shows=NAC toast=No_changes_to_save", 6, false },
+ 	{ "stored P25 channel made DMR: a change", "chkind:3,p25 ok 5 ok down down ok ok", "back",

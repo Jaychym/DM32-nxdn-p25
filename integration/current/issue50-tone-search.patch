@@ -1,0 +1,1168 @@
+diff --git a/boards/dm32/config.mk b/boards/dm32/config.mk
+index 8838b0f..9b3c9a8 100644
+--- a/boards/dm32/config.mk
++++ b/boards/dm32/config.mk
+@@ -18,6 +18,8 @@ CONFIG_DISPLAY_INSET_LEFT ?= 10
+ CONFIG_DISPLAY_INSET_RIGHT ?= 10
+ CONFIG_DISPLAY_INSET_TOP ?= 5
+ CONFIG_DISPLAY_INSET_BOTTOM ?= 5
++# The FD6818 has a configurable receive tone detector.
++CONFIG_TONE_SCAN ?= $(CONFIG_SUBTONE)
+ # VOX reads the microphone level through hal_power_t.mic_level, which this board doesn't have yet
+ CONFIG_VOX ?= n
+ # Extended reception is an explicit owner choice in Tools > RX past bands, never the default on a first start or reset
+diff --git a/boards/dm32/radio_dm32.c b/boards/dm32/radio_dm32.c
+index c672930..4978346 100644
+--- a/boards/dm32/radio_dm32.c
++++ b/boards/dm32/radio_dm32.c
+@@ -836,7 +836,23 @@ bool dm32_chip_reg(uint8_t chip, uint8_t page, uint8_t reg, uint32_t *val, bool
+ 	return true;
+ }
+ 
++#if CONFIG_TONE_SCAN
++static bool rx_tone_test(const subtone_t *tone)
++{
++	if (mode != RADIO_MODE_FM || !have_rx || asleep || transmitting)
++		return false;
++	fd6818_write(&fd, FD6818_REG_SUBAUDIO, 0);	// clear the old detector before changing its candidate
++	fd6818_set_rx_tone(&fd, fd_tone(tone->type), tone->value);
++	css_words(tone->type == TONE_CTCSS);
++	rx_tone = *tone;
++	return true;
++}
++#endif
++
+ const hal_radio_t dm32_radio = {
++#if CONFIG_TONE_SCAN
++	.rx_tone_test = rx_tone_test,
++#endif
+ 	.init = init,
+ 	.set_mode = set_mode,
+ 	.rx = rx,
+diff --git a/config/features.mk b/config/features.mk
+index 95ff060..15aeb11 100644
+--- a/config/features.mk
++++ b/config/features.mk
+@@ -18,6 +18,8 @@
+ CONFIG_FM ?= y
+ # CTCSS / DCS encode and decode (needs FM)
+ CONFIG_SUBTONE ?= $(CONFIG_FM)
++# Receive-only CTCSS and DCS candidate search, on boards with a configurable RX tone detector.
++CONFIG_TONE_SCAN ?= n
+ # DMR Tier II voice: modem driver, call stack, AMBE FEC, vocoder hosting
+ CONFIG_DMR ?= y
+ # basic privacy (Motorola / Anytone BP) on the voice path (needs DMR)
+@@ -347,7 +349,7 @@ CONFIG_GPS_SKY ?= $(CONFIG_GPS)
+ CONFIG_GPS_UTM ?= $(CONFIG_GPS_SKY)
+ 
+ 
+-FEATURES := USB_SERIAL_REQUEST FM SUBTONE DMR DMR_PRIVACY DMR_TALKER_ALIAS DMR_GPS DMR_SMS DMR_TMS DMR_ARS DMR_LRRP DMR_SIGNALING DMR_EMERGENCY DMR_ROAMING DMR_TRUNK DMR_TRUNK_TX DMR_TRUNK_SUPL DMR_TRUNK_GW VOICE_CAPTURE DMR_IP_GATEWAY ZONE_SHARE DMR_UDP_COMPRESS NET_TCP NET_KISS NET_HTTP NET_HTTP_GZIP NET_WEBCTL NET_RIGCTL NET_APRSIS NET_USRP MDNS TFTP TFTP_IDDB IDDB_COMPACT DMR_CONTROL_STATION SNMP SFR SFR_DUALPATH_RX SFR_CWID TASK_STACKS \
++FEATURES := USB_SERIAL_REQUEST FM SUBTONE TONE_SCAN DMR DMR_PRIVACY DMR_TALKER_ALIAS DMR_GPS DMR_SMS DMR_TMS DMR_ARS DMR_LRRP DMR_SIGNALING DMR_EMERGENCY DMR_ROAMING DMR_TRUNK DMR_TRUNK_TX DMR_TRUNK_SUPL DMR_TRUNK_GW VOICE_CAPTURE DMR_IP_GATEWAY ZONE_SHARE DMR_UDP_COMPRESS NET_TCP NET_KISS NET_HTTP NET_HTTP_GZIP NET_WEBCTL NET_RIGCTL NET_APRSIS NET_USRP MDNS TFTP TFTP_IDDB IDDB_COMPACT DMR_CONTROL_STATION SNMP SFR SFR_DUALPATH_RX SFR_CWID TASK_STACKS \
+ 	USB HOSTLINK USB_NETWORK NET_PPP HOTSPOT HOTSPOT_SPLIT DEBUGLINK CPS_OPENFW CPS_FAST VFO VFO_FM VFO_DMR DIAG BACKLIGHT_TEST FONT_XL FONT_AA FONT_BIG LANG_ES LANG_IT LANG_FR LANG_ZH LANG_DEFAULT_ES LANG_DEFAULT_IT LANG_DEFAULT_FR LANG_DEFAULT_ZH UI_COLOR UI_SETTINGS SCAN DUAL_WATCH BEEP FM_TX_TONES DTMF \
+ 	RX_EXT RX_EXT_ON AIR_AES VOX REF_TRIM BATTERY_SAVE VIBRATE GPS AUDIO_PROBE STUB_ENTRY NAND_STORAGE CRASH_LOG CRASH_SCREEN CRASH_REPORT WATCHDOG FAULT_TRACE AM_RX BCAST_FM SPLASH_IMAGE APRS APRS_AFSK APRS_DMR APRS_RX APRS_IGATE GPS_SKY GPS_UTM KEY_ASSIGN CHANNEL_LIST CHANNEL_EDIT ZONE_EDIT CONTACT_EDIT VOLUME_BAR P25 P25_TRUNK NXDN YSF M17 AIR_RAW UI_KAWAII MDC1200
+ 
+diff --git a/core/config.h b/core/config.h
+index 9bba63b..8c1064b 100644
+--- a/core/config.h
++++ b/core/config.h
+@@ -12,6 +12,9 @@
+ #ifndef CONFIG_SUBTONE
+ #define CONFIG_SUBTONE			1
+ #endif
++#ifndef CONFIG_TONE_SCAN
++#define CONFIG_TONE_SCAN		CONFIG_SUBTONE
++#endif
+ #ifndef CONFIG_DMR
+ #define CONFIG_DMR			1
+ #endif
+@@ -431,6 +434,9 @@
+ #define CONFIG_DISPLAY_INSET_RIGHT	0
+ #endif
+ 
++#if CONFIG_TONE_SCAN && !CONFIG_SUBTONE
++#error "CONFIG_TONE_SCAN needs CONFIG_SUBTONE"
++#endif
+ #if CONFIG_SUBTONE && !CONFIG_FM
+ #error "CONFIG_SUBTONE needs CONFIG_FM"
+ #endif
+diff --git a/core/debuglink/debuglink_view.c b/core/debuglink/debuglink_view.c
+index ee2722e..51807b8 100644
+--- a/core/debuglink/debuglink_view.c
++++ b/core/debuglink/debuglink_view.c
+@@ -181,6 +181,13 @@ static void channel_section(const radio_view_t *v, dl_text_t *t)
+ 	dl_text(t, "ch.contact=%u\nch.listen_list=%u\n", c->contact, c->listen_list);
+ 	dl_text(t, "ch.dmr_id=%u\nch.dmo=%u\n", (unsigned)c->dmr_id, c->dmo);
+ 	dl_text(t, "ch.tone_burst=%u\n", c->tone_burst);
++#if CONFIG_TONE_SCAN
++	if (board.radio != NULL && board.radio->rx_tone_test != NULL) {
++		static const char *const phases[] = { "idle", "wait", "check", "found", "no_match" };
++		dl_text(t, "tone_search=%s\n", phases[v->tone_scan_phase]);
++		tone(t, "tone_search_tone", &v->tone_scan_tone);
++	}
++#endif
+ 	// The SFR bytes A and B as stored (sfr.h; 0,0 = none); dmr.sfr_role is the role in force
+ 	dl_text(t, "ch.sfr=%u,%u\n", c->sfr_flag1 ? c->sfr_a : 0u, c->sfr_flag1 ? c->sfr_b : 0u);
+ }
+diff --git a/core/radio/radio.h b/core/radio/radio.h
+index f0c7779..d0337f8 100644
+--- a/core/radio/radio.h
++++ b/core/radio/radio.h
+@@ -435,6 +435,10 @@ typedef struct {
+ 				// mode instead); 0 none. Set at power-up only
+ 	codeplug_source_t source;
+ 	bool hotspot;		// the radio is an MMDVM hotspot: the host link drives the modem, channel keys are off
++#if CONFIG_TONE_SCAN
++	subtone_t tone_scan_tone;
++	uint8_t tone_scan_phase;
++#endif
+ 	// Scan (CONFIG_SCAN; all 0 otherwise)
+ 	uint8_t scan;		// scan_kind_t: 0 off, 1 zone, 2 VFO, 3 dual watch
+ 	uint8_t scan_phase;	// scan_phase_t: listen, probe, hold, resume, paused
+@@ -522,6 +526,9 @@ typedef struct {
+ #define RADIO_TONE_RX		0x02u
+ #define RADIO_TONE_BOTH		(RADIO_TONE_TX | RADIO_TONE_RX)
+ 
++typedef enum { RADIO_TSCAN_CANCEL, RADIO_TSCAN_CTCSS, RADIO_TSCAN_DCS, RADIO_TSCAN_APPLY } radio_tscan_cmd_t;
++typedef enum { RADIO_TSCAN_IDLE, RADIO_TSCAN_WAIT, RADIO_TSCAN_CHECK, RADIO_TSCAN_FOUND, RADIO_TSCAN_NONE } radio_tscan_phase_t;
++
+ void radio_core_start(void);
+ // A consistent copy of the current state
+ void radio_get_view(radio_view_t *v);
+@@ -582,6 +589,9 @@ void radio_req_reload(void);			// the settings' preferences changed (squelch, ma
+ // FM bandwidth and sub-audio. On a channel these are temporary changes (P7); in the VFO they change the VFO itself.
+ // Refused on DMR channels, while transmitting, and for tones tones_valid() rejects
+ void radio_req_bandwidth(radio_bw_t bw);
++#if CONFIG_TONE_SCAN
++void radio_req_tone_scan(radio_tscan_cmd_t cmd);
++#endif
+ void radio_req_tone(uint8_t which, subtone_t tone);	// which: RADIO_TONE_TX, RADIO_TONE_RX or RADIO_TONE_BOTH
+ #if CONFIG_DMR || CONFIG_P25 || CONFIG_NXDN || CONFIG_YSF
+ // The current channel's or the VFO's mode (radio_mode_t): FM, DMR, P25 (CONFIG_P25), NXDN (CONFIG_NXDN) or YSF
+diff --git a/core/radio/radio_sm.c b/core/radio/radio_sm.c
+index d54f989..36c8392 100644
+--- a/core/radio/radio_sm.c
++++ b/core/radio/radio_sm.c
+@@ -852,8 +852,32 @@ static void bcast_status(radio_sm_t *sm, radio_status_t *st)
+ }
+ #endif
+ 
++#if CONFIG_TONE_SCAN
++static bool tone_scan_active(const radio_sm_t *sm)
++{
++	return sm->view.tone_scan_phase == RADIO_TSCAN_WAIT || sm->view.tone_scan_phase == RADIO_TSCAN_CHECK;
++}
++
++static void tone_scan_end(radio_sm_t *sm, uint8_t phase)
++{
++	if (tone_scan_active(sm)) {
++		board.radio->rx_tone_test(&sm->view.ch.rx_tone);
++		reset_tone(sm);
++	}
++	if (sm->view.tone_scan_phase != phase) {
++		sm->view.tone_scan_phase = phase;
++		if (phase != RADIO_TSCAN_FOUND)
++			sm->view.tone_scan_tone = (subtone_t){ TONE_NONE, 0 };
++		changed(sm);
++	}
++}
++#endif
++
+ static void tune(radio_sm_t *sm, uint32_t now_ms)
+ {
++#if CONFIG_TONE_SCAN
++	tone_scan_end(sm, RADIO_TSCAN_IDLE);
++#endif
+ 	sm->retune_pending = sm->retune_due = false;	// this tune is the one they wait for
+ #if CONFIG_SFR_CWID
+ 	cw_cancel(sm);		// the repeater's ID: the board is set up for the channel below
+@@ -1296,6 +1320,64 @@ static bool carrier_heard(const radio_sm_t *sm, uint8_t noise)
+ 	return noise < radio_sm_squelch_open_below(sq);
+ }
+ 
++#if CONFIG_TONE_SCAN
++#define TONE_SCAN_LIMIT_MS 120000u
++#define TONE_SCAN_CTCSS_MS 325u
++#define TONE_SCAN_DCS_MS 450u
++
++static void tone_scan_trial(radio_sm_t *sm, uint32_t now_ms)
++{
++	subtone_t tone = tones_picker(sm->tone_trial);
++	if (!board.radio->rx_tone_test(&tone)) {
++		tone_scan_end(sm, RADIO_TSCAN_NONE);
++		return;
++	}
++	sm->tone_matches = 0;
++	sm->tone_trial_ms = now_ms;
++	if (sm->view.tone_scan_phase != RADIO_TSCAN_CHECK) {
++		sm->view.tone_scan_phase = RADIO_TSCAN_CHECK;
++		changed(sm);
++	}
++}
++
++static void tone_scan_poll(radio_sm_t *sm, const radio_status_t *st, uint32_t now_ms)
++{
++	if (now_ms - sm->tone_scan_ms >= TONE_SCAN_LIMIT_MS) {
++		tone_scan_end(sm, RADIO_TSCAN_NONE);
++		return;
++	}
++	if (!carrier_heard(sm, st->noise)) {
++		if (sm->view.tone_scan_phase != RADIO_TSCAN_WAIT) {
++			sm->view.tone_scan_phase = RADIO_TSCAN_WAIT;
++			changed(sm);
++		}
++		return;
++	}
++	if (sm->view.tone_scan_phase == RADIO_TSCAN_WAIT) {
++		tone_scan_trial(sm, now_ms);
++		return;
++	}
++	uint32_t age = now_ms - sm->tone_trial_ms;
++	uint32_t settle_ms = sm->tone_scan_dcs ? 250u : 150u;
++	if (age >= settle_ms) {
++		sm->tone_matches = st->tone_ok ? (uint8_t)(sm->tone_matches + 1u) : 0;
++		if (sm->tone_matches == 3) {
++			sm->view.tone_scan_tone = tones_picker(sm->tone_trial);
++			tone_scan_end(sm, RADIO_TSCAN_FOUND);
++			return;
++		}
++	}
++	if (age >= (sm->tone_scan_dcs ? TONE_SCAN_DCS_MS : TONE_SCAN_CTCSS_MS)) {
++		uint16_t end = sm->tone_scan_dcs ? TONES_PICKER_COUNT : 1u + TONES_CTCSS_COUNT;
++		if (++sm->tone_trial == end) {
++			tone_scan_end(sm, RADIO_TSCAN_NONE);
++		} else {
++			tone_scan_trial(sm, now_ms);
++		}
++	}
++}
++#endif
++
+ // Busy channel lockout (FM): refuse while the channel is in use (by anyone, or by a group with another tone)
+ static bool bcl_busy(const radio_sm_t *sm)
+ {
+@@ -5552,6 +5634,10 @@ void radio_sm_shown_view(const radio_sm_t *sm, radio_view_t *v) { (void)sm; (voi
+ 
+ static bool aprs_can_start(const radio_sm_t *sm)
+ {
++#if CONFIG_TONE_SCAN
++	if (tone_scan_active(sm))
++		return false;
++#endif
+ 	if (sm->aprs_phase != APRS_RF_OFF || sm->ptt || sm->hotspot || (sm->view.state != RS_IDLE && !(sm->view.state == RS_RX && bcast_listening(sm))) ||
+ 	    sm->view.monitor || sm->power_off_req || sm->set.tx_inhibit || sm->batt.level == BATT_CRITICAL || board.afsk == NULL ||
+ 	    board.afsk->tx_start == NULL) {
+@@ -8363,6 +8449,72 @@ static void standby_set(radio_sm_t *sm, bool on)
+ 	changed(sm);
+ }
+ 
++static void set_subtone(radio_sm_t *sm, uint32_t arg, bool busy, uint32_t now_ms)
++{
++	uint8_t which = (uint8_t)((arg >> 24) & 3u);
++	subtone_t t = { (uint8_t)((arg >> 16) & 0xFFu), (uint16_t)arg };
++	if (t.type == TONE_NONE) {
++		t.value = 0;
++	}
++	if (busy || sm->view.ch.mode != RADIO_MODE_FM || which == 0 || !tones_valid(&t)) {
++		return;
++	}
++	bool rx_changed = (which & RADIO_TONE_RX) && !same_tone(&t, &sm->view.ch.rx_tone);
++	bool tx_changed = (which & RADIO_TONE_TX) && !same_tone(&t, &sm->view.ch.tx_tone);
++	if (which & RADIO_TONE_TX) {
++		sm->view.ch.tx_tone = t;
++	}
++	if (which & RADIO_TONE_RX) {
++		sm->view.ch.rx_tone = t;
++	}
++	if (sm->view.vfo) {
++		sm->vfo_ch.tx_tone = sm->view.ch.tx_tone;
++		sm->vfo_ch.rx_tone = sm->view.ch.rx_tone;
++	}
++	set_temporary(sm);
++	if (rx_changed) {
++		tune(sm, now_ms);	// the receiver's tone detector
++	} else if (tx_changed) {
++		changed(sm);		// used on the next PTT
++	}
++}
++
++#if CONFIG_TONE_SCAN
++static void tone_scan_request(radio_sm_t *sm, int32_t cmd, bool busy, uint32_t now_ms)
++{
++	if (cmd == RADIO_TSCAN_CANCEL) {
++		tone_scan_end(sm, RADIO_TSCAN_IDLE);
++		return;
++	}
++	if (busy || sm->ptt || sm->standby || sm->view.monitor || sm->view.ch.mode != RADIO_MODE_FM ||
++	    sm->view.am || sm->view.bcast || parked(&sm->view.ch) || board.radio->rx_tone_test == NULL)
++		return;
++#if CONFIG_SCAN
++	if (scan_on(&sm->scan))
++		return;
++#endif
++	if (cmd == RADIO_TSCAN_APPLY) {
++		if (sm->view.tone_scan_phase == RADIO_TSCAN_FOUND) {
++			uint32_t arg = (uint32_t)radio_tone_arg(RADIO_TONE_RX, sm->view.tone_scan_tone);
++			tone_scan_end(sm, RADIO_TSCAN_IDLE);
++			set_subtone(sm, arg, false, now_ms);
++		}
++		return;
++	}
++	if (cmd != RADIO_TSCAN_CTCSS && cmd != RADIO_TSCAN_DCS)
++		return;
++	tone_scan_end(sm, RADIO_TSCAN_IDLE);
++	end_reception(sm, now_ms);
++	sm->tone_scan_dcs = cmd == RADIO_TSCAN_DCS;
++	sm->tone_trial = sm->tone_scan_dcs ? TONES_CTCSS_COUNT + 1u : 1u;
++	sm->tone_scan_ms = now_ms;
++	sm->tone_matches = 0;
++	sm->view.tone_scan_phase = RADIO_TSCAN_WAIT;
++	outputs(sm);
++	changed(sm);
++}
++#endif
++
+ void radio_sm_request(radio_sm_t *sm, const radio_req_t *req, uint32_t now_ms)
+ {
+ 	sm->led_now = now_ms;
+@@ -8370,6 +8522,15 @@ void radio_sm_request(radio_sm_t *sm, const radio_req_t *req, uint32_t now_ms)
+ 	// channel, so it neither gives way to nor cancels anything either
+ 	bool alert = req->type == RREQ_BEEP || req->type == RREQ_VIBRATE || req->type == RREQ_VOLUME ||
+ 		     req->type == RREQ_VOLUME_OVERRIDE || req->type == RREQ_VOLUME_HOLD;
++#if CONFIG_TONE_SCAN
++	if (!alert && req->type != RREQ_TONE_SCAN && req->type != RREQ_DMR_FOCUS && req->type != RREQ_SETTINGS &&
++	    sm->view.tone_scan_phase != RADIO_TSCAN_IDLE) {
++		bool stop_ptt = tone_scan_active(sm) && req->type == RREQ_PTT && req->arg != 0;
++		tone_scan_end(sm, RADIO_TSCAN_IDLE);
++		if (stop_ptt)
++			return;
++	}
++#endif
+ 	if (!alert && req->type != RREQ_DMR_FOCUS && req->type != RREQ_SETTINGS && req->type != RREQ_RETUNE) {
+ 		aprs_rf_abort(sm, now_ms);	// the user does something: an APRS transmission gives way
+ 	}
+@@ -8663,35 +8824,14 @@ void radio_sm_request(radio_sm_t *sm, const radio_req_t *req, uint32_t now_ms)
+ 		set_temporary(sm);
+ 		tune(sm, now_ms);
+ 		break;
+-	case RREQ_TONE: {
+-		uint8_t which = (uint8_t)(((uint32_t)req->arg >> 24) & 3u);
+-		subtone_t t = { (uint8_t)(((uint32_t)req->arg >> 16) & 0xFFu), (uint16_t)req->arg };
+-		if (t.type == TONE_NONE) {
+-			t.value = 0;
+-		}
+-		if (busy || sm->view.ch.mode != RADIO_MODE_FM || which == 0 || !tones_valid(&t)) {
+-			break;
+-		}
+-		bool rx_changed = (which & RADIO_TONE_RX) && !same_tone(&t, &sm->view.ch.rx_tone);
+-		bool tx_changed = (which & RADIO_TONE_TX) && !same_tone(&t, &sm->view.ch.tx_tone);
+-		if (which & RADIO_TONE_TX) {
+-			sm->view.ch.tx_tone = t;
+-		}
+-		if (which & RADIO_TONE_RX) {
+-			sm->view.ch.rx_tone = t;
+-		}
+-		if (sm->view.vfo) {
+-			sm->vfo_ch.tx_tone = sm->view.ch.tx_tone;
+-			sm->vfo_ch.rx_tone = sm->view.ch.rx_tone;
+-		}
+-		set_temporary(sm);
+-		if (rx_changed) {
+-			tune(sm, now_ms);	// the receiver's tone detector
+-		} else if (tx_changed) {
+-			changed(sm);		// used on the next PTT
+-		}
++	case RREQ_TONE:
++		set_subtone(sm, (uint32_t)req->arg, busy, now_ms);
+ 		break;
+-	}
++#if CONFIG_TONE_SCAN
++	case RREQ_TONE_SCAN:
++		tone_scan_request(sm, req->arg, busy, now_ms);
++		break;
++#endif
+ #if CONFIG_DMR
+ 	case RREQ_REPLY_CANCEL:
+ 		dmr_call_reply_cancel();
+@@ -9235,6 +9375,10 @@ static void battery_poll(radio_sm_t *sm, uint32_t now_ms)
+ #if CONFIG_BATTERY_SAVE
+ static bool save_allowed(const radio_sm_t *sm, uint32_t now_ms)
+ {
++#if CONFIG_TONE_SCAN
++	if (tone_scan_active(sm))
++		return false;
++#endif
+ 	if (sm->set.rx_save == 0 || board.radio->rx_sleep == NULL || sm->view.ch.mode != RADIO_MODE_FM || sm->hotspot ||
+ 			sm->view.state != RS_IDLE || sm->view.monitor || sm->ptt || sm->view.ch.no_eco || sm->view.bcast) {
+ 		return false;
+@@ -9503,6 +9647,13 @@ void radio_sm_poll(radio_sm_t *sm, uint32_t now_ms)
+ #endif
+ 	sm->view.rssi_dbm = rssi_held(sm, st.rssi_dbm);
+ 	sm->view.noise = st.noise;
++#if CONFIG_TONE_SCAN
++	if (tone_scan_active(sm)) {
++		activity(sm, now_ms);
++		tone_scan_poll(sm, &st, now_ms);
++		return;
++	}
++#endif
+ #if CONFIG_DMR
+ 	// The modem may not report a level per burst: then the call's level is the held one while a call is heard. A
+ 	// finished call keeps its last value (dmr_publish leaves it alone once the stack's own is 0 and the state is idle).
+diff --git a/core/radio/radio_sm.h b/core/radio/radio_sm.h
+index d567151..7b8b1e5 100644
+--- a/core/radio/radio_sm.h
++++ b/core/radio/radio_sm.h
+@@ -190,6 +190,7 @@ typedef enum {
+ 	RREQ_AIR_TX,		// ... arg 1 key (arg2: the longest time in ms), 0 unkey
+ 	RREQ_NXDN_SET,		// radio_task.c: the pending NXDN settings were copied (radio_nxdn_set_settings); applied here
+ 	RREQ_YSF_SET,		// radio_task.c: the pending YSF settings were copied (radio_ysf_set_settings); applied here
++	RREQ_TONE_SCAN,		// arg: radio_tscan_cmd_t
+ 	RREQ_STANDBY,		// soft off: arg 1 receiver asleep, speaker quiet, no transmission; 0 awake again
+ } radio_req_type_t;
+ 
+@@ -267,6 +268,12 @@ typedef struct {
+ 
+ typedef struct {
+ 	radio_view_t view;
++#if CONFIG_TONE_SCAN
++	uint32_t tone_scan_ms, tone_trial_ms;
++	uint16_t tone_trial;
++	uint8_t tone_matches;
++	bool tone_scan_dcs;
++#endif
+ 	uint32_t serial;		// bumped on every visible change
+ 
+ 	zone_t zone;			// the current zone's channel list
+diff --git a/core/radio/radio_task.c b/core/radio/radio_task.c
+index a367525..eca7c1a 100644
+--- a/core/radio/radio_task.c
++++ b/core/radio/radio_task.c
+@@ -431,6 +431,9 @@ void radio_req_clear_temporary(void) { post(RREQ_CLEAR_TEMP, 0, 0); }
+ void radio_req_retune(void) { post(RREQ_RETUNE, 0, pdMS_TO_TICKS(50)); }
+ void radio_req_reload(void) { post(RREQ_RELOAD, 0, pdMS_TO_TICKS(50)); }
+ void radio_req_bandwidth(radio_bw_t bw) { post(RREQ_BANDWIDTH, bw, 0); }
++#if CONFIG_TONE_SCAN
++void radio_req_tone_scan(radio_tscan_cmd_t cmd) { post(RREQ_TONE_SCAN, cmd, pdMS_TO_TICKS(50)); }
++#endif
+ void radio_req_tone(uint8_t which, subtone_t tone) { post(RREQ_TONE, radio_tone_arg(which, tone), 0); }
+ #if CONFIG_DMR
+ void radio_req_reply_cancel(void) { post(RREQ_REPLY_CANCEL, 0, 0); }
+diff --git a/core/ui/lang/es.po b/core/ui/lang/es.po
+index c982cbe..bcc0ae3 100644
+--- a/core/ui/lang/es.po
++++ b/core/ui/lang/es.po
+@@ -3567,6 +3567,11 @@ msgctxt "TOOLS_ROW_SCAN_HIGH"
+ msgid "Scan high"
+ msgstr "Límite superior"
+ 
++#: core/ui/ui_menus.c
++msgctxt "TONE_SCAN_TITLE"
++msgid "Tone search"
++msgstr "Buscar tono"
++
+ #: core/ui/ui_menus.c
+ msgctxt "WORD_DUAL_WATCH"
+ msgid "Dual watch"
+@@ -3582,6 +3587,41 @@ msgctxt "TOOLS_VALUE_USB_SERIAL"
+ msgid "Serial"
+ msgstr "Serie"
+ 
++#: core/ui/ui_menus.c
++msgctxt "TONE_SCAN_WHY_FM"
++msgid "Select an FM channel and stop scanning"
++msgstr "Selecciona un canal FM y detén el escaneo"
++
++#: core/ui/ui_menus.c
++msgctxt "TONE_SCAN_ROW_CTCSS"
++msgid "Search CTCSS"
++msgstr "Buscar CTCSS"
++
++#: core/ui/ui_menus.c
++msgctxt "TONE_SCAN_ROW_DCS"
++msgid "Search DCS"
++msgstr "Buscar DCS"
++
++#: core/ui/ui_menus.c
++msgctxt "TONE_SCAN_ROW_APPLY"
++msgid "Use for RX"
++msgstr "Usar en RX"
++
++#: core/ui/ui_menus.c
++msgctxt "TONE_SCAN_STATUS_WAIT"
++msgid "Waiting for carrier"
++msgstr "Esperando portadora"
++
++#: core/ui/ui_menus.c
++msgctxt "TONE_SCAN_STATUS_CHECK"
++msgid "Checking tones"
++msgstr "Comprobando tonos"
++
++#: core/ui/ui_menus.c
++msgctxt "TONE_SCAN_STATUS_NONE"
++msgid "No matching tone"
++msgstr "No se encontró un tono"
++
+ #: core/ui/ui_menus.c
+ msgctxt "SET_VALUE_BACKLIGHT_10S_DIM"
+ msgid "10s/dim"
+diff --git a/core/ui/lang/fr.po b/core/ui/lang/fr.po
+index 017ce54..00018cc 100644
+--- a/core/ui/lang/fr.po
++++ b/core/ui/lang/fr.po
+@@ -3567,6 +3567,11 @@ msgctxt "TOOLS_ROW_SCAN_HIGH"
+ msgid "Scan high"
+ msgstr "Limite haute"
+ 
++#: core/ui/ui_menus.c
++msgctxt "TONE_SCAN_TITLE"
++msgid "Tone search"
++msgstr "Recherche de tonalité"
++
+ #: core/ui/ui_menus.c
+ msgctxt "WORD_DUAL_WATCH"
+ msgid "Dual watch"
+@@ -3582,6 +3587,41 @@ msgctxt "TOOLS_VALUE_USB_SERIAL"
+ msgid "Serial"
+ msgstr "Série"
+ 
++#: core/ui/ui_menus.c
++msgctxt "TONE_SCAN_WHY_FM"
++msgid "Select an FM channel and stop scanning"
++msgstr "Choisissez un canal FM et arrêtez le balayage"
++
++#: core/ui/ui_menus.c
++msgctxt "TONE_SCAN_ROW_CTCSS"
++msgid "Search CTCSS"
++msgstr "Chercher CTCSS"
++
++#: core/ui/ui_menus.c
++msgctxt "TONE_SCAN_ROW_DCS"
++msgid "Search DCS"
++msgstr "Chercher DCS"
++
++#: core/ui/ui_menus.c
++msgctxt "TONE_SCAN_ROW_APPLY"
++msgid "Use for RX"
++msgstr "Utiliser en RX"
++
++#: core/ui/ui_menus.c
++msgctxt "TONE_SCAN_STATUS_WAIT"
++msgid "Waiting for carrier"
++msgstr "Attente de la porteuse"
++
++#: core/ui/ui_menus.c
++msgctxt "TONE_SCAN_STATUS_CHECK"
++msgid "Checking tones"
++msgstr "Vérification des tonalités"
++
++#: core/ui/ui_menus.c
++msgctxt "TONE_SCAN_STATUS_NONE"
++msgid "No matching tone"
++msgstr "Aucune tonalité trouvée"
++
+ #: core/ui/ui_menus.c
+ msgctxt "SET_VALUE_BACKLIGHT_10S_DIM"
+ msgid "10s/dim"
+diff --git a/core/ui/lang/it.po b/core/ui/lang/it.po
+index a7c6c7a..16172e2 100644
+--- a/core/ui/lang/it.po
++++ b/core/ui/lang/it.po
+@@ -3567,6 +3567,11 @@ msgctxt "TOOLS_ROW_SCAN_HIGH"
+ msgid "Scan high"
+ msgstr "Limite superiore"
+ 
++#: core/ui/ui_menus.c
++msgctxt "TONE_SCAN_TITLE"
++msgid "Tone search"
++msgstr "Cerca tono"
++
+ #: core/ui/ui_menus.c
+ msgctxt "WORD_DUAL_WATCH"
+ msgid "Dual watch"
+@@ -3582,6 +3587,41 @@ msgctxt "TOOLS_VALUE_USB_SERIAL"
+ msgid "Serial"
+ msgstr "Seriale"
+ 
++#: core/ui/ui_menus.c
++msgctxt "TONE_SCAN_WHY_FM"
++msgid "Select an FM channel and stop scanning"
++msgstr "Seleziona un canale FM e interrompi la scansione"
++
++#: core/ui/ui_menus.c
++msgctxt "TONE_SCAN_ROW_CTCSS"
++msgid "Search CTCSS"
++msgstr "Cerca CTCSS"
++
++#: core/ui/ui_menus.c
++msgctxt "TONE_SCAN_ROW_DCS"
++msgid "Search DCS"
++msgstr "Cerca DCS"
++
++#: core/ui/ui_menus.c
++msgctxt "TONE_SCAN_ROW_APPLY"
++msgid "Use for RX"
++msgstr "Usa in RX"
++
++#: core/ui/ui_menus.c
++msgctxt "TONE_SCAN_STATUS_WAIT"
++msgid "Waiting for carrier"
++msgstr "In attesa di portante"
++
++#: core/ui/ui_menus.c
++msgctxt "TONE_SCAN_STATUS_CHECK"
++msgid "Checking tones"
++msgstr "Controllo dei toni"
++
++#: core/ui/ui_menus.c
++msgctxt "TONE_SCAN_STATUS_NONE"
++msgid "No matching tone"
++msgstr "Nessun tono trovato"
++
+ #: core/ui/ui_menus.c
+ msgctxt "SET_VALUE_BACKLIGHT_10S_DIM"
+ msgid "10s/dim"
+diff --git a/core/ui/lang/zh.po b/core/ui/lang/zh.po
+index b854d2e..04bdb96 100644
+--- a/core/ui/lang/zh.po
++++ b/core/ui/lang/zh.po
+@@ -3569,6 +3569,11 @@ msgctxt "TOOLS_ROW_SCAN_HIGH"
+ msgid "Scan high"
+ msgstr "扫描上限"
+ 
++#: core/ui/ui_menus.c
++msgctxt "TONE_SCAN_TITLE"
++msgid "Tone search"
++msgstr "搜索亚音"
++
+ #: core/ui/ui_menus.c
+ msgctxt "WORD_DUAL_WATCH"
+ msgid "Dual watch"
+@@ -3584,6 +3589,41 @@ msgctxt "TOOLS_VALUE_USB_SERIAL"
+ msgid "Serial"
+ msgstr "串口"
+ 
++#: core/ui/ui_menus.c
++msgctxt "TONE_SCAN_WHY_FM"
++msgid "Select an FM channel and stop scanning"
++msgstr "选择 FM 信道，停止扫描"
++
++#: core/ui/ui_menus.c
++msgctxt "TONE_SCAN_ROW_CTCSS"
++msgid "Search CTCSS"
++msgstr "搜索 CTCSS"
++
++#: core/ui/ui_menus.c
++msgctxt "TONE_SCAN_ROW_DCS"
++msgid "Search DCS"
++msgstr "搜索 DCS"
++
++#: core/ui/ui_menus.c
++msgctxt "TONE_SCAN_ROW_APPLY"
++msgid "Use for RX"
++msgstr "用于接收"
++
++#: core/ui/ui_menus.c
++msgctxt "TONE_SCAN_STATUS_WAIT"
++msgid "Waiting for carrier"
++msgstr "等待载波"
++
++#: core/ui/ui_menus.c
++msgctxt "TONE_SCAN_STATUS_CHECK"
++msgid "Checking tones"
++msgstr "正在检查亚音"
++
++#: core/ui/ui_menus.c
++msgctxt "TONE_SCAN_STATUS_NONE"
++msgid "No matching tone"
++msgstr "未找到匹配的亚音"
++
+ #: core/ui/ui_menus.c
+ msgctxt "SET_VALUE_BACKLIGHT_10S_DIM"
+ msgid "10s/dim"
+diff --git a/core/ui/ui_app.c b/core/ui/ui_app.c
+index a08e16c..d58c9f1 100644
+--- a/core/ui/ui_app.c
++++ b/core/ui/ui_app.c
+@@ -161,9 +161,8 @@ static void update_focus_target(void)
+ 		ui_svc_focus_target(0, false);
+ }
+ 
+-#if CONFIG_BACKLIGHT_TEST
+-// Screens from the top down to stack level `from` leave the stack: each runs its leave hook (the backlight tests give
+-// the light back)
++#if CONFIG_BACKLIGHT_TEST || CONFIG_TONE_SCAN
++// Screens from the top down to stack level `from` run their leave hooks.
+ static void left(uint8_t from)
+ {
+ 	for (uint8_t i = sp; i >= from && i > 0; i--) {
+@@ -171,9 +170,12 @@ static void left(uint8_t from)
+ 			ui_scr[stack[i].scr]->leave();
+ 	}
+ }
+-#define ON_BL_TEST()	(stack[sp].scr == SCR_BL_TEST)
+ #else
+ #define left(from)	((void)0)
++#endif
++#if CONFIG_BACKLIGHT_TEST
++#define ON_BL_TEST()	(stack[sp].scr == SCR_BL_TEST)
++#else
+ #define ON_BL_TEST()	false
+ #endif
+ 
+diff --git a/core/ui/ui_menus.c b/core/ui/ui_menus.c
+index 2b1948c..82d292b 100644
+--- a/core/ui/ui_menus.c
++++ b/core/ui/ui_menus.c
+@@ -6848,7 +6848,7 @@ void ui_crash_tick(uint32_t now_ms)
+ // user guide) is the same everywhere. The one a radio may not have (Battery) is last, so no radio has a gap; a build
+ // without diagnostics skips 7
+ enum { T_SCAN, T_POSITION, T_HOTSPOT, T_USB_NET, T_SFR, T_ROAM, T_DIAG, T_APRS, T_BATTERY, T_ZONE_OFFER,
+-       T_ZONE_SCAN, T_RX_EXT, T_VFO_SCAN_LOW, T_VFO_SCAN_HIGH, T_COUNT };
++       T_ZONE_SCAN, T_RX_EXT, T_VFO_SCAN_LOW, T_VFO_SCAN_HIGH, T_TONE_SCAN, T_COUNT };
+ 
+ // Defined with the generic settings groups below; appended to Tools so every existing tool keeps its number
+ #if CONFIG_SCAN && CONFIG_UI_SETTINGS
+@@ -6859,6 +6859,8 @@ static void zone_scan_open(void);
+ // input instead, is left out where the radio measures neither)
+ static bool tool_shown(uint16_t i)
+ {
++	if (i == T_TONE_SCAN)
++		return CONFIG_TONE_SCAN && board.radio != NULL && board.radio->rx_tone_test != NULL;
+ #if CONFIG_ZONE_SHARE
+ 	if (i == T_ZONE_OFFER)
+ 		return offer_waiting();	// 0 on the keypad: only while another radio's zone waits
+@@ -6917,7 +6919,8 @@ static void tools_item(uint16_t row, ui_item_t *it)
+ 		TRN(TOOLS_ROW_SHARES_RECEIVED, "Zones/Chs Received"),
+ 		TRN(TOOLS_ROW_ZONE_SCAN_SPEED, "Zone scan speed"),
+ 		TRN(SET_LABEL_RX_PAST_BANDS, "RX past bands"),
+-		TRN(TOOLS_ROW_SCAN_LOW, "Scan low"), TRN(TOOLS_ROW_SCAN_HIGH, "Scan high") };
++		TRN(TOOLS_ROW_SCAN_LOW, "Scan low"), TRN(TOOLS_ROW_SCAN_HIGH, "Scan high"),
++		TRN(TONE_SCAN_TITLE, "Tone search") };
+ 	uint16_t i = tools_row(row);
+ 	if (i >= T_COUNT)
+ 		return;
+@@ -7054,6 +7057,16 @@ static void tools_select(uint16_t row, bool hold)
+ 			ui_scan_toggle();	// says what scans: the zone, or the band in the VFO (dual watch ends)
+ 		}
+ 		break;
++#if CONFIG_TONE_SCAN
++	case T_TONE_SCAN: {
++		const radio_view_t *v = ui_view();
++		if (v->ch.mode != RADIO_MODE_FM || v->am || v->bcast || v->hotspot || v->scan != 0 || v->state == RS_TX)
++			ui_toast(TR(TONE_SCAN_WHY_FM, "Select an FM channel and stop scanning"));
++		else
++			ui_push(SCR_TONE_SCAN, 0);
++		break;
++	}
++#endif
+ 	case T_POSITION: ui_push(CONFIG_GPS_SKY ? SCR_GPS : SCR_INFO, INFO_POSITION); break;
+ 	case T_HOTSPOT: ui_push(SCR_INFO, INFO_HOTSPOT); break;
+ 	case T_USB_NET: ui_push(SCR_INFO, INFO_USB_NET); break;
+@@ -7073,6 +7086,58 @@ static const ui_scr_def_t tools_screen = {
+ 	.count = tools_count, .item = tools_item, .select = tools_select,
+ };
+ 
++#if CONFIG_TONE_SCAN
++static uint16_t tone_scan_count(void) { return 3; }
++
++static void tone_scan_item(uint16_t i, ui_item_t *it)
++{
++	const radio_view_t *v = ui_view();
++	if (i < 2) {
++		str_copy(it->label, sizeof it->label, i == 0 ? TR(TONE_SCAN_ROW_CTCSS, "Search CTCSS") :
++			TR(TONE_SCAN_ROW_DCS, "Search DCS"));
++		return;
++	}
++	str_copy(it->label, sizeof it->label, TR(TONE_SCAN_ROW_APPLY, "Use for RX"));
++	if (v->tone_scan_phase == RADIO_TSCAN_FOUND) {
++		sbuf_t b;
++		sb_init(&b, it->value, sizeof it->value);
++		sb_tone(&b, &v->tone_scan_tone);
++	} else {
++		it->flags |= UI_ITEM_DIM;
++	}
++}
++
++static const char *tone_scan_body(void)
++{
++	switch (ui_view()->tone_scan_phase) {
++	case RADIO_TSCAN_WAIT: return TR(TONE_SCAN_STATUS_WAIT, "Waiting for carrier");
++	case RADIO_TSCAN_CHECK: return TR(TONE_SCAN_STATUS_CHECK, "Checking tones");
++	case RADIO_TSCAN_NONE: return TR(TONE_SCAN_STATUS_NONE, "No matching tone");
++	default: return NULL;
++	}
++}
++
++static void tone_scan_select(uint16_t i, bool hold)
++{
++	(void)hold;
++	if (i < 2)
++		radio_req_tone_scan(i == 0 ? RADIO_TSCAN_CTCSS : RADIO_TSCAN_DCS);
++	else if (ui_view()->tone_scan_phase == RADIO_TSCAN_FOUND) {
++		radio_req_tone_scan(RADIO_TSCAN_APPLY);
++		ui_pop();
++	}
++}
++
++static void tone_scan_leave(void) { radio_req_tone_scan(RADIO_TSCAN_CANCEL); }
++
++static const ui_scr_def_t tone_scan_screen = {
++	.name = "tonescan", .flags = SF_LIST | SF_FIELD,
++	.prefix = TRN(TONE_SCAN_TITLE, "Tone search"), .hint = TRN(HINT_BACK, "Back"),
++	.count = tone_scan_count, .item = tone_scan_item, .body = tone_scan_body,
++	.select = tone_scan_select, .leave = tone_scan_leave,
++};
++#endif
++
+ // ======================= Settings by intent (information-architecture.md 6) =======================
+ // CONFIG_UI_SETTINGS=n leaves the whole menu out (the settings keep their stored values; qdmr sets them)
+ #if CONFIG_UI_SETTINGS
+@@ -8542,6 +8607,9 @@ const ui_scr_def_t *const ui_scr[SCR_COUNT] = {
+ #endif
+ 	[SCR_VOLUME] = &volume_screen, [SCR_LANGUAGE] = &lang_screen,
+ 	[SCR_DMR_ID] = &dmr_id_screen, [SCR_SPLASH_PREVIEW] = &splash_preview_screen,
++#if CONFIG_TONE_SCAN
++	[SCR_TONE_SCAN] = &tone_scan_screen,
++#endif
+ 	[SCR_CP_FOREIGN] = &cpf_screen,
+ #if DATA_IDS
+ 	[SCR_DATA_SERVICES] = &ds_screen,
+diff --git a/core/ui/ui_nav.h b/core/ui/ui_nav.h
+index 88a3d22..e8c5926 100644
+--- a/core/ui/ui_nav.h
++++ b/core/ui/ui_nav.h
+@@ -47,6 +47,9 @@ typedef enum {
+ #endif
+ 	SCR_SPLASH_PREVIEW,
+ 	SCR_DMR_DIAL,
++#if CONFIG_TONE_SCAN
++	SCR_TONE_SCAN,
++#endif
+ 	SCR_COUNT
+ } ui_scr_t;
+ 
+@@ -110,7 +113,7 @@ typedef struct {
+ 	bool (*key)(const input_event_t *ev);		// screen keys before the list's own (true: used)
+ 	void (*draw)(void);				// own drawing instead of the list
+ 	void (*enter)(void);				// on push
+-#if CONFIG_BACKLIGHT_TEST
++#if CONFIG_BACKLIGHT_TEST || CONFIG_TONE_SCAN
+ 	void (*leave)(void);				// on leaving the stack (BACK, Home, replaced)
+ #endif
+ 	const ui_filter_def_t *filter;			// SF_FILTER: the rows before filtering (NULL: not a filtered list)
+diff --git a/docs/build-config.md b/docs/build-config.md
+index 3a41c7a..368d487 100644
+--- a/docs/build-config.md
++++ b/docs/build-config.md
+@@ -91,6 +91,7 @@ below are for an STM32F4 radio.
+ |---|---|---|
+ | `CONFIG_FM` | y | analog FM receive and transmit |
+ | `CONFIG_SUBTONE` | = FM | CTCSS / DCS encode and decode (in software from the ADC and PWM on a board without a tone chip) |
++| `CONFIG_TONE_SCAN` | n | Receive-only tone search on boards with a configurable FM receive tone detector |
+ | `CONFIG_FM_TX_TONES` | = FM (n where the tone path isn't written) | roger beep and 1750 Hz burst sent over the air (`docs/spec/radio-features.md` 3) |
+ | `CONFIG_DTMF` | = FM (n where the tone path isn't written) | DTMF digits sent from the keys while PTT is held on FM (`docs/spec/radio-features.md` 3.7) |
+ | `CONFIG_VOX` | = FM (n where the mic level hook isn't written) | voice-operated transmit on FM, from the microphone level (`hal_power_t.mic_level`; `docs/spec/radio-features.md` 3.4) |
+diff --git a/docs/spec/debuglink.md b/docs/spec/debuglink.md
+index 9d599b9..e011728 100644
+--- a/docs/spec/debuglink.md
++++ b/docs/spec/debuglink.md
+@@ -326,7 +326,7 @@ short. View 5: the `cps.*` and `cpsf.*` keys moved from `storage` to `cps` (27),
+ | # | Section | Keys |
+ |---|---|---|
+ | 0 | `core` | `view state tx_deny can_tx txlim txlim.n txlim.refused txlim.last_hz mode am bcast bcast_fault bcast_khz vfo vfo_index` (`am` 1: received in AM, the air band; `bcast` 1: heard on the broadcast receiver, `bcast_fault` 1 when it didn't answer, `bcast_khz` the frequency the receiver reports; [airband-and-broadcast.md](airband-and-broadcast.md)) (which VFO: 0, or 1 the second; `radio-features.md` 2.1) `zone_index zone_pos zone_size zone_count zone_name channel_number channel_name rx_hz tx_hz power power_name power_count power_names tx_drive pa_keyup pa_keyup.last bands temporary temp squelch monitor tone_ok rssi_dbm noise tx_elapsed_ms tot_s last_rx_ms last_tx_ms tx_auto wakes vfo_step_hz vfo_drop codeplug hotspot`, `vfo_drop` a saved VFO's mode (`radio_mode_t` + 1) that this build or board can't run, so the VFO came back at power-up in the default mode instead (0 none), `bands` the board's bands in Hz (`lo-hi`, comma separated), `last_tx_ms` when the last transmission began (0 none), `tx_auto` 1 when that transmission is the radio's own (a data list such as ARS, a roaming probe, an APRS beacon), `wakes` 1 while the radio state lights the screen (`radio_view_wakes`, [ui.md](ui.md)), `rssi_dbm` is the raw reading in FM and idle, and the peak of the last `RADIO_RSSI_HOLD_MS` (120 ms, two TDMA frames) while the DMR stack runs; `call.rssi_dbm` is the modem's per-burst level, else the held one; `txlim` the test TX limit (op 35): `off`, `block` or `list`, with `txlim.n` frequencies; `txlim.refused` keyings it refused since the start, the last at `txlim.last_hz`; `power_names` every power level's name at the channel's transmit frequency, lowest first, `/` between (`board_power_name`: a radio whose top level differs by band names it per band); `tx_drive` (radios with `hal_radio_t.tx_drive_level`) the PA drive of each power level at the channel's transmit frequency, lowest first, `/` between (0: the level doesn't transmit there); `pa_keyup` (radios with the DMR PA key-up, [pa-keyup.md](pa-keyup.md)) its constants blend/top/hold % and boost/hold/PA µs before the first symbol (RADIO op 37), and `pa_keyup.last` the last key-up's boost/hold/drive (boost 0: none); `req_handled req_dropped` (radio requests taken by the radio task; lost to a full queue), `ch_read_errors` (reads of a used channel that failed: flash read or record decode), `serial` |
+-| 1 | `channel` | `ch.name ch.rx_hz ch.tx_hz ch.mode ch.kind ch.bw ch.rx_tone ch.tx_tone ch.power ch.rx_only ch.color_code ch.timeslot ch.contact ch.listen_list ch.dmr_id ch.dmo ch.tone_burst ch.sfr` (`ch.sfr`: the stored SFR bytes A,B, `0,0` = none; `ch.kind`: the channel's kind, [channel-modes.md](channel-modes.md) 4, 0 a plain channel) |
++| 1 | `channel` | `ch.name ch.rx_hz ch.tx_hz ch.mode ch.kind ch.bw ch.rx_tone ch.tx_tone ch.power ch.rx_only ch.color_code ch.timeslot ch.contact ch.listen_list ch.dmr_id ch.dmo ch.tone_burst ch.sfr` (`ch.sfr`: the stored SFR bytes A,B, `0,0` = none; `ch.kind`: the channel's kind, [channel-modes.md](channel-modes.md) 4, 0 a plain channel); with a tone search detector, `tone_search` (idle, wait, check, found, no_match) and `tone_search_tone` (the matching tone as `type:value`, `none:0` until a match) |
+ | 2 | `dmr` | `dmr.built dmr.active dmr.codec dmr.killed dmr.state dmr.phase dmr.tx_error dmr.own_id dmr.cc dmr.ts dmr.rx_cc dmr.rx_ts dmr.rmo dmr.repeater_up dmr.sfr_role dmr.sfr_rpt dmr.sfr_rx dmr.sfr_cwid dmr.sfr_cw dmr.sfr_cwid_sent dmr.sfr_cwid_cut dmr.target_id dmr.target_private dmr.target_name dmr.reply_active dmr.reply_s dmr.hear_all dmr.hear_all_latch dmr.focus_id dmr.focus_private dmr.one_shot dmr.underruns dmr.target_manual dmr.privacy dmr.alias_tx dmr.tx_alias voice.tx_mic_level_db voice.tx_mic_spread_db voice.tx_mic_zc voice.tx_mic_blocks`, and where the modem driver keeps them (`hal_dmr_modem_t.health`) `dmr.modem_stalls dmr.modem_stuck`, after the first of either `dmr.modem_lost_ms dmr.modem_lost_regs` (`dmr.modem_*`: modem interrupts the driver found lost and recovered from: transmissions dropped with no slot interrupt, requests found pending with no handler run; the first one's uptime in ms and four words in hex, the interrupt controller's as the driver's source lists them; any count above 0 is a lost interrupt) (`dmr.killed`: a Tier III kill is kept, no DMR until a factory reset; `dmr.tx_alias`: the alias text our calls send, empty when none; `voice.tx_mic_*`: the latest transmission's mic blocks (20 ms each, the board's samples before the gain scaling) as content, which a peak can't show: the 90th percentile block's level from the sample-to-sample differences (a high pass, so hum doesn't count; dB re 1 LSB rms in 3 dB steps), that minus the 10th percentile's (speech 20 dB and more, a floor or a hum a few), the median zero crossings a block (speech 5-40, white noise about 80) and the blocks counted; a cut mic reads as the ADC's floor: low level, no spread; in this section because `dmr_stats` is near the reply size) |
+ | 3 | `dmr_call` | `call.src call.dst call.group call.to_us call.encrypted call.emergency call.pi_header call.src_name call.dst_name call.late_entry call.alias_complete call.fid call.svc call.pi_alg call.pi_key call.alias call.rssi_dbm call.ms`, the same with `last.` (`src` to `dst_name`) and `last.ms`. Why received calls ended and what the filters dropped: `call.rx_end_term call.rx_end_sync call.rx_end_fade` (terminator, sync lost, faded), `call.rx_ts_dropped call.rx_cc_dropped` (wrong slot, wrong color code). The reverse channel heard while sending ([dmr-modem.md](dmr-modem.md)): `call.rc_good call.rc_bad call.rc_ceased call.rc_last`, here because `dmr_stats` fills a reply. The caller's ETSI GPS Info ([dmr-voice.md](dmr-voice.md) GPS Info): `call.gps_valid` (and `last.`), when 1 `call.gps_lat call.gps_lon` (degrees, 7 decimals) `call.gps_err` (position error code 0-7), when our own position is known `call.gps_dist_m call.gps_bearing` (degrees from north) |
+ | 4 | `dmr_stats` | call stack (`call.rx_calls rx_calls_played rx_late_entries rx_calls_resumed rx_voice_bursts rx_lost_frames rx_dup_dropped rx_enc_dropped rx_term_dropped rx_sfr_dup rx_sfr_direct rx_sfr_held rx_sfr_fixed tx_calls tx_denied tx_underruns evq_overflows rx_private_calls rx_emergency_calls rx_encrypted_calls rx_pi_headers rx_alias_complete tx_alias_lcs rx_gps tx_gps_lcs`), AMBE voice (`voice.rx_in rx_frames rx_concealed rx_silence rx_calls rx_queue_max rx_bad rx_lost rx_underruns rx_underrun_at rx_overflows rx_bit_errors tx_frames tx_overflows rx_peak rx_repeats tx_repeats`; `rx_underrun_at`: frames the call had played at its latest underrun; `rx_peak`: the largest decoded sample of the latest call that played, near 0 when the decoder is fed the wrong bits; `rx_repeats`: good frames equal to the call's previous good frame, near `rx_in` when the modem hands over the same stale voice bytes every burst; `tx_repeats`: encoded frames equal to the transmission's previous one (a stuck encoder, or a silent mic: the vocoder's silence frame again and again)). The vocoder's TX state is in the `dmr` section (2), as these counters fill most of a reply: `voice.tx_mic_peak`, the largest mic sample the board delivered in the latest transmission, 0 when the mic path gives nothing; `voice.tx_test`, RADIO op 33's test signal on; the encode options (`voice.enc_options` in force and `voice.enc_supported`, `VOCODER_OPT_*` bits in hex: 0x1 noise reduction, 0x2 tone frames, 0x4 AGC; `voice.enc_flags`, the flags word the codec was last given, only on boards that report it (the options reach the codec before the next frame it encodes, so after a change the word follows `voice.enc_options` from the next transmission), e.g. 0x1840 on the AMBE+2 hosts with both on; `dmr-voice.md` 6) |
+diff --git a/docs/spec/radio-features.md b/docs/spec/radio-features.md
+index 6940862..f0f6352 100644
+--- a/docs/spec/radio-features.md
++++ b/docs/spec/radio-features.md
+@@ -170,6 +170,18 @@ so (the debug link's `dual.both`).
+ `ui_svc_receivers()` is 2 on such a radio, and `ui_svc_dual_rx(pane)` reports each pane's own receiver while the
+ second one has its channel: the dual watch screens then show a call on each pane at once.
+ 
++### 2.3 Receive tone search (CONFIG_TONE_SCAN)
++
++**Tools > Tone search** checks the current FM receive frequency for a standard CTCSS tone or DCS code. Boards
++with `hal_radio_t.rx_tone_test` rearm their detector with each candidate without retuning the receiver. CTCSS uses
++50 candidates and DCS uses 104 codes in normal and inverted polarity. The timer allows 325 ms per CTCSS tone and
++450 ms per DCS code and polarity. It requires three matching polls after settling. A missing carrier leaves the
++current candidate pending, and the whole search ends after two minutes. **Back**, a channel change, or PTT ends
++the search. The first PTT press during a search cancels it. Automatic APRS transmission, VOX and battery saving pause
++while searching. The detector resumes using the original RX tone on every exit. Only **Use for RX** applies a result
++through the normal tone setting path. It keeps the VFO's RX tone or sets the memory channel's temporary RX tone.
++The TX tone and the stored channel stay as they were. The debug `channel` view reports the search state and result.
++
+ ## 3. FM transmit extras
+ 
+ ### 3.1 Busy channel lockout and TX inhibit
+diff --git a/docs/user/12-scan.md b/docs/user/12-scan.md
+index d860a18..9679b45 100644
+--- a/docs/user/12-scan.md
++++ b/docs/user/12-scan.md
+@@ -56,6 +56,16 @@ The scan actions:
+ | 2 | Stay here | Stops the scan on this channel |
+ | 3 | Always skip | Not built yet. Edit scan lists in qdmr |
+ 
++## Find a CTCSS tone or DCS code
++
++Select a conventional FM channel or tune the FM VFO. Stop scan or dual watch and open **Tools > Tone search**.
++Choose **Search CTCSS** or **Search DCS**. The radio waits for a carrier and checks the standard tones or codes.
++Searching DCS covers both normal and inverted codes and may take up to about 95 seconds of carrier time.
++
++The detected tone appears beside **Use for RX**. Select it to use the result for receive squelch. On a memory
++channel use **Save channel** to keep it. **Back** leaves the current tone alone. The first press of PTT during
++search cancels it.
++
+ ## Dual watch
+ 
+ Dual watch listens on two channels, A and B, and you talk on one of them. Each can be any channel of any zone, or the
+diff --git a/hal/hal_radio.h b/hal/hal_radio.h
+index ec55a09..12ba7f5 100644
+--- a/hal/hal_radio.h
++++ b/hal/hal_radio.h
+@@ -103,6 +103,9 @@ typedef struct {
+ 	uint16_t (*tx_drive_top)(void);
+ 	bool (*tx_drive_now)(uint16_t drive);
+ 	bool (*tx_mark)(int8_t step);
++	// Optional: configure the detector for one candidate on the current FM receive frequency.
++	// The board rearms the detector, and returns false if it cannot run now. Used by receive-only tone search.
++	bool (*rx_tone_test)(const subtone_t *tone);
+ } hal_radio_t;
+ 
+ #endif
+diff --git a/tests/hil/features.toml b/tests/hil/features.toml
+index 66c93ff..00a9f1c 100644
+--- a/tests/hil/features.toml
++++ b/tests/hil/features.toml
+@@ -203,6 +203,10 @@ spec = "docs/spec/radio-features.md"
+ switch = "KEY_ASSIGN"
+ spec = "docs/spec/ui.md"
+ 
++[feature.tone_scan]
++switch = "TONE_SCAN"
++spec = "docs/spec/radio-features.md"
++
+ [feature.scan]
+ switch = "SCAN"
+ spec = "docs/spec/radio-features.md"
+diff --git a/tests/hil/test_fm.py b/tests/hil/test_fm.py
+index 4f9e1a5..966c0fb 100644
+--- a/tests/hil/test_fm.py
++++ b/tests/hil/test_fm.py
+@@ -384,3 +384,48 @@ def test_rx_tone_decode_bench(radio, sdr_bench, pytestconfig, kind, value, sub,
+             k, v = tone0.split(":")
+             L.tone(2, k, int(v))
+             radio.wait_for(lambda x: x.get("ch.rx_tone") == tone0, sections=("channel",), what="RX tone restored")
++
++
++@pytest.mark.feature("tone_scan", optional=True)
++@pytest.mark.rf
++@pytest.mark.bench_service
++@pytest.mark.needs_switch("VFO_FM")
++@pytest.mark.parametrize("row, want, sub", [
++    (0, "ctcss:719", {"ctcss": 71.9}),
++    (1, "dcs_inv:19", {"dcs": "023I"}),
++], ids=["ctcss", "inverted-dcs"])
++def test_rx_tone_search_bench(radio, sdr_bench, pytestconfig, row, want, sub):
++    if "tone_search" not in radio.view(["channel"]):
++        skip("no_hw", "no receive tone search on this board")
++    mhz = rig(pytestconfig, "fm-mhz")
++    hz = round(mhz * 1e6)
++    radio.skip_out_of_band(hz)
++    radio.go_home()
++    with radio.vfo_session():
++        radio.link.vfo_set(hz)
++        radio.wait_for(lambda v: v.get("rx_hz") == str(hz) and v.get("mode") == "fm", what="FM VFO tuned")
++        before = radio.view(["channel"])
++        try:
++            for key in ("select", "6", "up", "select"):
++                radio.press(key)
++            assert radio.screen() == "tonescan"
++            if row:
++                radio.press("down")
++            radio.press("select")
++            with sdr_bench.lease():
++                tx = sdr_bench.fm_tx_start(mhz, FALLBACK_PROGRAM, **sub)
++                found = radio.wait_for(lambda v: v.get("tone_search") == "found", 5,
++                                       sections=("channel",), what="the tone search match")
++                assert not tx.wait(5).get("cut")
++            assert found["tone_search_tone"] == want, found
++            assert found["ch.rx_tone"] == before["ch.rx_tone"], found
++            for _ in range(2 - row):
++                radio.press("down")
++            radio.press("select")
++            applied = radio.wait_for(lambda v: v.get("ch.rx_tone") == want, 1,
++                                     sections=("channel",), what="the result applied to RX")
++            assert applied["ch.tx_tone"] == before["ch.tx_tone"], applied
++        finally:
++            radio.go_home()
++            kind, value = before["ch.rx_tone"].split(":")
++            radio.link.tone(2, kind, int(value))
+diff --git a/tests/host/radioFeaturesTest.c b/tests/host/radioFeaturesTest.c
+index 11ea4af..81280a3 100644
+--- a/tests/host/radioFeaturesTest.c
++++ b/tests/host/radioFeaturesTest.c
+@@ -168,7 +168,18 @@ static void r_rx_sleep(bool sleep)
+ 		hw.wakes++;
+ 	}
+ }
++#if CONFIG_TONE_SCAN
++static bool r_rx_tone_test(const subtone_t *tone)
++{
++	hw.rx_tone = *tone;
++	return true;
++}
++#endif
++
+ static const hal_radio_t fake_radio = {
++#if CONFIG_TONE_SCAN
++	.rx_tone_test = r_rx_tone_test,
++#endif
+ 	.init = r_init, .set_mode = r_set_mode, .rx = r_rx, .tx = r_tx, .tx_off = r_tx_off, .status = r_status,
+ 	.audio = r_audio, .tx_tone = r_tx_tone, .tx_dtmf = r_tx_dtmf, .rx_sleep = r_rx_sleep, .tx_tail = r_tx_tail,
+ };
+@@ -1452,6 +1463,65 @@ static void test_fm_permit(void)
+ }
+ #endif
+ 
++#if CONFIG_TONE_SCAN
++static void test_tone_scan(void)
++{
++	start();
++	const subtone_t rx = { TONE_CTCSS, 1000 }, tx = { TONE_CTCSS, 1230 };
++	const subtone_t ctcss = { TONE_CTCSS, 719 }, dcs = { TONE_DCS_INV, 0023 };
++	req(RREQ_TONE, radio_tone_arg(RADIO_TONE_RX, rx));
++	req(RREQ_TONE, radio_tone_arg(RADIO_TONE_TX, tx));
++	int retunes = hw.rx_calls;
++	req(RREQ_TONE_SCAN, RADIO_TSCAN_CTCSS);
++	run(1000);
++	CHECK(sm.view.tone_scan_phase == RADIO_TSCAN_WAIT && same_tone(hw.rx_tone, rx));
++	signal_on(0, 146520000, 30, ctcss);
++	run(500);
++	CHECK(sm.view.tone_scan_phase == RADIO_TSCAN_CHECK && !hw.audio && hw.rx_calls == retunes);
++	hw.sig[0].hz = 0;
++	run(300);
++	CHECK(sm.view.tone_scan_phase == RADIO_TSCAN_WAIT && sm.view.tone_scan_tone.type == TONE_NONE);
++	signal_on(0, 146520000, 30, ctcss);
++	run(850);
++	CHECK(sm.view.tone_scan_phase == RADIO_TSCAN_FOUND && same_tone(sm.view.tone_scan_tone, ctcss));
++	CHECK(same_tone(hw.rx_tone, rx) && same_tone(sm.view.ch.tx_tone, tx) && hw.rx_calls == retunes);
++	req(RREQ_TONE_SCAN, RADIO_TSCAN_APPLY);
++	CHECK(sm.view.tone_scan_phase == RADIO_TSCAN_IDLE && same_tone(hw.rx_tone, ctcss) &&
++	      same_tone(sm.view.ch.rx_tone, ctcss) && same_tone(sm.view.ch.tx_tone, tx));
++
++	req(RREQ_TONE_SCAN, RADIO_TSCAN_DCS);
++	signal_on(0, 146520000, 30, dcs);
++	run(900);
++	CHECK(sm.view.tone_scan_phase == RADIO_TSCAN_FOUND && same_tone(sm.view.tone_scan_tone, dcs));
++	req(RREQ_TONE_SCAN, RADIO_TSCAN_CANCEL);
++	CHECK(sm.view.tone_scan_phase == RADIO_TSCAN_IDLE && same_tone(hw.rx_tone, ctcss));
++
++	req(RREQ_TONE_SCAN, RADIO_TSCAN_CTCSS);
++	run(125);
++	req(RREQ_PTT, 1);
++	CHECK(sm.view.tone_scan_phase == RADIO_TSCAN_IDLE && hw.tx_calls == 0 && same_tone(hw.rx_tone, ctcss));
++	req(RREQ_PTT, 0);
++	CHECK(hw.tx_calls == 0);
++
++	req(RREQ_TONE_SCAN, RADIO_TSCAN_CTCSS);
++	run(20000);
++	CHECK(sm.view.tone_scan_phase == RADIO_TSCAN_NONE && same_tone(hw.rx_tone, ctcss));
++	req(RREQ_TONE_SCAN, RADIO_TSCAN_DCS);
++	hw.sig[0].hz = 0;
++	run(120000);
++	CHECK(sm.view.tone_scan_phase == RADIO_TSCAN_NONE && same_tone(hw.rx_tone, ctcss));
++
++	req(RREQ_TONE_SCAN, RADIO_TSCAN_CTCSS);
++	signal_on(0, 146520000, 30, rx);
++	run(100);
++	req(RREQ_ZONE_POS, 1);
++	CHECK(sm.view.tone_scan_phase == RADIO_TSCAN_IDLE && same_tone(hw.rx_tone, rx));
++	req(RREQ_ZONE_POS, 5);
++	req(RREQ_TONE_SCAN, RADIO_TSCAN_CTCSS);
++	CHECK(sm.view.tone_scan_phase == RADIO_TSCAN_IDLE);
++}
++#endif
++
+ static void test_vfo_scan(void)
+ {
+ 	start();
+@@ -4065,6 +4135,9 @@ int main(void)
+ 	test_scan_ptt_and_modes();
+ 	test_zone_scan_dwell_setting();
+ 	test_zone_scan_timing_options();
++#if CONFIG_TONE_SCAN
++	test_tone_scan();
++#endif
+ 	test_vfo_scan();
+ 	test_scan_boundaries_and_leds();
+ #if CONFIG_FM && CONFIG_BEEP
+diff --git a/tests/host/sim/ui_sim.c b/tests/host/sim/ui_sim.c
+index 115e128..a52db29 100644
+--- a/tests/host/sim/ui_sim.c
++++ b/tests/host/sim/ui_sim.c
+@@ -445,6 +445,10 @@ static const hal_vocoder_t vocoder = { .options = v_options };
+ // A receiver that does AM (the "am" token): radio_am_channel() reads only that rx_am is there
+ static bool r_rx_am(uint32_t hz, radio_bw_t bw) { (void)hz; (void)bw; return true; }
+ static const hal_radio_t am_radio = { .rx_am = r_rx_am };
++#if CONFIG_TONE_SCAN
++static bool r_rx_tone_test(const subtone_t *tone) { (void)tone; return true; }
++static const hal_radio_t tone_radio = { .rx_tone_test = r_rx_tone_test };
++#endif
+ // The broadcast receiver (the "bcast" token): the UI needs its frequency range and tuning grid
+ static const hal_bcast_t fm_broadcast = { .lo_khz = 65000, .hi_khz = 108000, .grid_khz = 50 };
+ 
+@@ -1620,6 +1624,21 @@ static void retune(void)
+ 	}
+ }
+ void radio_req_bandwidth(radio_bw_t bw) { retune(); view.ch.bw = bw; if (!view.vfo) set_temp(RADIO_TEMP_BW); changed(); }
++#if CONFIG_TONE_SCAN
++void radio_req_tone_scan(radio_tscan_cmd_t cmd)
++{
++	if (cmd == RADIO_TSCAN_CTCSS || cmd == RADIO_TSCAN_DCS) {
++		view.tone_scan_tone = cmd == RADIO_TSCAN_CTCSS ? (subtone_t){ TONE_CTCSS, 1000 } :
++			(subtone_t){ TONE_DCS_INV, 0023 };
++		view.tone_scan_phase = RADIO_TSCAN_FOUND;
++	} else {
++		if (cmd == RADIO_TSCAN_APPLY)
++			radio_req_tone(RADIO_TONE_RX, view.tone_scan_tone);
++		view.tone_scan_phase = RADIO_TSCAN_IDLE;
++	}
++	changed();
++}
++#endif
+ void radio_req_tone(uint8_t which, subtone_t tone)
+ {
+ 	retune();
+@@ -3581,6 +3600,12 @@ static bool run_token(char *t, char *err, size_t len)
+ 		sim_foreign = true;
+ 		return true;
+ 	}
++#if CONFIG_TONE_SCAN
++	if (strcmp(t, "tone-search") == 0) {
++		board.radio = &tone_radio;
++		return true;
++	}
++#endif
+ 	if (strcmp(t, "extended-bands") == 0) {
+ 		board.bands = extended_bands;
+ 		board.band_count = sizeof extended_bands / sizeof extended_bands[0];
+diff --git a/tests/host/uiFlowTest.c b/tests/host/uiFlowTest.c
+index 53af3b5..321f6a1 100644
+--- a/tests/host/uiFlowTest.c
++++ b/tests/host/uiFlowTest.c
+@@ -250,6 +250,11 @@ static const flow_t flows[] = {
+ 	{ "DMR decrypted RX marks the caller", "", "rx:9991234,201,a", "markbefore=Joe hides=Encrypted:", 0, false },
+ 	{ "DMR encrypted RX without a usable cipher warns", "cipher:ready", "rx:9991234,201,e", "nomarkbefore=Joe shows=Encrypted:", 0, false },
+ 	{ "DMR clear RX ignores the transmit key", "cipher:ready", "rx:9991234,201,g", "nomarkbefore=Joe hides=Encrypted:", 0, false },
++#if CONFIG_TONE_SCAN
++	{ "11 tone search opens on FM", "down tone-search", "ok 6 up ok", "screen=tonescan shows=Search_CTCSS", 4, false },
++	{ "11 tone search shows the detected DCS code", "down tone-search ok 6 up ok", "down ok",
++	  "screen=tonescan shows=D023I", 2, false },
++#endif
+ 	{ "11 scan start (Tools > Scan)", "", "ok 6 1", "scanning=1", 3, false },
+ 	{ "11 extended RX appears in Tools", "extended-bands ok 6 up", "",
+ 	  "screen=tools shows=RX_past_bands shows=On", 3, false },
