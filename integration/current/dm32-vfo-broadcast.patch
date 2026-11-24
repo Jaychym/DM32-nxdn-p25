@@ -1,0 +1,284 @@
+diff --git a/boards/dm32/board.c b/boards/dm32/board.c
+index 1cd7f90..cad88a2 100644
+--- a/boards/dm32/board.c
++++ b/boards/dm32/board.c
+@@ -24,20 +24,24 @@
+ static bool rx_ext_on;
+ #endif
+ 
+-enum { LOW_NFM_BAND = 2 };
++enum {
++	LOW_NFM_BAND = 2,
++	BCAST_BAND = LOW_NFM_BAND + CONFIG_FM,
++	LOW_NFM_HI_HZ = 88000000,
++};
+ 
+ static const band_t bands[] = {
+ 	{ 136000000, 174000000, true },
+ 	{ 400000000, 480000000, true },
+-#if !CONFIG_BCAST_FM && CONFIG_FM
+-	[LOW_NFM_BAND] = { 66000000, 88000000, false },
++#if CONFIG_FM
++	[LOW_NFM_BAND] = { 66000000, LOW_NFM_HI_HZ, false },
++#endif
++#if CONFIG_BCAST_FM
++	[BCAST_BAND] = { CONFIG_FM ? LOW_NFM_HI_HZ + 1u : 65000000u, 108000000, false },
+ #endif
+ #if CONFIG_AM_RX
+ 	{ 108000000, 136000000, false },	// the air band, AM receive only (docs/spec/airband-and-broadcast.md 3)
+ #endif
+-#if CONFIG_BCAST_FM
+-	{ 65000000, 108000000, false },		// the broadcast band, on the RDA5807M (airband-and-broadcast.md 4)
+-#endif
+ #if CONFIG_RX_EXT
+ 	// Receive only past the rated bands, while the user turns it on: the FD6818 band table (hardware-dm32.md 8.3). Keep these last
+ 	{ 16000000, 65000000, false },
+@@ -92,7 +96,7 @@ const board_t board = {
+ 		(CONFIG_AM_RX ? CAP_AM_RX : 0) | (CONFIG_BCAST_FM ? CAP_BCAST_FM : 0),
+ 	.bands = bands,
+ 	.band_count = sizeof(bands) / sizeof(bands[0]),
+-#if !CONFIG_BCAST_FM && CONFIG_FM
++#if CONFIG_FM
+ 	.nfm_rx_band = &bands[LOW_NFM_BAND],
+ #endif
+ #if CONFIG_RX_EXT
+@@ -147,6 +151,7 @@ const board_t board = {
+ 	.chip_reg = dm32_chip_reg,
+ #if CONFIG_BCAST_FM
+ 	.bcast = &rda5807m_hal,
++	.bcast_rx_band = &bands[BCAST_BAND],
+ #endif
+ };
+ 
+diff --git a/boards/dm32/config.mk b/boards/dm32/config.mk
+index d240c7f..caeb42c 100644
+--- a/boards/dm32/config.mk
++++ b/boards/dm32/config.mk
+@@ -10,8 +10,6 @@
+ CONFIG_FONT_XL ?= y
+ CONFIG_UI_KAWAII ?= y
+ CONFIG_DMR_REPLAY ?= $(CONFIG_DMR)
+-# Use the channel receiver for low-band narrow FM in the default fork image.
+-CONFIG_BCAST_FM ?= n
+ # The default image omits the single-frequency repeater to save main RAM.
+ CONFIG_SFR ?= n
+ CONFIG_FONT_AA ?= y
+diff --git a/core/radio/radio_bcast.c b/core/radio/radio_bcast.c
+index 1cc239b..8cd55a0 100644
+--- a/core/radio/radio_bcast.c
++++ b/core/radio/radio_bcast.c
+@@ -11,13 +11,21 @@ bool radio_bcast_capable(void)
+ 	return CONFIG_BCAST_FM && (board.caps & CAP_BCAST_FM) != 0 && board.bcast != NULL;
+ }
+ 
++void radio_bcast_limits(uint32_t *lo, uint32_t *hi)
++{
++	const band_t *band = board.bcast_rx_band;
++	*lo = band ? band->lo_hz : board.bcast->lo_khz * 1000u;
++	*hi = band ? band->hi_hz : board.bcast->hi_khz * 1000u;
++}
++
+ bool radio_bcast_band(uint32_t hz)
+ {
+ 	if (!radio_bcast_capable() || board_nfm_rx_only(hz)) {
+ 		return false;
+ 	}
+-	uint32_t khz = hz / 1000u;
+-	return khz >= board.bcast->lo_khz && khz <= board.bcast->hi_khz;
++	uint32_t lo, hi;
++	radio_bcast_limits(&lo, &hi);
++	return hz >= lo && hz <= hi;
+ }
+ 
+ bool radio_bcast_channel(const channel_t *ch)
+diff --git a/core/radio/radio_bcast.h b/core/radio/radio_bcast.h
+index d077880..8072709 100644
+--- a/core/radio/radio_bcast.h
++++ b/core/radio/radio_bcast.h
+@@ -27,6 +27,8 @@
+ 
+ // This radio has a broadcast receiver the core may use (CAP_BCAST_FM and board.bcast)
+ bool radio_bcast_capable(void);
++// Inclusive broadcast allocation in Hz; call only on a broadcast-capable board.
++void radio_bcast_limits(uint32_t *lo, uint32_t *hi);
+ // hz is in the broadcast receiver's range on this radio (false when there is none)
+ bool radio_bcast_band(uint32_t hz);
+ // The channel (or the VFO's settings) is heard on the broadcast receiver: an FM channel in its range
+diff --git a/core/radio/radio_sm.c b/core/radio/radio_sm.c
+index 41e1e5e..cdc124e 100644
+--- a/core/radio/radio_sm.c
++++ b/core/radio/radio_sm.c
+@@ -4837,8 +4837,7 @@ static void scan_start(radio_sm_t *sm, uint8_t kind, uint32_t lo_hz, uint32_t hi
+ 			// The band the VFO is in
+ #if CONFIG_BCAST_FM
+ 			if (sm->view.bcast) {
+-				lo_hz = board.bcast->lo_khz * 1000u;
+-				hi_hz = board.bcast->hi_khz * 1000u;
++				radio_bcast_limits(&lo_hz, &hi_hz);
+ 			} else
+ #endif
+ 			for (uint8_t i = 0; i < board_band_count(); i++) {
+diff --git a/docs/spec/airband-and-broadcast.md b/docs/spec/airband-and-broadcast.md
+index d04cab8..d0cdbaf 100644
+--- a/docs/spec/airband-and-broadcast.md
++++ b/docs/spec/airband-and-broadcast.md
+@@ -10,7 +10,8 @@ in AM; one in the broadcast band plays on the broadcast receiver.
+ A board can designate an active RX-only frequency band for fixed 12.5 kHz FM. The VFO and stored channels use
+ the channel receiver there, with ordinary FM squelch and RX sub-audio. This profile takes precedence over AM or
+ digital channel tags and over the broadcast tuner. PTT is refused if either side of a channel is in the band.
+-The on-radio channel editor saves this profile as narrow FM, RX only.
++The on-radio channel editor saves this profile as narrow FM, RX only. A board may assign part of the tuner's
++range to broadcast FM. Both direct tuning and a full broadcast band scan use that allocation.
+ 
+ ## 1. Which radios
+ 
+diff --git a/docs/spec/hardware-dm32.md b/docs/spec/hardware-dm32.md
+index 1fb55a7..dce6b2d 100644
+--- a/docs/spec/hardware-dm32.md
++++ b/docs/spec/hardware-dm32.md
+@@ -755,8 +755,8 @@ Band select by frequency (f in 10 Hz units; first matching row wins):
+ Below 16 MHz nothing is written.
+ 
+ The fork's default image sends 66–88 MHz receive-only narrow FM through the FD6818 and the normal VHF front end.
+-The separate RDA5807M broadcast tuner is disabled in this build. The frequency table supports programming this
+-range, but low-band PLL lock and sensitivity have not been verified on either RF section.
++Above 88 MHz the RDA5807M receives broadcast FM until the air band starts at 108 MHz.
++Low-band PLL lock and sensitivity have not been verified on either RF section.
+ 
+ Reference trim ([radio-features.md](radio-features.md) 6.1): the modem's DC bias stays the factory's tune. RadioFoundry
+ programs the FD6818 at f x (1 + trim), in receive, FM transmit and every DMR burst; the next tune applies a new trim.
+@@ -1100,8 +1100,7 @@ works on noise_sq plus 17 (`fd6818_am_noise`): level 1 opens under 47, as the ch
+ 3 dB tighter; the factory rows are not read. The RSSI shown adds the gain the loop took off back. The RDA5807M runs
+ through the shared HR_C7000 glue (`platform/hrc7000/bcast_hrc.c`)
+ on PTA25 / PTA26 with no enable pin; its audio path turns the amplifier on and leaves the speaker source alone (B4).
+-The board table has an RX-only AM air band of 108–136 MHz. An explicit `CONFIG_BCAST_FM=y` build selects the
+-65–108 MHz broadcast range in place of the default 66–88 MHz narrow FM range.
++The board table has an RX-only AM air band of 108–136 MHz. The default build includes both the low-band FM receiver and the broadcast tuner.
+ 
+ **Where the gain loop settles.** Measured on a DM-32UV (rf A): a steady AM carrier from the SDR bench at four levels
+ 10 dB apart (30 dB in all) (on a 2 m frequency, which a bench build received as AM: same set-up and VHF path), 0x67 read over the
+diff --git a/docs/user/23-radios.md b/docs/user/23-radios.md
+index 9288af2..5134c6e 100644
+--- a/docs/user/23-radios.md
++++ b/docs/user/23-radios.md
+@@ -392,9 +392,9 @@ A 160 x 128 color screen, every row visible.
+ 
+ A handheld for 136-174 and 400-480 MHz with a keypad, left and right arrow keys, a channel knob and a color screen.
+ FM and DMR voice both ways, CTCSS and DCS, APRS, GPS data, the hotspot and the battery saver work on the radio.
+-The fork's default image replaces broadcast FM with experimental 66–88 MHz receive-only narrow FM, including both
+-endpoints. Tune it directly in the VFO or save a channel. The bandwidth is fixed at 12.5 kHz, and AM air-band
+-reception remains available. Low-band sensitivity and PLL lock still need measurements on the radio.
++The default image receives narrow FM from 66 through 88 MHz at 12.5 kHz bandwidth. Above 88 MHz it uses the
++broadcast tuner until air-band AM starts at 108 MHz. In the VFO, type **1 0 5 7**, then **OK**, for 105.7 MHz.
++These bands are receive only. Low-band sensitivity and PLL lock still need measurements on the radio.
+ As a [standalone SFR](14-hotspot.md#standalone-sfr) repeater it repeats calls on air 90 ms later and sends its CW ID; its repeated voice carries more bit errors than the original, though it plays.
+ Installing: [Moving from stock DM-32UV firmware](19-moving-from-stock-dm32.md).
+ 
+diff --git a/hal/board.h b/hal/board.h
+index bcc4111..7f64278 100644
+--- a/hal/board.h
++++ b/hal/board.h
+@@ -67,6 +67,8 @@ typedef struct {
+ 	uint8_t band_count;
+ 	// Optional fixed 12.5 kHz FM range. Points to an enabled RX-only entry in bands.
+ 	const band_t *nfm_rx_band;
++	// Optional board allocation inside the broadcast tuner's hardware range (an RX-only entry in bands).
++	const band_t *bcast_rx_band;
+ 	// Optional: the last rx_ext_count entries of bands are a receive-only range past the radio's rated bands, in force
+ 	// only while *rx_ext_on (Settings > Advanced, off by default; docs/spec/radio-features.md). Read the table through
+ 	// board_band_count(), and never set tx on these entries
+diff --git a/tests/host/radioListenBandsTest.c b/tests/host/radioListenBandsTest.c
+index 7083ab5..da601ae 100644
+--- a/tests/host/radioListenBandsTest.c
++++ b/tests/host/radioListenBandsTest.c
+@@ -162,7 +162,7 @@ static const band_t bands[] = {
+ 	{ 136000000, 174000000, true },
+ 	{ 400000000, 480000000, true },
+ 	{ 108000000, 136000000, false },
+-	{ 65000000, 108000000, false },
++	{ 88000001, 108000000, false },
+ 	{ 66000000, 88000000, false },
+ };
+ static const char *const power_names[] = { "L", "M", "H" };
+@@ -173,6 +173,7 @@ const board_t board = {
+ 	.bands = bands,
+ 	.band_count = sizeof(bands) / sizeof(bands[0]),
+ 	.nfm_rx_band = &bands[4],
++	.bcast_rx_band = &bands[3],
+ 	.bcast = &fake_bcast,
+ 	.power_count = 3,
+ 	.power_names = power_names,
+@@ -348,7 +349,8 @@ static void test_helpers(void)
+ 
+ 	// Broadcast: the receiver's range, FM channels only, TX refused there, its grid, the squelch scale and volume
+ 	CHECK(radio_bcast_capable());
+-	CHECK(radio_bcast_band(65000000) && radio_bcast_band(101100000) && radio_bcast_band(108000000));
++	CHECK(!radio_bcast_band(65000000) && !radio_bcast_band(88000000) && radio_bcast_band(88000010));
++	CHECK(radio_bcast_band(101100000) && radio_bcast_band(108000000));
+ 	CHECK(!radio_bcast_band(64990000) && !radio_bcast_band(108050000) && !radio_bcast_band(146520000));
+ 	ch = (channel_t){ .rx_hz = 101100000, .mode = RADIO_MODE_FM };
+ 	CHECK(radio_bcast_channel(&ch));
+@@ -640,13 +642,16 @@ static void test_bcast_step(void)
+ static void test_bcast_vfo(void)
+ {
+ 	start();
+-	req(RREQ_VFO_SET, 99900000);
++	req(RREQ_VFO_SET, 105700000);
+ 	run(50);
+-	CHECK(sm.view.vfo && sm.view.bcast && bc.khz == 99900);
++	CHECK(sm.view.vfo && sm.view.bcast && bc.khz == 105700);
++	ptt(true);
++	CHECK(sm.view.tx_deny == TXDENY_BCAST && hw.tx_calls == 0);
++	ptt(false);
+ 	CHECK(sm.view.vfo_step_hz == 200000);	// auto: the default 200 kHz in the broadcast band
+ 	req(RREQ_VFO_STEP, 1);
+ 	run(30);
+-	CHECK(sm.view.ch.rx_hz == 100100000 && bc.khz == 100100);
++	CHECK(sm.view.ch.rx_hz == 105900000 && bc.khz == 105900);
+ 	// A frequency typed in between the odd tenths is heard there; the knob takes it back to the odd ones
+ 	req(RREQ_VFO_SET, 90200000);
+ 	run(30);
+@@ -722,15 +727,15 @@ static void test_bcast_scan(void)
+ {
+ 	start();
+ 	req(RREQ_VFO_SET, 107900000);
+-	bc.sig_khz = 65100;
++	bc.sig_khz = 88100;
+ 	bc.rssi = 70;
+ 	bc.settle_ms = 2u * RADIO_POLL_MS;
+ 	req(RREQ_SCAN, RSCAN_TOGGLE);
+-	CHECK(sm.view.scan == SCAN_VFO && sm.view.bcast && bc.khz == 65100);
++	CHECK(sm.view.scan == SCAN_VFO && sm.view.bcast && bc.khz == 88100);
+ 	run(RADIO_POLL_MS);
+-	CHECK(sm.view.scan_phase == SCAN_PH_LISTEN && bc.khz == 65100 && !bc.audio);
++	CHECK(sm.view.scan_phase == SCAN_PH_LISTEN && bc.khz == 88100 && !bc.audio);
+ 	run(RADIO_POLL_MS);
+-	CHECK(sm.view.scan_phase == SCAN_PH_HOLD && sm.view.state == RS_RX && bc.audio && bc.khz == 65100);
++	CHECK(sm.view.scan_phase == SCAN_PH_HOLD && sm.view.state == RS_RX && bc.audio && bc.khz == 88100);
+ 	req(RREQ_SCAN, RSCAN_STOP);
+ 
+ 	// A manually entered off-grid frequency should not shift the scan's channel grid.
+@@ -748,7 +753,7 @@ static void test_bcast_scan(void)
+ 	int am_calls = hw.am_calls;
+ 	req(RREQ_VFO_SET, 107900000);
+ 	req(RREQ_SCAN, RSCAN_TOGGLE);
+-	CHECK(sm.view.scan == SCAN_VFO && sm.view.bcast && bc.khz == 65000);
++	CHECK(sm.view.scan == SCAN_VFO && sm.view.bcast && bc.khz == 88100);
+ 	CHECK(hw.am_calls == am_calls && hw.tx_calls == 0);
+ 	req(RREQ_SCAN, RSCAN_STOP);
+ 
+diff --git a/tests/host/uiFlowTest.c b/tests/host/uiFlowTest.c
+index 9dccc3e..2d0a3af 100644
+--- a/tests/host/uiFlowTest.c
++++ b/tests/host/uiFlowTest.c
+@@ -372,8 +372,8 @@ static const flow_t flows[] = {
+ 	{ "S FM broadcast step on a radio with the receiver", "bcast", "ok 7 3 down down down down", "shows=FM_broadcast_step",
+ 	  7, false },
+ 	{ "Broadcast FM with RX past bands off", "bcast ok 6 up", "", "shows=RX_past_bands shows=Off", 0, false },
+-	{ "Broadcast FM tunes with RX past bands off", "bcast ok 4 up ok", "0 8 8 1 ok",
+-	  "screen=home freq=88100000 mode=fm shows=Broadcast_FM", 5, false },
++	{ "Broadcast FM tunes with RX past bands off", "bcast ok 4 up ok", "1 0 5 7 ok",
++	  "screen=home freq=105700000 mode=fm shows=Broadcast_FM", 5, false },
+ 	{ "Broadcast FM needs a receiver", "ok 4 up ok", "0 8 8 1 ok", "freq=146520000 hides=Broadcast_FM", 5, false },
+ 	{ "Broadcast FM does not enable unrelated bands", "bcast ok 4 up ok", "2 2 2 ok", "freq=146520000", 4, false },
+ 	{ "Broadcast FM tunes with RX past bands on", "bcast ok 6 up ok long:back ok 4 up ok", "0 8 8 1 ok",
