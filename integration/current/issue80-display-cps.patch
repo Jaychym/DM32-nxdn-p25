@@ -596,7 +596,7 @@ index 08e81d7..ad70eaf 100644
  #endif
  #if CONFIG_NXDN
 diff --git a/tests/host/uiFlowTest.c b/tests/host/uiFlowTest.c
-index 6701b13..9a38dfb 100644
+index 6701b13..5cea317 100644
 --- a/tests/host/uiFlowTest.c
 +++ b/tests/host/uiFlowTest.c
 @@ -869,7 +869,7 @@ static const flow_t flows[] = {
@@ -613,7 +613,7 @@ index 6701b13..9a38dfb 100644
  	char err[240];
  	sim_reset(&sim_geoms[3], SIM_MAP_K);
 -	if (!sim_run("replaykey expect:shows=DMR_recording_is_off", err, sizeof err)) {
-+	if (!sim_run("replaykey expect:shows=Talk_&_listen:_Record_DMR", err, sizeof err)) {
++	if (!sim_run("replaykey expect:toast=Talk_&_listen:_Record_DMR expect:shows=Record", err, sizeof err)) {
  		printf("FAIL DMR recording off message: %s\n", err);
  		fails++;
  	}
