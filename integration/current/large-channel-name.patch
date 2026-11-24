@@ -1,0 +1,441 @@
+diff --git a/core/settings/settings.c b/core/settings/settings.c
+index d3e5242..f14138a 100644
+--- a/core/settings/settings.c
++++ b/core/settings/settings.c
+@@ -29,7 +29,7 @@ _Static_assert(SETTINGS_PAGES <= SETTINGS_PAGES_MAX, "settings_t outgrew its pag
+ _Static_assert(sizeof(settings_t) % 4 == 0, "settings_t has tail padding");
+ _Static_assert(offsetof(settings_t, dual_b) == SETTINGS_PAGE_BYTES, "page 1 starts at its first field");
+ _Static_assert(offsetof(settings_t, ref_trim_ppb) % 2 == 0, "ref_trim_ppb is aligned");
+-_Static_assert(sizeof(settings_t) == 412, "settings_t changed size: update docs/spec/settings-store.md 3 and this");
++_Static_assert(sizeof(settings_t) == 416, "settings_t changed size: update docs/spec/settings-store.md 3 and this");
+ 
+ static settings_t live;			// under the quick lock
+ static settings_t saved;		// what the newest record holds (or the defaults)
+diff --git a/core/settings/settings.h b/core/settings/settings.h
+index fe91ea1..cfbf611 100644
+--- a/core/settings/settings.h
++++ b/core/settings/settings.h
+@@ -254,6 +254,7 @@ typedef struct {
+ 	uint8_t classic_style;	// 1: RadioFoundry visual style, 0: this build's default
+ 	// Zone scan's independent empty-channel dwell, in 25 ms units (25-500 ms). 0 or the old 50 ms default = 25 ms now
+ 	uint8_t zone_scan_dwell_25ms;	// was reserved_vfo
++	uint8_t home_name_first;	// 1: emphasize the memory channel name in Pink Home
+ } settings_t;
+ 
+ // Pages: settings_t is stored as records of SETTINGS_PAGE_BYTES each (settings-store.md 2.1). Only the pages its size
+diff --git a/core/ui/lang/es.po b/core/ui/lang/es.po
+index 4d46920..d256c02 100644
+--- a/core/ui/lang/es.po
++++ b/core/ui/lang/es.po
+@@ -3777,6 +3777,11 @@ msgctxt "SET_LABEL_VISUAL_STYLE"
+ msgid "Visual style"
+ msgstr "Estilo visual"
+ 
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_LARGE_CHANNEL_NAME"
++msgid "Large channel name"
++msgstr "Nombre de canal grande"
++
+ #: core/ui/ui_menus.c
+ msgctxt "SET_LABEL_LANGUAGE"
+ msgid "Language"
+diff --git a/core/ui/lang/fr.po b/core/ui/lang/fr.po
+index 2354aa4..6d8a6fc 100644
+--- a/core/ui/lang/fr.po
++++ b/core/ui/lang/fr.po
+@@ -3777,6 +3777,11 @@ msgctxt "SET_LABEL_VISUAL_STYLE"
+ msgid "Visual style"
+ msgstr "Style visuel"
+ 
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_LARGE_CHANNEL_NAME"
++msgid "Large channel name"
++msgstr "Nom de canal agrandi"
++
+ #: core/ui/ui_menus.c
+ msgctxt "SET_LABEL_LANGUAGE"
+ msgid "Language"
+diff --git a/core/ui/lang/it.po b/core/ui/lang/it.po
+index 50275a9..6192756 100644
+--- a/core/ui/lang/it.po
++++ b/core/ui/lang/it.po
+@@ -3777,6 +3777,11 @@ msgctxt "SET_LABEL_VISUAL_STYLE"
+ msgid "Visual style"
+ msgstr "Stile visivo"
+ 
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_LARGE_CHANNEL_NAME"
++msgid "Large channel name"
++msgstr "Nome canale grande"
++
+ #: core/ui/ui_menus.c
+ msgctxt "SET_LABEL_LANGUAGE"
+ msgid "Language"
+diff --git a/core/ui/lang/zh.po b/core/ui/lang/zh.po
+index 92537b6..4a35e84 100644
+--- a/core/ui/lang/zh.po
++++ b/core/ui/lang/zh.po
+@@ -3779,6 +3779,11 @@ msgctxt "SET_LABEL_VISUAL_STYLE"
+ msgid "Visual style"
+ msgstr "界面风格"
+ 
++#: core/ui/ui_menus.c
++msgctxt "SET_LABEL_LARGE_CHANNEL_NAME"
++msgid "Large channel name"
++msgstr "大号信道名"
++
+ #: core/ui/ui_menus.c
+ msgctxt "SET_LABEL_LANGUAGE"
+ msgid "Language"
+diff --git a/core/ui/ui_app.c b/core/ui/ui_app.c
+index 41550f1..ad619c1 100644
+--- a/core/ui/ui_app.c
++++ b/core/ui/ui_app.c
+@@ -2144,7 +2144,7 @@ void ui_app_init(void)
+ 					  UI_SET_STRIP, UI_SET_VIBRATE, UI_SET_VOLUME, UI_SET_LANGUAGE,
+ 					  UI_SET_KNOB_WHEN_LOCKED,
+ #if CONFIG_UI_KAWAII
+-					  UI_SET_CLASSIC_STYLE,
++					  UI_SET_CLASSIC_STYLE, UI_SET_HOME_NAME_FIRST,
+ #endif
+ #if CONFIG_DUAL_WATCH
+ 					  UI_SET_DUAL_TALK_BACK,
+@@ -2277,6 +2277,9 @@ void ui_apply_setting(uint8_t id, int32_t v)
+ 	case UI_SET_CLASSIC_STYLE:
+ 		ui_classic_style_set(v != 0);
+ 		break;
++	case UI_SET_HOME_NAME_FIRST:
++		ui_home_name_first_set(v != 0);
++		break;
+ #endif
+ 	case UI_SET_THEME:
+ 		ui_theme_set((uint8_t)v);
+diff --git a/core/ui/ui_menus.c b/core/ui/ui_menus.c
+index 1715418..f743e7c 100644
+--- a/core/ui/ui_menus.c
++++ b/core/ui/ui_menus.c
+@@ -7287,6 +7287,7 @@ static const set_item_t s_display[] = {
+ #if CONFIG_UI_COLOR && CONFIG_UI_KAWAII
+ 	LIST(TRN(SET_LABEL_VISUAL_STYLE, "Visual style"), "classic default theme pink estilo", UI_SET_CLASSIC_STYLE,
+ 		v_style, n_style),
++	TOGGLE(TRN(SET_LABEL_LARGE_CHANNEL_NAME, "Large channel name"), "Home Pink frequency name", UI_SET_HOME_NAME_FIRST),
+ #endif
+ 	// Last, so the rows above keep their places; its search words are "language" in other languages, for a user who
+ 	// can't read the English
+@@ -7511,6 +7512,8 @@ static bool set_hidden(const set_item_t *s)
+ #if CONFIG_UI_KAWAII
+ 	if (s->type == ST_LIST && s->id == UI_SET_CLASSIC_STYLE)
+ 		return !ui_style_available();
++	if (s->type == ST_TOGGLE && s->id == UI_SET_HOME_NAME_FIRST)
++		return !ui_home_name_first_available();
+ #endif
+ #if CONFIG_KEY_ASSIGN
+ 	if (s->type != ST_ACTION && s->id >= UI_SET_KEY_FIRST && s->id <= UI_SET_KEY_LAST) {
+diff --git a/core/ui/ui_screens.c b/core/ui/ui_screens.c
+index 9193820..ce7f665 100644
+--- a/core/ui/ui_screens.c
++++ b/core/ui/ui_screens.c
+@@ -36,6 +36,7 @@ static bool ui_strip_fill;
+ #define ROSE_ACCENT RGB565(165, 41, 100)
+ 
+ static bool classic_style;
++static bool home_name_first;
+ 
+ bool ui_style_available(void)
+ {
+@@ -50,11 +51,21 @@ void ui_classic_style_set(bool on)
+ 	}
+ }
+ 
++void ui_home_name_first_set(bool on)
++{
++	home_name_first = on;
++}
++
+ static bool kawaii(void)
+ {
+ 	return !classic_style && ui_style_available();
+ }
+ 
++bool ui_home_name_first_available(void)
++{
++	return kawaii();
++}
++
+ static void kawaii_card(int x, int y, int w, int h, color_t c)
+ {
+ 	gfx_fill(x + 5, y, w - 10, h, c);
+@@ -1133,7 +1144,15 @@ static void draw_place(const radio_view_t *v, const ui_state_t *s)
+ 			if (v->temporary)
+ 				sb_str(&b, GLYPH_DOT);
+ 		}
+-		kawaii_center(L->small, L->channel_y + 4, buf, ui_col.fg);
++		bool name_first = home_name_first && !v->vfo && !s->entry;
++		const font_t *name_font = L->small;
++		if (name_first) {
++			if (gfx_text_width(L->large, buf) <= w - 16)
++				name_font = L->large;
++			else if (gfx_text_width(L->medium, buf) <= w - 16)
++				name_font = L->medium;
++		}
++		kawaii_center(name_font, L->channel_y + 4, buf, ui_col.fg);
+ 		sb_init(&b, buf, sizeof buf);
+ 		bool tx = v->state == RS_TX;
+ 		if (s->entry)
+@@ -1141,10 +1160,16 @@ static void draw_place(const radio_view_t *v, const ui_state_t *s)
+ 		else
+ 			sb_freq(&b, tx ? v->ch.tx_hz : v->ch.rx_hz);
+ 		const font_t *nf = gfx_text_width(L->large, buf) <= w - 16 ? L->large : L->medium;
+-		kawaii_center(nf, L->channel_y + 33, buf, s->entry ? ui_col.warn : tx ? ui_col.tx : ui_col.fg);
+-		kawaii_center(L->tiny, L->channel_y + 33 + nf->h, "MHz", ui_col.dim);
+-		kawaii_star(6, L->channel_y + 16, ui_col.priv);
+-		kawaii_heart(w - 13, L->channel_y + 16, ui_col.priv);
++		int freq_y = L->channel_y + 33, mark_y = L->channel_y + 16;
++		if (name_first) {
++			nf = name_font == L->small ? L->tiny : L->small;
++			freq_y = L->channel_y + 4 + name_font->h + 6;
++			mark_y = freq_y;
++		}
++		kawaii_center(nf, freq_y, buf, s->entry ? ui_col.warn : tx ? ui_col.tx : ui_col.fg);
++		kawaii_center(L->tiny, freq_y + nf->h, "MHz", ui_col.dim);
++		kawaii_star(6, mark_y, ui_col.priv);
++		kawaii_heart(w - 13, mark_y, ui_col.priv);
+ 		return;
+ 	}
+ #endif
+diff --git a/core/ui/ui_screens.h b/core/ui/ui_screens.h
+index a4b37bd..a539af4 100644
+--- a/core/ui/ui_screens.h
++++ b/core/ui/ui_screens.h
+@@ -193,6 +193,8 @@ void ui_theme_set(uint8_t theme);
+ #if CONFIG_UI_KAWAII
+ bool ui_style_available(void);
+ void ui_classic_style_set(bool on);
++bool ui_home_name_first_available(void);
++void ui_home_name_first_set(bool on);
+ #endif
+ // Color displays (Settings > Display): the highlight color (UI_ACCENT_*, ui_svc.h) for list and tile focus and Home's
+ // channel number, and whether the status strip is filled with it. Both re-apply the theme's colors
+diff --git a/core/ui/ui_svc.h b/core/ui/ui_svc.h
+index 52a4b1a..bc43fd9 100644
+--- a/core/ui/ui_svc.h
++++ b/core/ui/ui_svc.h
+@@ -444,6 +444,7 @@ typedef enum {
+ 	UI_SET_ZONE_SCAN_DWELL,
+ 	UI_SET_EMERGENCY_TONE,
+ 	UI_SET_CLASSIC_STYLE,	// use the RadioFoundry interface and boot artwork (CONFIG_UI_KAWAII)
++	UI_SET_HOME_NAME_FIRST,	// primary text on Pink Home (CONFIG_UI_KAWAII)
+ 	UI_SET_COUNT
+ } ui_setting_t;
+ 
+diff --git a/core/ui/ui_svc_storage.c b/core/ui/ui_svc_storage.c
+index cde94e6..2431152 100644
+--- a/core/ui/ui_svc_storage.c
++++ b/core/ui/ui_svc_storage.c
+@@ -278,6 +278,9 @@ int32_t ui_svc_setting_get(uint8_t id)
+ 	case UI_SET_CLASSIC_STYLE:
+ 		settings_read(&st);
+ 		return st.classic_style == 1;
++	case UI_SET_HOME_NAME_FIRST:
++		settings_read(&st);
++		return st.home_name_first == 1;
+ #endif
+ 	case UI_SET_THEME:
+ 		settings_read(&st);
+@@ -486,6 +489,11 @@ bool ui_svc_setting_set(uint8_t id, int32_t value)
+ 		st->classic_style = value != 0;
+ 		settings_end(hal_millis());
+ 		return true;
++	case UI_SET_HOME_NAME_FIRST:
++		st = settings_begin();
++		st->home_name_first = value != 0;
++		settings_end(hal_millis());
++		return true;
+ #endif
+ 	case UI_SET_THEME:
+ 	case UI_SET_ACCENT:
+diff --git a/docs/spec/settings-store.md b/docs/spec/settings-store.md
+index 4e78f1f..2b6a5fa 100644
+--- a/docs/spec/settings-store.md
++++ b/docs/spec/settings-store.md
+@@ -76,7 +76,7 @@ so with two pages a sector is erased once every 64 saves.
+ ### 2.1 Pages
+ 
+ `settings_t` is longer than one slot's payload, so it is stored as pages: page k holds bytes `236 * k` on.
+-`SETTINGS_PAGES` is the number its size needs (2 now, 412 bytes); the page field allows 16 (3776 bytes). Each page is
++`SETTINGS_PAGES` is the number its size needs (2 now, 416 bytes); the page field allows 16 (3776 bytes). Each page is
+ a record with its own length, so `settings_t` grows by appending fields, and a short page fills the fields it has.
+ 
+ | Rule | Why |
+@@ -171,7 +171,7 @@ callsign. The own DMR ID is always the codeplug's.
+ | VFO digital | Page 1, appended after `air_epoch`. Each VFO stores its NXDN rate, YSF deviation and AES key selection per protocol. Older records keep the existing mode and the default digital settings. |
+ | Tier III kill | Page 1, appended after `t3_stun`: `t3_kill`, bit 0 (`SETTINGS_T3_KILLED`) a kill taken ([dmr-trunking.md](dmr-trunking.md) 7.9): no DMR at all, in any build, until a factory reset clears it; bits 1-7 reserved (0). Then `air_epoch` (16 bits, was `reserved10[2]`): the start's number for the air modes' encryption ([air-encryption.md](air-encryption.md) 1), raised by one at every boot. 0 (an older record) = not killed |
+ | crash report | packed into spare bits, so an older record reads as off with no target: the mode (0 off, 1 ask, 2 send at once) in `accent` bits 4-5; the target's codeplug contact number (0 none, else 1..1024, 11 bits) bits 0-5 in `theme` bits 2-7 and bits 6-10 in `updown_home` bits 2-6. `theme` and `updown_home` keep their value in bits 0-1; read and write them through `settings_theme` / `settings_updown_home` and `settings_crash_*` (`settings.h`). Firmware from before reads a `theme` or `updown_home` with these bits as out of range: the dark theme and Up/Down = channel ([crash-log.md](crash-log.md) 5.2) |
+-| visual style | Page 1: `classic_style` uses the first byte reserved after the VFO digital settings. Zero uses the build's default style. One uses RadioFoundry styling and boot artwork. |
++| visual style | Page 1: `classic_style` uses the first byte reserved after the VFO digital settings. Zero uses the build's default style. One uses RadioFoundry styling and boot artwork. The appended byte `home_name_first` is 1 for a larger channel name on Pink Home, 0 for the default frequency emphasis. Older records read 0. |
+ 
+ All of these are still layout 1: they were appended before any firmware with the settings store shipped. Page 0
+ is full: its later fields went into reserved bytes where 0 already meant
+diff --git a/docs/spec/ui.md b/docs/spec/ui.md
+index fa16026..0b2aee4 100644
+--- a/docs/spec/ui.md
++++ b/docs/spec/ui.md
+@@ -86,7 +86,8 @@ Text is shortened with a middle ellipsis only as a last resort (P5 allows it for
+   DMR privacy. The transmit frequency appears for FM and in the VFO.
+ 
+ On DM-32UV builds with the Pink artwork, Settings > Display > Visual style selects Pink or RadioFoundry. It
+-applies to the interface and the boot artwork. Both styles display the saved boot text.
++applies to the interface and the boot artwork. Both styles display the saved boot text. Pink Home can draw the
++stored channel name in a larger font than the frequency while keeping all its rows.
+ 
+ `uiSim --ellipsis` (section 7) lists what is still shortened; `uiSim --layout` fails the build on a middle ellipsis
+ with ordinary content.
+diff --git a/docs/user/06-home-screen.md b/docs/user/06-home-screen.md
+index 2c4aa2b..e837d1d 100644
+--- a/docs/user/06-home-screen.md
++++ b/docs/user/06-home-screen.md
+@@ -104,6 +104,11 @@ once with the deny tone. On a busy channel there is no tone, and the call you ar
+ 
+ The low and critical battery levels also limit transmitting. See [Battery and power](16-battery-and-power.md).
+ 
++## Large channel name
++
++On the Pink visual style, turn on **Settings > Display > Large channel name** to make a stored channel’s name
++bigger than its frequency. The radio saves the setting and continues to show the frequency and the rest of Home.
++
+ ## Large text
+ 
+ **Settings > Display > Large text** shows only the status line, the channel name and the talk target, each as large as
+diff --git a/docs/user/17-settings.md b/docs/user/17-settings.md
+index 891c20e..fc756e7 100644
+--- a/docs/user/17-settings.md
++++ b/docs/user/17-settings.md
+@@ -59,6 +59,7 @@ Some settings are on the menu before the feature behind them exists, or don't ap
+ | Highlight color | Default, Red, Orange, Yellow, Teal, Light blue, Purple, Pink | Default | The color of the selected row or tile and of the channel number on Home. Not on radios with a monochrome screen | Works |
+ | Filled status bar | On, Off | On | Fills the top status line with the highlight color (light gray with Default, white in the high-contrast theme) and draws its text black. Not on radios with a monochrome screen | Works |
+ | Large text | On, Off | Off | Home shows only the status line, the channel and the talk target, large | Works |
++| Large channel name | On, Off | Off | On Pink Home, emphasizes a stored channel’s name and keeps the frequency visible | Works |
+ | Hint row | On, Off | On | The bottom line with key hints | Works |
+ | Talkgroup name first | On, Off | Off | Home's talk line reads "World TG 91" instead of "TG 91 World": on a small screen the name is what fits. A side key set to **TG name / number** switches it too. On radios with DMR | Works |
+ | Language | English, Español, Italiano | English, or the Radio language picked in the web installer | The language of the menus and messages. A factory reset goes back to that default. The list shows every language RadioFoundry has; one that isn't in your firmware is dimmed. Pick it when you install with the web flasher to get it ([Installing](02-installing.md)). Names, callsigns and the standard radio abbreviations (TG, CC, VFO) stay as they are | Works |
+diff --git a/tests/host/settingsTest.c b/tests/host/settingsTest.c
+index 6599b12..205dbb6 100644
+--- a/tests/host/settingsTest.c
++++ b/tests/host/settingsTest.c
+@@ -751,6 +751,7 @@ static void test_settings_pages(void)
+ 	w->dual_state = SETTINGS_DUAL_ON | SETTINGS_DUAL_B_SEL;
+ 	w->vfo2_rx_hz = 446006250u;
+ 	w->vfo2_talk = 0x80000000u | 9996543u;
++	w->home_name_first = 1;
+ 	settings_end(1);
+ 	CHECK(settings_flush());
+ 	boot();
+@@ -758,7 +759,7 @@ static void test_settings_pages(void)
+ 	settings_get_stats(&st);
+ 	CHECK(st.load == SETTINGS_LOADED && s.squelch == 6 && s.dual_b == 1026 &&
+ 	      s.dual_state == (SETTINGS_DUAL_ON | SETTINGS_DUAL_B_SEL) && s.vfo2_rx_hz == 446006250u &&
+-	      s.vfo2_talk == (0x80000000u | 9996543u));
++	      s.vfo2_talk == (0x80000000u | 9996543u) && s.home_name_first == 1);
+ 
+ 	// An older firmware saves page 0 only (seq 3, after this firmware's 1 and 2)
+ 	pl = s;
+@@ -777,6 +778,18 @@ static void test_settings_pages(void)
+ 	settings_get_stats(&st);
+ 	CHECK(st.load == SETTINGS_LOADED && st.seq == 5 && s.squelch == 2 && s.vfo2_rx_hz == 147000000u);
+ 
++	// A page 1 ending at the old size keeps the default Home layout.
++	settings_defaults(&pl);
++	sim_flash_create(FLASH_SIZE, &map);
++	pl.home_name_first = 1;
++	put_record(&map, 1, 0, 10, SETTINGS_LAYOUT | (1u << SETTINGS_PAGE_SHIFT),
++		   offsetof(settings_t, home_name_first) - SETTINGS_PAGE_BYTES, (const uint8_t *)&pl + SETTINGS_PAGE_BYTES,
++		   true, true);
++	put_record(&map, 1, 1, 11, SETTINGS_LAYOUT, SETTINGS_PAGE_BYTES, &pl, true, true);
++	boot();
++	settings_read(&s);
++	CHECK(s.home_name_first == 0);
++
+ 	// A page 1 newer than page 0 is not the set's
+ 	settings_defaults(&pl);
+ 	pl.squelch = 1;
+diff --git a/tests/host/sim/ui_sim.c b/tests/host/sim/ui_sim.c
+index cda3603..2bf6631 100644
+--- a/tests/host/sim/ui_sim.c
++++ b/tests/host/sim/ui_sim.c
+@@ -162,6 +162,14 @@ int sim_layout_issues(char out[][160], int max)
+ 	return n;
+ }
+ 
++int sim_text_height(const char *text)
++{
++	for (int i = 0; i < live_n; i++)
++		if (strcmp(live[i].s, text) == 0)
++			return live[i].y1 - live[i].y0;
++	return 0;
++}
++
+ void gfx_draw_trace(gfx_trace_kind_t kind, int x, int y, int w, int h, const int clip[4], const char *s)
+ {
+ 	int vw = gfx_width(), vh = gfx_height();
+diff --git a/tests/host/sim/ui_sim.h b/tests/host/sim/ui_sim.h
+index f365068..129546c 100644
+--- a/tests/host/sim/ui_sim.h
++++ b/tests/host/sim/ui_sim.h
+@@ -70,6 +70,7 @@ void sim_worst(bool on);
+ // two texts on top of each other, a box drawn over part of a text. Each problem is one line of text
+ #define SIM_LAYOUT_MAX	16
+ int sim_layout_issues(char out[][160], int max);
++int sim_text_height(const char *text);
+ 
+ // State for checks
+ typedef struct {
+diff --git a/tests/host/uiFlowTest.c b/tests/host/uiFlowTest.c
+index 25bb8c6..cdb239f 100644
+--- a/tests/host/uiFlowTest.c
++++ b/tests/host/uiFlowTest.c
+@@ -1998,11 +1998,45 @@ static int check_name_is_id(void)
+ 	return bad;
+ }
+ 
++#if CONFIG_UI_KAWAII
++static void home_name_layout_checks(void)
++{
++	static const char channel[] = "3 COUNTY DMR";
++	static const char frequency[] = "453.625";
++	char error[256], issues[1][160];
++	sim_reset(sim_geom_find("240x320i10x5"), SIM_MAP_K);
++	int name = sim_text_height(channel), freq = sim_text_height(frequency);
++	if (name == 0 || freq <= name ||
++	    !sim_run("ok 7 2 up up expect:shows=Large_channel_name ok long:back wait:2000", error, sizeof error)) {
++		printf("FAIL Pink Home layout selection (name %d, frequency %d)\n", name, freq);
++		fails++;
++		return;
++	}
++	for (int i = 0; i < 2; i++) {
++		name = sim_text_height(channel);
++		freq = sim_text_height(frequency);
++		int count = sim_layout_issues(issues, 1);
++		if (freq == 0 || name <= freq || count != 0) {
++			printf("FAIL Pink Home channel emphasis (name %d, frequency %d): %s\n", name, freq,
++			       count ? issues[0] : "expected the name to be larger");
++			fails++;
++			return;
++		}
++		if (i == 0 && !sim_run("reboot", error, sizeof error)) {
++			printf("FAIL Pink Home layout reboot: %s\n", error);
++			fails++;
++			return;
++		}
++	}
++}
++#endif
++
+ int main(void)
+ {
+ 	if (check_name_is_id() != 0)
+ 		return 1;
+ #if CONFIG_UI_KAWAII
++	home_name_layout_checks();
+ 	{
+ 		char err[256];
+ 		sim_reset(sim_geom_find("240x320i10x5"), SIM_MAP_K);

@@ -1,0 +1,30 @@
+diff --git a/core/ui/ui_dual.c b/core/ui/ui_dual.c
+index 7b3f3ca..69f53c1 100644
+--- a/core/ui/ui_dual.c
++++ b/core/ui/ui_dual.c
+@@ -1094,6 +1094,12 @@ __attribute__((noinline)) bool ui_dual_tick(const radio_view_t *v, uint32_t now)
+ 	if (!own) {
+ 		memset(r, 0, sizeof r);
+ 		uint8_t t = v->state == RS_RX ? tuned_pane(v) : UI_DUAL_NONE;
++#if CONFIG_DMR
++		// Sync and idle repeater traffic have no voice call identity and must not fill call history.
++		if (v->ch.mode == RADIO_MODE_DMR &&
++		    (v->dmr.state != RDMR_RX || (v->dmr.call.src == 0 && v->dmr.call.dst == 0)))
++			t = UI_DUAL_NONE;
++#endif
+ 		if (t != UI_DUAL_NONE) {
+ 			ui_dual_rx_t *x = &r[t];
+ 			x->active = x->heard = true;
+diff --git a/tests/host/uiFlowTest.c b/tests/host/uiFlowTest.c
+index 3029a9e..15bc091 100644
+--- a/tests/host/uiFlowTest.c
++++ b/tests/host/uiFlowTest.c
+@@ -328,6 +328,8 @@ static const flow_t flows[] = {
+ 	  7, false },
+ 	{ "11 dual watch talk back on", "", "ok 7 3 down down down down down down down down down ok", "shows=Dual_watch_talk_back", 13,
+ 	  false },
++	{ "11 dual watch: anonymous DMR sync does not become a call", TALK_BACK, "tune:b rx:0,0,g rxend wait:300",
++	  "dual=1 sel=A calls=0 hides=DMR_call", 0, false },
+ 	{ "11 dual watch talk back: a call on B", TALK_BACK, "tune:b call:9991234,91,g wait:4000", "dual=1 sel=B", 0,
+ 	  false },
+ 	{ "11 dual watch talk back: then back on A", TALK_BACK, "tune:b call:9991234,91,g wait:4000 wait:11000",

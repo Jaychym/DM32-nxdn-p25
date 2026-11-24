@@ -100,6 +100,12 @@ PATCHES = (
 	'dual-air-monitor.patch',
 	'dual-watch-dwell.patch',
 	'battery-voltage.patch',
+	'scan-carrier-and-persistence.patch',
+	'broadcast-fm-scan.patch',
+	'gps-position-format.patch',
+	'dual-dmr-idle-activity.patch',
+	'voice-privacy-indicators.patch',
+	'large-channel-name.patch',
 )
 
 

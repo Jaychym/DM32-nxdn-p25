@@ -1,0 +1,567 @@
+diff --git a/core/dmr/call/dmr_call.c b/core/dmr/call/dmr_call.c
+index f83d425..0b7ab31 100644
+--- a/core/dmr/call/dmr_call.c
++++ b/core/dmr/call/dmr_call.c
+@@ -616,6 +616,7 @@ static void rx_end(uint32_t now)
+ 	s.last_call_end_ms = now;
+ 	s.call_end_seen = true;
+ 	s.rx = RXC_NONE;
++	s.view.rx_decrypt = false;
+ 	s.have_index = false;
+ 	le_reset();
+ #if DMR_AES_ON
+@@ -667,6 +668,7 @@ static void rx_lc(const uint8_t lc[DMR_LC_BYTES], const dmr_burst_t *b, bool lat
+ 	s.last_rx_ms = now;
+ 	if (new_talker) {
+ 		dmr_ta_reset(&s.ta);
++		s.view.rx_decrypt = false;
+ 		s.view.caller.gps_valid = false;
+ 	}
+ 
+@@ -816,6 +818,14 @@ static void rx_le_sb(uint16_t info, uint32_t now)
+ }
+ #endif
+ 
++static void rx_decrypt(bool active)
++{
++	if (s.view.rx_decrypt != active) {
++		s.view.rx_decrypt = active;
++		s.dirty = true;
++	}
++}
++
+ static void rx_play(const dmr_burst_t *b, uint32_t now, uint32_t slot)
+ {
+ 	uint8_t i = b->voice_index % 6;
+@@ -865,6 +875,7 @@ static void rx_play(const dmr_burst_t *b, uint32_t now, uint32_t slot)
+ 	// No key, or a PI header: an MI-based scheme the static key hook can't undo (docs/spec/gotchas.md 6.4), unless it
+ 	// is AES-256 with our key (dmrAes.h)
+ 	if (enc && !aes && (!s.cfg.privacy || s.view.caller.pi_header)) {
++		rx_decrypt(false);
+ 		stats.rx_enc_dropped++;
+ 		TR_WHAT('e');
+ 		sink_lost(DMR_AMBE_FRAMES_PER_BURST);	// no key: never play the scrambled voice
+@@ -877,6 +888,7 @@ static void rx_play(const dmr_burst_t *b, uint32_t now, uint32_t slot)
+ #if DMR_AES_ON
+ 	// (no stream: the PI header named another key ID or algorithm, or too much of the call was lost)
+ 	if (aes && !dmrAesBurst(&s.aes, v, i, slot, dmr_ambe_silence)) {
++		rx_decrypt(false);
+ 		stats.rx_enc_dropped++;
+ 		TR_WHAT('e');
+ 		sink_lost(DMR_AMBE_FRAMES_PER_BURST);
+@@ -885,6 +897,7 @@ static void rx_play(const dmr_burst_t *b, uint32_t now, uint32_t slot)
+ #endif
+ 	if (enc && !aes)
+ 		s.cfg.privacy(v, i, false, s.cfg.privacy_ctx);
++	rx_decrypt(aes && s.sink && s.sink->frame);
+ 	stats.rx_voice_bursts++;
+ 	TR_WHAT('p');
+ 	if (s.sink && s.sink->frame)
+@@ -1155,11 +1168,14 @@ static void rx_pi_header(const dmr_burst_t *b, uint32_t now)
+ 		uint32_t mi;
+ 
+ 		if (dmrVoiceCipherPiParse(b->payload, s.cfg.cipher_alg, &kid, &mi) && kid == s.cfg.cipher_kid) {
+-			if (!s.aes.ready || mi != s.aes_pi_mi)
++			if (!s.aes.ready || mi != s.aes_pi_mi) {
++				rx_decrypt(false);
+ 				dmrVoiceCipherStart(&s.aes, s.cfg.cipher_alg, s.cfg.cipher_key, mi);
++			}
+ 			s.aes_pi_mi = mi;
+ 			s.aes_le = false;	// the stream is PI-seeded now, not late-entered
+ 		} else {
++			rx_decrypt(false);
+ 			dmrAesStop(&s.aes);
+ 			s.aes_pi_mi = 0;
+ 			s.aes_le = false;
+diff --git a/core/dmr/call/dmr_call.h b/core/dmr/call/dmr_call.h
+index 8b97e64..2ba1376 100644
+--- a/core/dmr/call/dmr_call.h
++++ b/core/dmr/call/dmr_call.h
+@@ -217,6 +217,7 @@ typedef struct {
+ 	uint8_t rx_ts;			// its timeslot, 0 = unknown (simplex without TDMA direct mode sync)
+ 	bool rmo;
+ 	bool repeater_up;		// RMO: outbound heard recently
++	bool rx_decrypt;		// the current cipher supplied a decrypted burst to the sink
+ 	int16_t rssi_dbm;		// last burst of the current / last call, 0 = unknown
+ 	dmr_caller_t caller;		// RX: the current call; TX: us -> target
+ 	uint32_t call_start_ms;
+diff --git a/core/radio/radio.h b/core/radio/radio.h
+index cf9135e..f830f99 100644
+--- a/core/radio/radio.h
++++ b/core/radio/radio.h
+@@ -154,6 +154,8 @@ typedef struct {
+ 	uint16_t gps_bearing;	// degrees from north, from us to the caller
+ } radio_dmr_call_t;
+ 
++enum { RDMR_PRIVACY_NONE, RDMR_PRIVACY_BASIC, RDMR_PRIVACY_CIPHER };
++
+ typedef struct {
+ 	bool active;		// the call stack runs (a DMR channel, not hotspot mode)
+ 	bool killed;		// a Tier III kill was taken: the stack never starts until a factory reset (settings t3_kill)
+@@ -171,7 +173,9 @@ typedef struct {
+ 	bool reply_active;
+ 	uint8_t reply_s;	// reply window seconds left
+ 	bool target_manual;	// a talk target chosen for now (contact, typed ID, call back), until the channel changes
+-	bool privacy;		// a privacy key is loaded: encrypted calls play, our calls go out encrypted
++	bool privacy;		// a voice privacy type is selected
++	uint8_t tx_privacy;	// RDMR_PRIVACY_*: the channel's voice path has a usable key
++	bool rx_decrypt;	// this call's cipher produced voice for the codec
+ 	bool alias_tx;		// our talker alias goes out on this channel
+ 	bool gps_tx_channel;	// the channel's codeplug setting asks for our position in its calls (CONFIG_DMR_GPS)
+ 	bool hear_all;		// every talkgroup on our slot: MONITOR held, or the hear all latch
+diff --git a/core/radio/radio_nxdn.c b/core/radio/radio_nxdn.c
+index ab97051..6d2f354 100644
+--- a/core/radio/radio_nxdn.c
++++ b/core/radio/radio_nxdn.c
+@@ -586,6 +586,9 @@ static void settings_view(radio_nxdn_view_t *n)
+ 		cfg_settings(&eng->cfg, &s);
+ 	n->rx_ran = s.rx_ran;
+ 	n->tx_ran = s.tx_ran;
++#if CONFIG_AIR_AES
++	n->tx_aes_ready = eng != NULL && eng->cfg.aes_tx && eng->cfg.aes_key != NULL;
++#endif
+ 	n->talk = s.tx_dst;
+ 	n->fit = (uint16_t)radio_nxdn_fit(s.rate9600);
+ 	n->trunk = eng != NULL ? (trunked ? trunk_mode : RADIO_NXDN_TRUNK_OFF) : set.trunk;
+diff --git a/core/radio/radio_nxdn.h b/core/radio/radio_nxdn.h
+index e824d92..9ba34c8 100644
+--- a/core/radio/radio_nxdn.h
++++ b/core/radio/radio_nxdn.h
+@@ -50,6 +50,7 @@ typedef struct {
+ typedef struct {
+ 	uint8_t flags;		// RADIO_NXDN_*
+ 	uint8_t tx;		// air_tx_state_t of the engine
++	bool tx_aes_ready;	// an active AES voice configuration has its key
+ 	uint8_t ran;		// the RAN of the call heard
+ 	uint8_t rx_ran;		// the settings' (0: any)
+ 	uint8_t tx_ran;
+diff --git a/core/radio/radio_p25.c b/core/radio/radio_p25.c
+index f1c21a6..8a896a7 100644
+--- a/core/radio/radio_p25.c
++++ b/core/radio/radio_p25.c
+@@ -816,6 +816,9 @@ static void settings_view(radio_p25_view_t *n)
+ 		cfg_settings(&mem->eng.cfg, &s);
+ 	n->rx_nac = s.rx_nac;
+ 	n->tx_nac = s.tx_nac;
++#if CONFIG_AIR_AES
++	n->tx_aes_ready = mem != NULL && mem->eng.cfg.aes_tx && mem->eng.cfg.aes_key != NULL;
++#endif
+ 	n->talk = s.tx_dst;
+ 	if (s.unit_call)
+ 		n->flags |= RADIO_P25_TALK_UNIT;
+diff --git a/core/radio/radio_p25.h b/core/radio/radio_p25.h
+index 61442a9..9f22156 100644
+--- a/core/radio/radio_p25.h
++++ b/core/radio/radio_p25.h
+@@ -62,6 +62,7 @@ enum {
+ typedef struct {
+ 	uint8_t flags;		// RADIO_P25_*
+ 	uint8_t tx;		// air_tx_state_t of the engine
++	bool tx_aes_ready;	// an active AES voice configuration has its key
+ 	uint16_t nac;
+ 	uint16_t rx_nac;	// the NAC received (the settings' rx_nac; 0xF7E: any)
+ 	uint8_t trunk;		// RADIO_P25_TRUNK_*
+diff --git a/core/radio/radio_sm.c b/core/radio/radio_sm.c
+index 0efb7e0..7ccd4e0 100644
+--- a/core/radio/radio_sm.c
++++ b/core/radio/radio_sm.c
+@@ -1735,6 +1735,8 @@ static void dmr_configure(radio_sm_t *sm)
+ 	find_name(sm, cfg.talk_target.id, !cfg.talk_target.private_call, sm->view.dmr.target_name);
+ 	sm->view.dmr.alias_tx = alias;
+ 	sm->view.dmr.privacy = privacy;
++	sm->view.dmr.tx_privacy = cfg.cipher_key != NULL ? RDMR_PRIVACY_CIPHER :
++		cfg.privacy != NULL ? RDMR_PRIVACY_BASIC : RDMR_PRIVACY_NONE;
+ }
+ 
+ // The VFO's talk target (typed, a contact): a setting of the VFO, kept with it, and in force from now on
+@@ -2116,6 +2118,7 @@ static void dmr_publish(radio_sm_t *sm, uint32_t now_ms)
+ 	default: d->state = RDMR_IDLE; break;
+ 	}
+ 	d->codec = sm->codec;
++	d->rx_decrypt = cv->rx_decrypt;
+ 	d->cc = cv->cc;
+ 	d->ts = cv->ts;
+ 	d->rx_cc = cv->rx_cc;
+diff --git a/core/ui/ui_screens.c b/core/ui/ui_screens.c
+index 9193820..c2f9440 100644
+--- a/core/ui/ui_screens.c
++++ b/core/ui/ui_screens.c
+@@ -12,6 +12,9 @@
+ #include "cjk_font.h"	// CJK_FONT_H: the line height a CJK language needs (CONFIG_LANG_ZH)
+ #include "config.h"
+ #include "codeplug/codeplug_modes.h"	// channel kinds: the mode word
++#if CONFIG_P25 || CONFIG_NXDN
++#include "air/air_session.h"
++#endif
+ #if CONFIG_DMR_TRUNK
+ #include "dmr/trunk/t3_ms.h"	// the engine's states, for the trunked status words
+ #endif
+@@ -435,6 +438,53 @@ static const char *mode_word(const radio_view_t *v)
+ 	return v->ch.mode == RADIO_MODE_FM && v->am ? "AM" : ui_mode_name(v->ch.mode);
+ }
+ 
++static int voice_lock_height(const font_t *f)
++{
++	return f->ascent > 7 ? f->ascent - 1 : 7;
++}
++
++static int voice_lock_width(const font_t *f)
++{
++	int h = voice_lock_height(f);
++	return h - h / 4 + f->w / 2;
++}
++
++static int draw_voice_lock(const font_t *f, int x, int y, color_t color)
++{
++	int h = voice_lock_height(f), w = h - h / 4;
++	int top = y + (f->h - h) / 2;
++
++	gfx_rect(x + 1, top, w - 2, h / 2 + 1, color);
++	gfx_fill(x, top + h / 2, w, h - h / 2, color);
++	return x + voice_lock_width(f);
++}
++
++static bool voice_lock_for_tx(const radio_view_t *v)
++{
++	if (v->ch.rx_only || v->aprs_tx)
++		return false;
++
++	switch (v->ch.mode) {
++#if CONFIG_DMR
++	case RADIO_MODE_DMR:
++		return v->dmr.active && v->dmr.codec && v->dmr.tx_privacy == RDMR_PRIVACY_CIPHER &&
++		       (v->state != RS_TX || v->dmr.state == RDMR_TX || v->dmr.state == RDMR_TX_ENDING);
++#endif
++#if CONFIG_P25
++	case RADIO_MODE_P25:
++		return (v->p25.flags & RADIO_P25_ON) && v->p25.tx_aes_ready &&
++		       (v->state != RS_TX || v->p25.tx == AIR_TX_ON || v->p25.tx == AIR_TX_ENDING);
++#endif
++#if CONFIG_NXDN
++	case RADIO_MODE_NXDN:
++		return (v->nxdn.flags & RADIO_NXDN_ON) && v->nxdn.tx_aes_ready &&
++		       (v->state != RS_TX || v->nxdn.tx == AIR_TX_ON || v->nxdn.tx == AIR_TX_ENDING);
++#endif
++	default:
++		return false;
++	}
++}
++
+ // Status strip (P2): state pill, mode, monitor, lock, unread messages, signal, battery.
+ // A titled screen (prefix and / or name) on a display under UI_TALL_PX high merges its title into the strip
+ // (wireframes 160x128 and 128x64): the pill shows only while not idle, the signal bars and the battery give way to the
+@@ -592,6 +642,12 @@ static int draw_top_as(const radio_view_t *v, radio_state_t st, const ui_state_t
+ 	if (v->aprs_tx)
+ 		mw = "FM";
+ 	int lx = gfx_text(f, x, ty, mw, sfg);
++	if (!titled && st == RS_IDLE && !v->hotspot
++#if CONFIG_DUAL_WATCH
++	    && !s->dual.on
++#endif
++	    && voice_lock_for_tx(v) && lx + f->w + voice_lock_width(f) <= rx)
++		lx = draw_voice_lock(f, lx + f->w / 2, ty, swarn);
+ #if CONFIG_DUAL_WATCH
+ 	if (s->dual.on && !v->aprs_tx && strip_fits(f, lx, rx, TR(TOP_CHIP_DUAL, "DUAL")))
+ 		lx = gfx_text(f, lx + f->w, ty, TR(TOP_CHIP_DUAL, "DUAL"), swarn);
+@@ -1084,22 +1140,28 @@ static void home_entry_text(const ui_state_t *s, char *buf, size_t len)
+ }
+ 
+ // One text line of the call screens, if it still fits above the hint row; returns the next y
+-static int call_line(const font_t *f, int y, const char *text, color_t c)
++static int call_line_marked(const font_t *f, int y, const char *text, color_t c, bool lock)
+ {
+ 	char fit[48];
+ 	if (y + f->h > ui_layout.hint_y)
+ 		return y;
+-	gfx_text_fit(f, text, gfx_width(), fit, sizeof fit);
++	int room = gfx_width() - (lock ? voice_lock_width(f) : 0), x = 0;
++	gfx_text_fit(f, text, room, fit, sizeof fit);
+ #if CONFIG_UI_KAWAII
+-	if (kawaii()) {
+-		gfx_text(f, (gfx_width() - gfx_text_width(f, fit)) / 2, y, fit, c);
+-		return y + f->h;
+-	}
++	if (kawaii())
++		x = (room - gfx_text_width(f, fit)) / 2;
+ #endif
+-	gfx_text(f, 0, y, fit, c);
++	if (lock)
++		x = draw_voice_lock(f, x, y, ui_col.priv);
++	gfx_text(f, x, y, fit, c);
+ 	return y + f->h;
+ }
+ 
++static int call_line(const font_t *f, int y, const char *text, color_t c)
++{
++	return call_line_marked(f, y, text, c, false);
++}
++
+ #if CONFIG_DMR
+ static void draw_talk_dmr(const radio_view_t *v, bool label_first);
+ static void draw_chips_dmr(const radio_view_t *v, const ui_state_t *s);
+@@ -2020,7 +2082,7 @@ static void draw_chips_dmr(const radio_view_t *v, const ui_state_t *s)
+ 	const char *dmon = TR(HOME_CHIP_DMON, "DMon"), *priv = TR(HOME_CHIP_PRIVACY, "Priv");
+ 	if ((v->dmr.hear_all || s->hear_all) && x + gfx_text_width(f, dmon) <= gfx_width())
+ 		x = gfx_text(f, x, L->chips_y, dmon, ui_col.warn) + f->w;	// digital monitor (FM's is "Mon")
+-	if ((s->privacy || v->dmr.privacy) && x + gfx_text_width(f, priv) <= gfx_width())
++	if (v->dmr.active && v->dmr.tx_privacy == RDMR_PRIVACY_BASIC && x + gfx_text_width(f, priv) <= gfx_width())
+ 		gfx_text(f, x, L->chips_y, priv, ui_col.priv);
+ }
+ 
+@@ -2113,7 +2175,8 @@ static void draw_dmr_call(const radio_view_t *v, const ui_state_t *s)
+ 		sb_str(&b, " ENC");	// privacy marker (played only with the key, never after a PI header)
+ 	if (d->call.emergency)
+ 		sb_str(&b, TR(CALL_CHIP_EMERGENCY, " EMERGENCY"));
+-	y = call_line(L->small, y, buf, d->call.emergency ? ui_col.warn : ui_col.dim);
++	y = call_line_marked(L->small, y, buf, d->call.emergency ? ui_col.warn : ui_col.dim,
++		d->state == RDMR_RX && d->codec && d->rx_decrypt);
+ 	if (d->alias[0] != '\0' && s->alias_show) {
+ 		// The talker alias in quotes, on two lines when it needs them and they fit above the signal line
+ 		char lines[2][64];
+@@ -2212,8 +2275,8 @@ static void air_call_line(const air_call_t *c, const font_t *f, int y)
+ 		gfx_text(f, 0, y, fit, ui_col.warn);
+ 		return;
+ 	}
+-	// Too wide: the caller's ID goes first, then the target is cut. An encrypted call that plays (we hold its key) says
+-	// so first: "AES ID 1234 > TG 1"
++	// Too wide: the caller's ID goes first, then the target is cut. Reserve the padlock for a call that plays.
++	int x = c->enc ? draw_voice_lock(f, 0, y, ui_col.priv) : 0, room = gfx_width() - x;
+ 	for (int with_id = c->src != 0; with_id >= 0; with_id--) {
+ 		sb_init(&b, buf, sizeof buf);
+ 		if (c->enc)
+@@ -2229,11 +2292,11 @@ static void air_call_line(const air_call_t *c, const font_t *f, int y)
+ 			sb_str(&b, "TG ");
+ 		}
+ 		sb_u32(&b, c->dst, 1);
+-		if (gfx_text_width(f, buf) <= gfx_width())
++		if (gfx_text_width(f, buf) <= room)
+ 			break;
+ 	}
+-	gfx_text_fit(f, buf, gfx_width(), fit, sizeof fit);
+-	gfx_text(f, 0, y, fit, ui_col.rx);
++	gfx_text_fit(f, buf, room, fit, sizeof fit);
++	gfx_text(f, x, y, fit, ui_col.rx);
+ }
+ #endif
+ 
+@@ -2602,7 +2665,7 @@ static void draw_tx(const radio_view_t *v, const ui_state_t *s)
+ 			sb_str(&b, TR(CALL_BODY_TO_GROUP, " Group"));
+ 		if (d->rmo)
+ 			sb_str(&b, " RPT");
+-		if (d->privacy)
++		if (voice_lock_for_tx(v))
+ 			sb_str(&b, " ENC");
+ 		break;
+ #endif
+@@ -2645,7 +2708,7 @@ static void draw_tx(const radio_view_t *v, const ui_state_t *s)
+ 	default: break;
+ 	}
+ 	if (buf[0])
+-		call_line(sm, y, buf, ui_col.fg);
++		call_line_marked(sm, y, buf, ui_col.fg, voice_lock_for_tx(v));
+ 	y += sm->h + gap;
+ 
+ 	sb_init(&b, buf, sizeof buf);
+diff --git a/docs/spec/air-encryption.md b/docs/spec/air-encryption.md
+index b16189a..d9f94f4 100644
+--- a/docs/spec/air-encryption.md
++++ b/docs/spec/air-encryption.md
+@@ -118,7 +118,8 @@ key length when the channel is tuned.
+ 
+ | Where | What |
+ |---|---|
+-| Call line | `AES ID 1234 > TG 1` for an encrypted call that plays; "Encrypted: not played" for one that does not |
++| Home and voice PTT | The padlock marks voice encryption with a key loaded. Home uses the current channel's transmit configuration. |
++| Call line | A padlock and `AES ID 1234 > TG 1` for an encrypted call that plays. Otherwise the call says "Encrypted: not played". |
+ | PTT | Refused ("refused") for a channel with AES on and no key in the keyring |
+ | Memory | 32 octets of key and a few of state while an air mode runs, in the memory it already uses (P25: the lent vocoder block); NXDN: 32 octets in its engine |
+ 
+diff --git a/docs/spec/dmr-voice.md b/docs/spec/dmr-voice.md
+index 31da026..9294a6b 100644
+--- a/docs/spec/dmr-voice.md
++++ b/docs/spec/dmr-voice.md
+@@ -214,6 +214,9 @@ is XORed onto the 49 AMBE+2 parameter bits of each frame by superframe position:
+ encoder's bits as they are), on RX before the voice sink (after the FEC decode, `core/dmr/ambe/ambeFec.c`). With a key
+ loaded our calls carry FID 0x10 and the privacy service option (0x40), and received calls with the privacy service
+ option (or PI) are descrambled. Without a key such bursts are never played; they count as `rx_enc_dropped`.
++The Home padlock requires a loaded AES-256 or Enhanced Privacy cipher key. It remains visible during voice PTT.
++The receive padlock appears after the cipher passes a decrypted burst to the voice decoder. Basic privacy keeps the
++`Priv` chip on Home.
+ 
+ The key is set over the debug link (RADIO op 19, `radio_req_dmr_privacy`). The radio core saves it in settings slot 1
+ and loads the active slot at boot (`settings-store.md` 3.1); the open-firmware codeplug has no key storage, so qdmr can't
+diff --git a/docs/user/09-dmr.md b/docs/user/09-dmr.md
+index d6d12fb..93e9fd8 100644
+--- a/docs/user/09-dmr.md
++++ b/docs/user/09-dmr.md
+@@ -288,8 +288,10 @@ radio on air yet.
+ - Calls with stronger encryption (they send a PI header) are played only with the key type AES-256, when the call's
+   key ID is yours and its key is in the codeplug. Others are never played.
+ - With AES-256 and its key missing from the codeplug, **PTT** is refused: the radio never sends in the clear instead.
+-- **\***, **6** turns privacy on for your calls ("Privacy on for now"). Home shows "Priv". **Back** on Home turns it
+-  off again.
++- **\***, **6** turns privacy on for your calls ("Privacy on for now"). **Back** on Home turns it off again.
++- Home and the transmit screen show a padlock when AES-256 or Enhanced Privacy is in use and its key is loaded.
++  A received call gets a padlock once the radio starts decoding its protected voice. Home shows **Priv** for basic
++  privacy.
+ 
+ To set the key on the radio, open **Settings > Privacy** (**OK**, **7**, **4**).
+ 
+diff --git a/tests/host/dmrCallTest.c b/tests/host/dmrCallTest.c
+index 789a841..854b860 100644
+--- a/tests/host/dmrCallTest.c
++++ b/tests/host/dmrCallTest.c
+@@ -3140,6 +3140,7 @@ static void test_cipher(uint8_t alg)
+ 			run_ms(60);
+ 		}
+ 		CHECK(V()->caller.encrypted && V()->caller.pi_header == (pass != 4));
++		CHECK(V()->rx_decrypt == (pass == 0 || ras));
+ 		if (pass == 0)
+ 			CHECK(sink_log.frames == nv * 3 && sink_log.losts == 0 && memcmp(sink_log.first, first, 9) == 0 &&
+ 			      memcmp(sink_log.last, last, 9) == 0);
+diff --git a/tests/host/radioCoreTest.c b/tests/host/radioCoreTest.c
+index eb89c06..c1c2262 100644
+--- a/tests/host/radioCoreTest.c
++++ b/tests/host/radioCoreTest.c
+@@ -1765,11 +1765,11 @@ static void test_dmr_channel_privacy(void)
+ 	};
+ 
+ 	setup_codeplug();
+-	channel_t source = chans[4];
++	channel_t channel = chans[4];
+ 	kv_t3_set(CODEPLUG_KEY_TRAFFIC, traffic, sizeof traffic);
+ 	for (unsigned i = 0; i < sizeof tests / sizeof tests[0]; i++) {
+ 		unsigned n = 1 + i;
+-		chans[n] = source;
++		chans[n] = channel;
+ 		chans[n].dmr_privacy = tests[i].type;
+ 		chans[n].dmr_privacy_key = tests[i].key;
+ 		used[n] = true;
+@@ -1781,6 +1781,9 @@ static void test_dmr_channel_privacy(void)
+ 		req(RREQ_ZONE_POS, (int32_t)i);
+ 		req(RREQ_DMR_HEAR_ALL, 1);
+ 		CHECK(sm.view.dmr.privacy == tests[i].privacy);
++		uint8_t tx_privacy = !tests[i].tx || !tests[i].privacy ? RDMR_PRIVACY_NONE :
++			tests[i].type == CP_DMR_PRIV_BASIC ? RDMR_PRIVACY_BASIC : RDMR_PRIVACY_CIPHER;
++		CHECK(sm.view.dmr.tx_privacy == tx_privacy);
+ 		unsigned first = sim.air_count;
+ 		req(RREQ_PTT, 1);
+ 		run(660);
+@@ -7464,6 +7467,7 @@ static void test_p25_aes(void)
+ 	req(RREQ_ZONE_POS, 2);
+ 	run(100);
+ 	CHECK(sm.view.channel_number == 3 && radio_p25_running());
++	CHECK(v->tx_aes_ready);
+ 	p25VoiceGetStats(&vs);
+ 	uint32_t heard = vs.rx_in;
+ 
+@@ -7499,6 +7503,7 @@ static void test_p25_aes(void)
+ 	far_begin(0x2A0, 1002, false, 201);
+ 	req(RREQ_PTT, 1);
+ 	CHECK(sm.view.state == RS_TX && hw.keyed);
++	CHECK(v->tx_aes_ready && v->tx == AIR_TX_ON);
+ 	run(1000);
+ 	req(RREQ_PTT, 0);
+ 	run(500);
+@@ -7521,6 +7526,7 @@ static void test_p25_aes(void)
+ 	run(100);
+ 	req(RREQ_PTT, 1);
+ 	CHECK(sm.view.state == RS_TX_DENIED && sm.view.tx_deny == TXDENY_REFUSED && !hw.keyed);
++	CHECK(!v->tx_aes_ready);
+ 	req(RREQ_PTT, 0);
+ 	run(100);
+ 	far_key = NULL;
+@@ -9101,6 +9107,7 @@ static void test_nxdn_aes(void)
+ 	req(RREQ_ZONE_POS, 2);
+ 	run(100);
+ 	CHECK(sm.view.channel_number == 3 && radio_nxdn_running());
++	CHECK(v->tx_aes_ready);
+ 
+ 	// A call encrypted with key id 9: played
+ 	nfar_key = key;
+@@ -9129,6 +9136,7 @@ static void test_nxdn_aes(void)
+ 	nfar_begin(true, 7, 2002, false, 20);
+ 	req(RREQ_PTT, 1);
+ 	CHECK(sm.view.state == RS_TX && hw.keyed);
++	CHECK(v->tx_aes_ready && v->tx == AIR_TX_ON);
+ 	run(1500);
+ 	req(RREQ_PTT, 0);
+ 	run(600);
+@@ -9151,6 +9159,7 @@ static void test_nxdn_aes(void)
+ 	run(100);
+ 	req(RREQ_PTT, 1);
+ 	CHECK(sm.view.state == RS_TX_DENIED && sm.view.tx_deny == TXDENY_REFUSED && !hw.keyed);
++	CHECK(!v->tx_aes_ready);
+ 	req(RREQ_PTT, 0);
+ 	run(100);
+ 	nfar_key = NULL;
+diff --git a/tests/host/sim/ui_sim.c b/tests/host/sim/ui_sim.c
+index cda3603..350dd94 100644
+--- a/tests/host/sim/ui_sim.c
++++ b/tests/host/sim/ui_sim.c
+@@ -2080,6 +2080,7 @@ bool ui_svc_hear_all(bool on)
+ bool ui_svc_privacy(bool on)
+ {
+ 	view.dmr.privacy = on && view.dmr.active;
++	view.dmr.tx_privacy = view.dmr.privacy ? RDMR_PRIVACY_BASIC : RDMR_PRIVACY_NONE;
+ 	changed();
+ 	return view.dmr.privacy == on;
+ }
+@@ -2902,20 +2903,23 @@ static bool check(const char *kv, char *err, size_t len)
+ 			}
+ 		}
+ 	}
+-	else if (strcmp(key, "markafter") == 0 || strcmp(key, "nomarkafter") == 0) {
+-		// A mark drawn (not a text) within a character cell right of the text that contains the value (an icon
+-		// beside a word), or none
++	else if (strcmp(key, "markafter") == 0 || strcmp(key, "nomarkafter") == 0 ||
++		 strcmp(key, "markbefore") == 0 || strcmp(key, "nomarkbefore") == 0) {
++		// Ink within one character cell next to the named text indicates a mark such as an icon.
+ 		bool mark = false;
++		bool before = strstr(key, "before") != NULL;
+ 		for (int i = 0; i < live_n; i++) {
+ 			if (strstr(live[i].s, want) == NULL || live[i].s[0] == 0)
+ 				continue;
+ 			int cw = (live[i].x1 - live[i].x0) / (int)strlen(live[i].s);
+ 			color_t paper = gfx_get_pixel(live[i].x0, live[i].y0);
++			int start = before ? live[i].x0 - cw : live[i].x1;
++			int end = start + cw;
+ 			for (int py = live[i].y0; py < live[i].y1; py++)
+-				for (int px = live[i].x1; px < live[i].x1 + cw && px < gfx_width(); px++)
++				for (int px = start > 0 ? start : 0; px < end && px < gfx_width(); px++)
+ 					mark |= gfx_get_pixel(px, py) != paper;
+ 		}
+-		snprintf(got, sizeof got, "%s", mark == (key[0] == 'm') ? want : mark ? "a mark after it" : "nothing after it");
++		snprintf(got, sizeof got, "%s", mark == (key[0] == 'm') ? want : mark ? "a mark next to it" : "nothing next to it");
+ 	}
+ 	else if (strcmp(key, "centered") == 0) {	// a text that contains the value, its middle within a cell of the screen's
+ 		snprintf(got, sizeof got, "not shown");
+@@ -3547,6 +3551,13 @@ static bool run_token(char *t, char *err, size_t len)
+ 		board.band_count = sizeof rx_only_bands / sizeof rx_only_bands[0];
+ 		return true;
+ 	}
++	if (strcmp(t, "cipher") == 0 && arg != NULL) {
++		view.dmr.privacy = true;
++		view.dmr.tx_privacy = strcmp(arg, "ready") == 0 ? RDMR_PRIVACY_CIPHER : RDMR_PRIVACY_NONE;
++		changed();
++		advance(100);
++		return true;
++	}
+ 	if (strcmp(t, "nobattery") == 0) {
+ 		board.caps |= CAP_NO_BATTERY;
+ 		advance(1100);
+diff --git a/tests/host/uiFlowTest.c b/tests/host/uiFlowTest.c
+index 25bb8c6..39994e5 100644
+--- a/tests/host/uiFlowTest.c
++++ b/tests/host/uiFlowTest.c
+@@ -233,6 +233,10 @@ static const flow_t flows[] = {
+ 	{ "9 power one step", "", "quick 1 back", "power=8 screen=home", 3, false },
+ 	{ "9 squelch 2 steps (FM)", "down", "quick 2 up up back", "sq=7 screen=home", 5, false },
+ 	{ "10 privacy", "", "quick 6 back", "privacy=1 screen=home", 3, false },
++	{ "Voice lock on Home with a cipher key", "cipher:ready", "", "markafter=DMR", 0, false },
++	{ "No voice lock with a missing cipher key", "cipher:missing", "", "nomarkafter=DMR hides=Priv", 0, false },
++	{ "Voice lock and ENC during a DMR over", "cipher:ready", "pttdown", "shows=ENC markbefore=TS1", 1, false },
++	{ "Basic privacy keeps its own text", "", "quick 6 back", "shows=Priv nomarkbefore=TS1", 3, false },
+ 	{ "11 scan start (Tools > Scan)", "", "ok 6 1", "scanning=1", 3, false },
+ 	{ "11 extended RX appears in Tools", "extended-bands ok 6 up", "",
+ 	  "screen=tools shows=RX_past_bands shows=On", 3, false },
