@@ -1,0 +1,75 @@
+diff --git a/core/air/air_softmodem.c b/core/air/air_softmodem.c
+--- a/core/air/air_softmodem.c
++++ b/core/air/air_softmodem.c
+@@ -25,9 +25,11 @@
+ #define LINE_LVL	16			// line units per symbol level at nominal: +3 is 48, headroom to 127
+ #define EMIT_AT		(LINE - 2 * SPS)	// a symbol leaves when its center is this far back
+ #define Q_NONE		0xFFFFu
+-// A fit's error: 256 x the mean square distance of the samples from the fitted line, in symbol levels. 92 is 0.6
+-// of a level RMS, where slicing already fails often: a sync worse than that gives no timing worth taking
++// A fit's error: 256 x the mean square distance of the samples from the fitted line, in symbol levels.
++// The normal limit is 0.6 levels RMS. Gaussian binary signals have two levels six units apart, so the fit can
++// tolerate more rounding from the discriminator without mistaking the sign of a symbol.
+ #define Q_MAX		92
++#define Q_MAX_BINARY_GAUSS	180
+ #define LVL_NOM		(LINE_LVL * 256)
+ #define LVL_MAX		(LVL_NOM * 3 / 2)
+ #define LVL_MIN_KNOWN	(LVL_NOM * 7 / 12)	// as the framer's limits
+@@ -38,7 +40,7 @@
+ #define HOLE_US		2000			// input time off by more: samples were lost
+ #define GAIN_MAX	(1u << 20)		// 16 line units per summed count
+ // The gate (filtered, below): the steps of four levels or more between a pattern's neighboring symbols, as bits.
+-// A fit with two of them missing (a step the wrong way, or none) is over Q_MAX whatever the rest does: the two cost
++// A fit with two of them missing (a step the wrong way, or none) is over Q_MAX for the normal fit limit: the two cost
+ // 10.7 levels squared at least, 256 x 10.7 / 24 symbols = 113. So a pattern is fitted only with one missing at most
+ // (of the 16 newest steps: what the state has room for; random samples pass a pattern with 8 large steps one time
+ // in 28, one with 11 one time in 170)
+@@ -156,8 +158,11 @@
+ 	m->step = step;
+ 	m->den = den;
+ 	// The integrate and dump over a symbol is the receive filter the C4FM pulse is made for, and close to a matched
+-	// one for a 2-level square pulse. A root raised cosine or Gaussian pulse gets a shorter one: it only smooths
+-	m->box = (p->shape == AIR_SHAPE_C4FM || p->shape == AIR_SHAPE_NRZ) ? SPS : 3;
++	// one for a 2-level square pulse. Smooth the root raised cosine pulse over three interpolated samples.
++	// The discriminator has already filtered a binary Gaussian pulse. Use its reconstructed samples directly
++	// to preserve the short transitions in the sync patterns.
++	m->box = (p->shape == AIR_SHAPE_C4FM || p->shape == AIR_SHAPE_NRZ) ? SPS :
++		 (p->levels == 2 && p->shape == AIR_SHAPE_GAUSS) ? 1 : 3;
+ 	m->gain_known = counts_per_khz != 0;
+ 	if (m->gain_known) {
+ 		// The outer symbol (dev_outer_hz) to 3 x LINE_LVL, after the sum over box samples
+@@ -426,6 +431,7 @@
+ 	unsigned at = m->line_at, ph = m->phase;
+ 	unsigned steps = ((unsigned)m->steps[ph] << 1 | (unsigned)(y > m->line[at >= SPS ? at - SPS : at + LINE - SPS])) & 0xFFFFu;
+ 	uint16_t q = Q_NONE;
++	uint16_t q_max = m->box == 1 ? Q_MAX_BINARY_GAUSS : Q_MAX;
+ 	uint8_t which = 0;
+ 	int16_t lvl = 0, off = 0;
+ 
+@@ -442,7 +448,7 @@
+ 	// near side is the sample before, fitted now if it was not then
+ 	if (!m->hold && (m->cand_q != Q_NONE || gate(m, steps))) {
+ 		q = search(m, 0, &which, &lvl, &off);
+-		if (!m->fitted && q <= Q_MAX) {
++		if (!m->fitted && q <= q_max) {
+ 			uint8_t w;
+ 			int16_t l, o;
+ 
+@@ -456,7 +462,7 @@
+ 		m->hold--;
+ 	} else if (m->cand_q != Q_NONE) {
+ 		// Climbing a peak: on while the error still falls, taken as soon as it rises
+-		if (q < m->cand_q) {	// (a candidate is Q_MAX or better)
++		if (q < m->cand_q) {	// (a candidate is within the fit limit)
+ 			m->cand_prev_q = m->cand_q;
+ 			m->cand_q = q;
+ 			m->cand_sync = which;
+@@ -465,7 +471,7 @@
+ 		} else {
+ 			commit(m, 1, q);
+ 		}
+-	} else if (q <= Q_MAX) {
++	} else if (q <= q_max) {
+ 		m->cand_prev_q = m->last_q;
+ 		m->cand_q = q;
+ 		m->cand_sync = which;

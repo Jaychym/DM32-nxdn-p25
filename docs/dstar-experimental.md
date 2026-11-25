@@ -53,7 +53,9 @@ also plays a modeled discriminator WAV into DSD-FME with `-fd` to check the
 callsigns and voice with an independent receiver.
 
 The receiver uses the 8 kHz discriminator stream and 4800-symbol/s binary
-profile. The DM-32UV transmits 4800 binary symbols/s through the HR_C7000's
+profile. Its sync fit uses the interpolated discriminator samples directly
+and allows for the rounded transitions of a filtered Gaussian signal.
+The DM-32UV transmits 4800 binary symbols/s through the HR_C7000's
 RRC pulse path with a nominal outer deviation of 1200 Hz. The provider marks
 this shape as approximate. Validate deviation, occupied bandwidth, RX/TX with
 another D-STAR radio, and the 20 ms audio cadence on a cabled bench before RF
@@ -67,4 +69,12 @@ cc -std=c11 -Wall -Wextra -Werror -Isrc/dstar -Ibuild/current/core \
     build/current/core/dmr/ambe/ambeFec.c tests/test_dstar_stream.c \
     -o /tmp/test-dm32-dstar-stream
 /tmp/test-dm32-dstar-stream
+
+# Exercise acquisition with a modeled GMSK discriminator signal.
+cc -std=c11 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections -Wl,--gc-sections \
+    -Isrc/dstar -Ibuild/current/core -Ibuild/current/hal \
+    src/dstar/dv_frame.c src/dstar/dv_stream.c src/dstar/dv_engine.c \
+    build/current/core/air/air_softmodem.c tests/test_dstar_gmsk.c \
+    -o /tmp/test-dm32-dstar-gmsk
+/tmp/test-dm32-dstar-gmsk
 ```

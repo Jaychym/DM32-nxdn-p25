@@ -184,6 +184,7 @@ def prepare(tree, dstar=False):
 		run('git', 'apply', '--binary', PATCH_DIR / 'dstar-channels.patch', cwd=tree)
 		run('git', 'apply', '--binary', PATCH_DIR / 'dstar-hotspot-routing.patch', cwd=tree)
 		run('git', 'apply', '--binary', PATCH_DIR / 'dstar-channel-editor.patch', cwd=tree)
+		run('git', 'apply', '--binary', PATCH_DIR / 'dstar-gmsk-rx.patch', cwd=tree)
 		shutil.copytree(ROOT / 'src/dstar', tree / 'core/dstar')
 	run('git', 'apply', '--binary', PATCH_DIR / 'rssi-graph.patch', cwd=tree)
 	run('git', 'submodule', 'update', '--init', '--depth=1', 'third_party/FreeRTOS-Kernel', cwd=tree)
