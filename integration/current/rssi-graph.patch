@@ -11,24 +11,20 @@ index 7c9de42..07cd13a 100644
  CONFIG_P25_DES ?= $(if $(and $(filter y,$(CONFIG_P25)),$(filter y,$(CONFIG_AIR_AES))),y,n)
  CONFIG_NXDN_SCRAMBLER ?= $(CONFIG_NXDN)
 diff --git a/config/features.mk b/config/features.mk
-index 76ac1bd..d8b61c8 100644
+index baa21f94..8942b779 100644
 --- a/config/features.mk
 +++ b/config/features.mk
-@@ -357,11 +357,13 @@ CONFIG_P25_TRUNK ?= $(CONFIG_P25)
- CONFIG_GPS_SKY ?= $(CONFIG_GPS)
- # WGS 84 UTM coordinates on the GPS Status page.
- CONFIG_GPS_UTM ?= $(CONFIG_GPS_SKY)
+@@ -382,6 +382,10 @@ $(error MDC1200 needs APRS_AFSK=y (the AFSK sender))
+ endif
+ endif
+ 
 +# Tools > RSSI graph: a time history for the tuned receive frequency.
 +CONFIG_RSSI_GRAPH ?= n
- 
- 
- FEATURES := USB_SERIAL_REQUEST FM SUBTONE TONE_SCAN DMR DMR_PRIVACY DMR_TALKER_ALIAS DMR_GPS DMR_SMS DMR_TMS DMR_ARS DMR_LRRP DMR_SIGNALING DMR_EMERGENCY DMR_ROAMING DMR_TRUNK DMR_TRUNK_TX DMR_TRUNK_SUPL DMR_TRUNK_GW VOICE_CAPTURE DMR_REPLAY DMR_IP_GATEWAY ZONE_SHARE DMR_UDP_COMPRESS NET_TCP NET_KISS NET_HTTP NET_HTTP_GZIP NET_WEBCTL NET_RIGCTL NET_APRSIS NET_USRP MDNS TFTP TFTP_IDDB IDDB_COMPACT DMR_CONTROL_STATION SNMP SFR SFR_DUALPATH_RX SFR_CWID TASK_STACKS \
- 	USB HOSTLINK USB_NETWORK NET_PPP HOTSPOT HOTSPOT_SPLIT DEBUGLINK CPS_OPENFW CPS_FAST VFO VFO_FM VFO_DMR DIAG BACKLIGHT_TEST FONT_XL FONT_AA FONT_BIG LANG_ES LANG_IT LANG_FR LANG_ZH LANG_DEFAULT_ES LANG_DEFAULT_IT LANG_DEFAULT_FR LANG_DEFAULT_ZH UI_COLOR UI_SETTINGS STARTUP_PIN SCAN DUAL_WATCH BEEP DIGITAL_RX_TRIM FM_TX_TONES DTMF \
--	RX_EXT RX_EXT_ON AIR_AES VOX REF_TRIM BATTERY_SAVE VIBRATE GPS AUDIO_PROBE STUB_ENTRY NAND_STORAGE CRASH_LOG CRASH_SCREEN CRASH_REPORT WATCHDOG FAULT_TRACE AM_RX BCAST_FM SPLASH_IMAGE APRS APRS_AFSK APRS_DMR APRS_RX APRS_IGATE GPS_SKY GPS_UTM KEY_ASSIGN CHANNEL_LIST CHANNEL_EDIT ZONE_EDIT CONTACT_EDIT VOLUME_BAR P25 P25_TRUNK P25_DES NXDN NXDN_SCRAMBLER YSF M17 DSTAR AIR_RAW UI_KAWAII MDC1200
-+	RX_EXT RX_EXT_ON AIR_AES VOX REF_TRIM BATTERY_SAVE VIBRATE GPS AUDIO_PROBE STUB_ENTRY NAND_STORAGE CRASH_LOG CRASH_SCREEN CRASH_REPORT WATCHDOG FAULT_TRACE AM_RX BCAST_FM SPLASH_IMAGE APRS APRS_AFSK APRS_DMR APRS_RX APRS_IGATE GPS_SKY GPS_UTM KEY_ASSIGN CHANNEL_LIST CHANNEL_EDIT ZONE_EDIT CONTACT_EDIT VOLUME_BAR P25 P25_TRUNK P25_DES NXDN NXDN_SCRAMBLER YSF M17 DSTAR AIR_RAW UI_KAWAII MDC1200 RSSI_GRAPH
- 
- # The panel's width in pixels: the display class the board's board.toml names (hardware.gallery = "160x128", the width
- # first). Empty when it names none, which counts as a narrow panel
++FEATURES += RSSI_GRAPH
++
+ # Dependencies
+ feature_on = $(filter y,$(CONFIG_$(1)))
+ ifneq ($(call feature_on,SUBTONE),)
 diff --git a/core/config.h b/core/config.h
 index 2859290..71a0a4b 100644
 --- a/core/config.h
@@ -616,10 +612,10 @@ index 6eb9919..7fb8a49 100644
 +Fixed keeps the same dBm scale while you rotate the antenna. Auto adjusts the scale to the levels in view.
 +Press **Back** to return to Tools. Gaps indicate periods without a current reading on the tuned frequency.
 diff --git a/tests/host/Makefile b/tests/host/Makefile
-index 31fdf39..86e4e5d 100644
+index 239f7d77..dad46dde 100644
 --- a/tests/host/Makefile
 +++ b/tests/host/Makefile
-@@ -472,7 +472,7 @@ RFTEST  := radioFeaturesTest.c $(CORE)/radio/radio_sm.c $(CORE)/codeplug/codeplu
+@@ -463,7 +463,7 @@ RFTEST  := radioFeaturesTest.c $(CORE)/radio/radio_sm.c $(CORE)/codeplug/codeplu
  # CONFIG_NET_USRP without the gateway: only the radio core's half (host audio PTT, the shared stream) is tested here;
  # the network half is usrpNetTest
  radioFeaturesTest: $(RFTEST) $(wildcard $(CORE)/radio/*.h) $(wildcard $(CORE)/dmr/call/*.h) $(wildcard $(CORE)/usbaudio/*.h)
@@ -628,7 +624,7 @@ index 31fdf39..86e4e5d 100644
  		-DCONFIG_NET_USRP=1 -o $@ $(RFTEST) -lm
  
  TESTS += radioFeaturesReplayTest
-@@ -787,7 +787,7 @@ i18nTestDefault: i18nTest.c $(I18N) $(LANG_H) $(wildcard $(CORE)/ui/*.h $(CORE)/
+@@ -778,7 +778,7 @@ i18nTestDefault: i18nTest.c $(I18N) $(LANG_H) $(wildcard $(CORE)/ui/*.h $(CORE)/
  # the long-press rules; uiSim renders screens to PNG (make ui-gallery: docs/ux/screens/, contact sheets in
  # docs/ux/screens/sheets/). Built without the __attribute__ override above so the weak service stubs
  # (ui_svc_stub.c) give way to the simulator's.
@@ -637,24 +633,15 @@ index 31fdf39..86e4e5d 100644
             $(CORE)/codeplug/codeplug_talk.c $(CORE)/codeplug/zone_edit.c $(CORE)/codeplug/zone_shift.c $(CORE)/radio/radio_am.c \
             $(CORE)/radio/radio_bcast.c sim/ui_sim.c sim/ui_png.c
  # The About page's data header, as the firmware build makes it (tools/gen_about.py; the STM32F4 list stands in)
-@@ -803,7 +803,7 @@ uiFlowTestReplay: uiFlowTest.c $(UIDEPS)
- 	$(CC) $(UIFLAGS) -DCONFIG_P25=1 -DCONFIG_P25_TRUNK=1 -DCONFIG_NXDN=1 -DCONFIG_YSF=1 -DCONFIG_DMR_REPLAY=1 -o $@ uiFlowTest.c $(UIAPP) -lz -lm
+@@ -813,6 +813,8 @@ uiFlowTestNoColor: uiFlowTest.c $(UIDEPS)
  
- uiFlowTest: uiFlowTest.c $(UIDEPS)
--	$(CC) $(UIFLAGS) -DCONFIG_P25=1 -DCONFIG_P25_TRUNK=1 -DCONFIG_NXDN=1 -DCONFIG_YSF=1 -o $@ uiFlowTest.c $(UIAPP) -lz -lm
-+	$(CC) $(UIFLAGS) -DCONFIG_P25=1 -DCONFIG_P25_TRUNK=1 -DCONFIG_NXDN=1 -DCONFIG_YSF=1 -DCONFIG_RSSI_GRAPH=1 -o $@ uiFlowTest.c $(UIAPP) -lz -lm
- 
- TESTS += uiFlowTestDstar
- uiFlowTestDstar: uiFlowTest.c $(UIDEPS) $(CORE)/dstar/dstar_codeplug.c $(CORE)/dstar/dstar_codeplug.h
-@@ -828,7 +828,7 @@ uiFlowTestNoColor: uiFlowTest.c $(UIDEPS)
+ # UI_LANG=<code> also builds that language in (CONFIG_LANG_<CODE>=1), so a gallery can render in a language that is
  # off by default: make -B uiSim UI_LANG=fr (docs/dev/translating.md). The CJK face compiles to nothing without Chinese
++uiFlowTest uiSim: UIFLAGS += -DCONFIG_RSSI_GRAPH=1
++
  UI_LANG_FLAG := $(if $(UI_LANG),-DCONFIG_LANG_$(shell echo '$(UI_LANG)' | tr a-z A-Z)=1)
  uiSim: uiSim.c $(UIDEPS) $(CJK)
--	$(CC) $(UIFLAGS) $(UI_LANG_FLAG) -o $@ uiSim.c $(UIAPP) $(CJK) -lz -lm
-+	$(CC) $(UIFLAGS) $(UI_LANG_FLAG) -DCONFIG_RSSI_GRAPH=1 -o $@ uiSim.c $(UIAPP) $(CJK) -lz -lm
- 
- # The beep reel (tools/beep_reel.py). BEEP_DIR picks the beep.c and beep.h to build with, so CI can build the base
- # commit's beeps for a before and after comparison. We copy that beep.h into out/beep/radio/ and put out/beep first on
+ 	$(CC) $(UIFLAGS) $(UI_LANG_FLAG) -o $@ uiSim.c $(UIAPP) $(CJK) -lz -lm
 diff --git a/tests/host/radioFeaturesTest.c b/tests/host/radioFeaturesTest.c
 index d365416..96bb7d0 100644
 --- a/tests/host/radioFeaturesTest.c
