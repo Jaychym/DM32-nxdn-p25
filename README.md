@@ -30,6 +30,13 @@ los cambios de esta rama en [`integration/current/base.patch`](integration/curre
 | YSF | System Fusion V/D-1, DN y VW |
 | D-STAR | DV simplex en el VFO y en memorias. Guardado verificado en software, con pruebas de RF pendientes |
 
+## Gráfica RSSI
+
+Abre **Menú → Herramientas → Gráfica RSSI** para ver la intensidad en dBm de la frecuencia sintonizada,
+incluso con el squelch cerrado. **Arriba/Abajo** cambia la ventana entre 2, 5, 10, 20 y 30 segundos.
+**OK** alterna entre escala fija (−150 a −30 dBm) y automática. La escala fija conserva la referencia
+al girar una antena direccional. Los huecos indican que faltó una lectura del receptor.
+
 ## Estado (24 de noviembre de 2026)
 
 La release instalable más reciente está en [Releases](../../releases); el flasher sincroniza la imagen publicada por CI. Las pruebas host no sustituyen una medición acústica o de RF.

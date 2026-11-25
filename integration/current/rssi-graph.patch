@@ -1,0 +1,826 @@
+diff --git a/boards/dm32/config.mk b/boards/dm32/config.mk
+index 7c9de42..07cd13a 100644
+--- a/boards/dm32/config.mk
++++ b/boards/dm32/config.mk
+@@ -30,6 +30,7 @@ CONFIG_VOX ?= n
+ CONFIG_DIGITAL_RX_TRIM ?= $(CONFIG_DMR)
+ # Extended reception is an explicit owner choice in Tools > RX past bands, never the default on a first start or reset
+ CONFIG_RX_EXT_ON ?= n
++CONFIG_RSSI_GRAPH ?= y
+ # Conventional P25 DES-OFB is available when both of its dependencies are enabled.
+ CONFIG_P25_DES ?= $(if $(and $(filter y,$(CONFIG_P25)),$(filter y,$(CONFIG_AIR_AES))),y,n)
+ CONFIG_NXDN_SCRAMBLER ?= $(CONFIG_NXDN)
+diff --git a/config/features.mk b/config/features.mk
+index baa21f94..8942b779 100644
+--- a/config/features.mk
++++ b/config/features.mk
+@@ -382,6 +382,10 @@ $(error MDC1200 needs APRS_AFSK=y (the AFSK sender))
+ endif
+ endif
+ 
++# Tools > RSSI graph: a time history for the tuned receive frequency.
++CONFIG_RSSI_GRAPH ?= n
++FEATURES += RSSI_GRAPH
++
+ # Dependencies
+ feature_on = $(filter y,$(CONFIG_$(1)))
+ ifneq ($(call feature_on,SUBTONE),)
+diff --git a/core/config.h b/core/config.h
+index 2859290..71a0a4b 100644
+--- a/core/config.h
++++ b/core/config.h
+@@ -391,6 +391,9 @@
+ #ifndef CONFIG_GPS_UTM
+ #define CONFIG_GPS_UTM			CONFIG_GPS_SKY
+ #endif
++#ifndef CONFIG_RSSI_GRAPH
++#define CONFIG_RSSI_GRAPH		0
++#endif
+ #ifndef CONFIG_NET_KISS
+ #define CONFIG_NET_KISS			(CONFIG_NET_TCP && CONFIG_APRS_AFSK)
+ #endif
+diff --git a/core/radio/radio.h b/core/radio/radio.h
+index 7270590..4f10959 100644
+--- a/core/radio/radio.h
++++ b/core/radio/radio.h
+@@ -426,6 +426,11 @@ typedef struct {
+ 	bool monitor;		// squelch held open by the user
+ 	bool tone_ok;		// the RX tone or code is heard (debounced; true when the channel has no RX tone)
+ 	int16_t rssi_dbm;
++#if CONFIG_RSSI_GRAPH
++	uint32_t rssi_sample_hz;	// zero when there is no sample for the tuned channel
++	uint32_t rssi_sample_ms;
++	int16_t rssi_sample_dbm;	// raw, before the display meter's hold and deadband
++#endif
+ 	uint8_t noise;
+ 	uint32_t tx_elapsed_ms;	// time in TX, while RS_TX
+ 	bool tx_auto;		// that TX is the radio's own, not the user's: a data list (ARS, an ACK), a roaming probe, an
+diff --git a/core/radio/radio_sm.c b/core/radio/radio_sm.c
+index 36f246c..1627d87 100644
+--- a/core/radio/radio_sm.c
++++ b/core/radio/radio_sm.c
+@@ -906,6 +906,9 @@ static void tone_scan_end(radio_sm_t *sm, uint8_t phase)
+ 
+ static void tune(radio_sm_t *sm, uint32_t now_ms)
+ {
++#if CONFIG_RSSI_GRAPH
++	sm->view.rssi_sample_hz = 0;
++#endif
+ #if CONFIG_DMR_REPLAY
+ 	ambeVoiceReplayRetune();
+ #endif
+@@ -9812,6 +9815,9 @@ static int16_t rssi_held(radio_sm_t *sm, int16_t rssi_dbm)
+ void radio_sm_poll(radio_sm_t *sm, uint32_t now_ms)
+ {
+ 	radio_status_t st;
++#if CONFIG_RSSI_GRAPH
++	sm->view.rssi_sample_hz = 0;
++#endif
+ 	sm->led_now = now_ms;
+ 	if (sm->led_timed || sm->deny_led || ptt_line_stuck()) {
+ 		outputs(sm);	// as in radio_sm_tick: some paths below return before their outputs()
+@@ -9905,6 +9911,13 @@ void radio_sm_poll(radio_sm_t *sm, uint32_t now_ms)
+ 		ambeVoiceReplayCancel();
+ #endif
+ 	sm->view.rssi_dbm = rssi_held(sm, st.rssi_dbm);
++#if CONFIG_RSSI_GRAPH
++	if (own_rx && !sm->hotspot && !sm->view.scan && sm->view.state != RS_TX && st.rssi_dbm < 0) {
++		sm->view.rssi_sample_hz = sm->view.ch.rx_hz;
++		sm->view.rssi_sample_ms = now_ms;
++		sm->view.rssi_sample_dbm = st.rssi_dbm;
++	}
++#endif
+ 	sm->view.noise = st.noise;
+ #if CONFIG_TONE_SCAN
+ 	if (tone_scan_active(sm)) {
+diff --git a/core/ui/lang/es.po b/core/ui/lang/es.po
+index 8f270f4..d7f2362 100644
+--- a/core/ui/lang/es.po
++++ b/core/ui/lang/es.po
+@@ -3622,6 +3622,11 @@ msgctxt "TONE_SCAN_TITLE"
+ msgid "Tone search"
+ msgstr "Buscar tono"
+ 
++#: core/ui/ui_menus.c core/ui/ui_rssi.c
++msgctxt "RSSI_GRAPH_TITLE"
++msgid "RSSI graph"
++msgstr "Gráfica RSSI"
++
+ #: core/ui/ui_menus.c
+ msgctxt "WORD_DUAL_WATCH"
+ msgid "Dual watch"
+@@ -4712,6 +4717,11 @@ msgctxt "POS_TOAST_RANGE"
+ msgid "Up to 90 N/S, 180 E/W"
+ msgstr "Hasta 90 N/S, 180 E/W"
+ 
++#: core/ui/ui_rssi.c
++msgctxt "RSSI_GRAPH_HINT"
++msgid "Up/Down Time  OK Scale"
++msgstr "Arr/Ab Tiempo  OK Escala"
++
+ #: core/ui/ui_screens.c
+ msgctxt "TOP_STATE_IDLE"
+ msgid "IDLE"
+diff --git a/core/ui/lang/fr.po b/core/ui/lang/fr.po
+index 1d1dd2a..7ea8543 100644
+--- a/core/ui/lang/fr.po
++++ b/core/ui/lang/fr.po
+@@ -3622,6 +3622,11 @@ msgctxt "TONE_SCAN_TITLE"
+ msgid "Tone search"
+ msgstr "Recherche de tonalité"
+ 
++#: core/ui/ui_menus.c core/ui/ui_rssi.c
++msgctxt "RSSI_GRAPH_TITLE"
++msgid "RSSI graph"
++msgstr "Courbe RSSI"
++
+ #: core/ui/ui_menus.c
+ msgctxt "WORD_DUAL_WATCH"
+ msgid "Dual watch"
+@@ -4712,6 +4717,11 @@ msgctxt "POS_TOAST_RANGE"
+ msgid "Up to 90 N/S, 180 E/W"
+ msgstr "Max 90 N/S, 180 E/O"
+ 
++#: core/ui/ui_rssi.c
++msgctxt "RSSI_GRAPH_HINT"
++msgid "Up/Down Time  OK Scale"
++msgstr "Haut/Bas Temps  OK Échelle"
++
+ #: core/ui/ui_screens.c
+ msgctxt "TOP_STATE_IDLE"
+ msgid "IDLE"
+diff --git a/core/ui/lang/it.po b/core/ui/lang/it.po
+index 966b5e7..1135690 100644
+--- a/core/ui/lang/it.po
++++ b/core/ui/lang/it.po
+@@ -3622,6 +3622,11 @@ msgctxt "TONE_SCAN_TITLE"
+ msgid "Tone search"
+ msgstr "Cerca tono"
+ 
++#: core/ui/ui_menus.c core/ui/ui_rssi.c
++msgctxt "RSSI_GRAPH_TITLE"
++msgid "RSSI graph"
++msgstr "Grafico RSSI"
++
+ #: core/ui/ui_menus.c
+ msgctxt "WORD_DUAL_WATCH"
+ msgid "Dual watch"
+@@ -4712,6 +4717,11 @@ msgctxt "POS_TOAST_RANGE"
+ msgid "Up to 90 N/S, 180 E/W"
+ msgstr "Fino a 90 N/S, 180 E/O"
+ 
++#: core/ui/ui_rssi.c
++msgctxt "RSSI_GRAPH_HINT"
++msgid "Up/Down Time  OK Scale"
++msgstr "Su/Giù Tempo  OK Scala"
++
+ #: core/ui/ui_screens.c
+ msgctxt "TOP_STATE_IDLE"
+ msgid "IDLE"
+diff --git a/core/ui/lang/zh.po b/core/ui/lang/zh.po
+index 9ab76c9..e267501 100644
+--- a/core/ui/lang/zh.po
++++ b/core/ui/lang/zh.po
+@@ -3624,6 +3624,11 @@ msgctxt "TONE_SCAN_TITLE"
+ msgid "Tone search"
+ msgstr "搜索亚音"
+ 
++#: core/ui/ui_menus.c core/ui/ui_rssi.c
++msgctxt "RSSI_GRAPH_TITLE"
++msgid "RSSI graph"
++msgstr "RSSI 信号"
++
+ #: core/ui/ui_menus.c
+ msgctxt "WORD_DUAL_WATCH"
+ msgid "Dual watch"
+@@ -4714,6 +4719,11 @@ msgctxt "POS_TOAST_RANGE"
+ msgid "Up to 90 N/S, 180 E/W"
+ msgstr "北南 90，东西 180"
+ 
++#: core/ui/ui_rssi.c
++msgctxt "RSSI_GRAPH_HINT"
++msgid "Up/Down Time  OK Scale"
++msgstr "上下 时间  OK 范围"
++
+ #: core/ui/ui_screens.c
+ msgctxt "TOP_STATE_IDLE"
+ msgid "IDLE"
+diff --git a/core/ui/ui.c b/core/ui/ui.c
+index d9660e3..ac7d619 100644
+--- a/core/ui/ui.c
++++ b/core/ui/ui.c
+@@ -74,7 +74,9 @@ static uint8_t backlight_target(uint32_t now)
+ 		return 0;	// soft off: the failed switch-off woke the light (input_inject_wake); keep it dark until a key wakes it
+ 	uint32_t idle = input_idle_ms();
+ 	uint32_t since_radio = now - radio_active_ms;
+-	if (since_radio < idle)
++	if (ui_app_rssi_graph_open())
++		idle = 0;
++	else if (since_radio < idle)
+ 		idle = since_radio;
+ 	// Dim and off times from the radio's settings (Display > Backlight Dim/Off), dimmer on a low battery
+ 	return radio_backlight_pct(ui_app_brightness(), idle);
+@@ -171,7 +173,8 @@ static void ui_task(void *arg)
+ 		}
+ 		now = hal_millis();
+ 		s = radio_view_serial();
+-		if (s != serial) {	// and after it: what the key changed shows in this pass
++		// The graph takes the latest sample even when the home meter did not change.
++		if (s != serial || ui_app_rssi_graph_open()) {
+ 			serial = s;
+ 			radio_get_view(&view);
+ 		}
+diff --git a/core/ui/ui_app.c b/core/ui/ui_app.c
+index de6f471..85aa518 100644
+--- a/core/ui/ui_app.c
++++ b/core/ui/ui_app.c
+@@ -2152,6 +2152,9 @@ static bool roams_known;
+ 
+ void ui_app_init(void)
+ {
++#if CONFIG_RSSI_GRAPH
++	ui_rssi_reset();
++#endif
+ #if CONFIG_DMR_ROAMING
+ 	roams_known = false;
+ #endif
+@@ -2238,6 +2241,13 @@ bool ui_app_power_off_due(void) { return power_off_due; }
+ 
+ bool ui_app_soft_off(void) { return soft_off; }
+ 
++#if CONFIG_RSSI_GRAPH
++bool ui_app_rssi_graph_open(void)
++{
++	return !soft_off && stack[sp].scr == SCR_RSSI_GRAPH && !view->hotspot;
++}
++#endif
++
+ // Soft off (UI_EV_POWER_OFF_FAILED: the latch dropped but the knob keeps the supply): the screen goes black, the
+ // receiver and the GPS module sleep, and the first key wakes it. The waking key does nothing else, so a key that
+ // wakes the radio never acts (and the core also refuses PTT and monitor while asleep)
+@@ -2755,6 +2765,10 @@ bool ui_app_tick(const radio_view_t *v, uint32_t now_ms)
+ #endif
+ 	now = now_ms;
+ 	ui_st.now_ms = now_ms;
++#if CONFIG_RSSI_GRAPH
++	if (ui_app_rssi_graph_open())
++		ui_rssi_tick(v, now_ms);
++#endif
+ 	if (soft_off && view->hotspot)
+ 		soft_off_exit();	// the host started hotspot mode: wake, the receiver has to work
+ #if CONFIG_VOLUME_BAR
+diff --git a/core/ui/ui_app.h b/core/ui/ui_app.h
+index 5797b7f..71ba1b5 100644
+--- a/core/ui/ui_app.h
++++ b/core/ui/ui_app.h
+@@ -34,6 +34,11 @@ bool ui_app_power_off_due(void);
+ // Soft off: auto power off couldn't switch the radio off (the knob holds the supply), so the radio went quiet
+ // instead — black screen, receiver asleep, any key wakes it. The UI task's backlight stays off while it holds
+ bool ui_app_soft_off(void);
++#if CONFIG_RSSI_GRAPH
++bool ui_app_rssi_graph_open(void);
++#else
++static inline bool ui_app_rssi_graph_open(void) { return false; }
++#endif
+ 
+ // For the debug link and the simulator: what is on screen
+ typedef struct {
+diff --git a/core/ui/ui_menus.c b/core/ui/ui_menus.c
+index ff9f613..1ec87e7 100644
+--- a/core/ui/ui_menus.c
++++ b/core/ui/ui_menus.c
+@@ -7032,7 +7032,7 @@ void ui_crash_tick(uint32_t now_ms)
+ // Every tool keeps its number on every radio and build, so a key path (OK 6 7: Diagnostics; tests/hil/test_ui.py and the
+ // user guide) is the same everywhere. Numbers 3, 4 and 5 are reserved in this firmware.
+ enum { T_SCAN, T_POSITION, T_HOTSPOT, T_USB_NET, T_SFR, T_ROAM, T_DIAG, T_APRS, T_BATTERY, T_ZONE_OFFER,
+-       T_ZONE_SCAN, T_RX_EXT, T_VFO_SCAN_LOW, T_VFO_SCAN_HIGH, T_TONE_SCAN, T_COUNT };
++       T_ZONE_SCAN, T_RX_EXT, T_VFO_SCAN_LOW, T_VFO_SCAN_HIGH, T_TONE_SCAN, T_RSSI_GRAPH, T_COUNT };
+ 
+ // Defined with the generic settings groups below; appended to Tools so every existing tool keeps its number
+ #if CONFIG_SCAN && CONFIG_UI_SETTINGS
+@@ -7045,6 +7045,8 @@ static bool tool_shown(uint16_t i)
+ {
+ 	if (i == T_HOTSPOT || i == T_USB_NET || i == T_SFR)
+ 		return false;
++	if (i == T_RSSI_GRAPH)
++		return CONFIG_RSSI_GRAPH;
+ 	if (i == T_TONE_SCAN)
+ 		return CONFIG_TONE_SCAN && board.radio != NULL && board.radio->rx_tone_test != NULL;
+ #if CONFIG_ZONE_SHARE
+@@ -7106,7 +7108,7 @@ static void tools_item(uint16_t row, ui_item_t *it)
+ 		TRN(TOOLS_ROW_ZONE_SCAN_SPEED, "Zone scan speed"),
+ 		TRN(SET_LABEL_RX_PAST_BANDS, "RX past bands"),
+ 		TRN(TOOLS_ROW_SCAN_LOW, "Scan low"), TRN(TOOLS_ROW_SCAN_HIGH, "Scan high"),
+-		TRN(TONE_SCAN_TITLE, "Tone search") };
++		TRN(TONE_SCAN_TITLE, "Tone search"), TRN(RSSI_GRAPH_TITLE, "RSSI graph") };
+ 	uint16_t i = tools_row(row);
+ 	if (i >= T_COUNT)
+ 		return;
+@@ -7254,6 +7256,9 @@ static void tools_select(uint16_t row, bool hold)
+ 	}
+ #endif
+ 	case T_POSITION: ui_push(CONFIG_GPS_SKY ? SCR_GPS : SCR_INFO, INFO_POSITION); break;
++#if CONFIG_RSSI_GRAPH
++	case T_RSSI_GRAPH: ui_push(SCR_RSSI_GRAPH, 0); break;
++#endif
+ 	case T_HOTSPOT: ui_push(SCR_INFO, INFO_HOTSPOT); break;
+ 	case T_USB_NET: ui_push(SCR_INFO, INFO_USB_NET); break;
+ 	case T_SFR: ui_push(SCR_INFO, INFO_SFR); break;
+@@ -8888,6 +8893,9 @@ const ui_scr_def_t *const ui_scr[SCR_COUNT] = {
+ #endif
+ #if CONFIG_GPS_SKY
+ 	[SCR_GPS] = &ui_gps_screen,
++#if CONFIG_RSSI_GRAPH
++	[SCR_RSSI_GRAPH] = &ui_rssi_graph_screen,
++#endif
+ #endif
+ #if CONFIG_CRASH_SCREEN
+ 	[SCR_CRASH] = &crash_screen,
+diff --git a/core/ui/ui_nav.h b/core/ui/ui_nav.h
+index a1b7e5e..9be6f52 100644
+--- a/core/ui/ui_nav.h
++++ b/core/ui/ui_nav.h
+@@ -52,6 +52,9 @@ typedef enum {
+ #endif
+ #if CONFIG_TONE_SCAN
+ 	SCR_TONE_SCAN,
++#endif
++#if CONFIG_RSSI_GRAPH
++	SCR_RSSI_GRAPH,
+ #endif
+ 	SCR_COUNT
+ } ui_scr_t;
+@@ -127,6 +130,11 @@ extern ui_state_t ui_st;
+ extern ui_target_t ui_target;		// the target of SCR_ACTIONS / SCR_COMPOSE
+ 
+ const radio_view_t *ui_view(void);
++#if CONFIG_RSSI_GRAPH
++extern const ui_scr_def_t ui_rssi_graph_screen;
++void ui_rssi_reset(void);
++void ui_rssi_tick(const radio_view_t *v, uint32_t now_ms);
++#endif
+ ui_frame_t *ui_frame(void);
+ uint8_t ui_depth(void);
+ #if CONFIG_STARTUP_PIN
+diff --git a/core/ui/ui_rssi.c b/core/ui/ui_rssi.c
+new file mode 100644
+index 0000000..87d72a1
+--- /dev/null
++++ b/core/ui/ui_rssi.c
+@@ -0,0 +1,210 @@
++// SPDX-License-Identifier: MIT
++// Copyright (c) 2026 The RadioFoundry Authors
++// Copyright (c) 2026 lyra XE1POC
++#include "config.h"
++#if CONFIG_RSSI_GRAPH
++#include "ui_nav.h"
++#include "fmt.h"
++
++#define SAMPLE_MS 100u
++#define MAX_SECONDS 30u
++#define HISTORY_SIZE (MAX_SECONDS * 1000u / SAMPLE_MS + 1u)
++#define FIXED_LO (-150)
++#define FIXED_HI (-30)
++#define RSSI_OFFSET 160
++
++static const uint8_t seconds[] = { 2, 5, 10, 20, MAX_SECONDS };
++static uint8_t window;
++static bool auto_scale;
++static uint8_t history[HISTORY_SIZE]; // dBm + RSSI_OFFSET, or zero for a missing sample
++static uint16_t next, count;
++static uint32_t frequency, last_ms;
++
++static void append(uint8_t sample)
++{
++	history[next] = sample;
++	next = (uint16_t)((next + 1u) % HISTORY_SIZE);
++	if (count < HISTORY_SIZE)
++		count++;
++}
++
++static uint8_t sample_at(unsigned age)
++{
++	return history[(next + HISTORY_SIZE - 1u - age) % HISTORY_SIZE];
++}
++
++void ui_rssi_tick(const radio_view_t *v, uint32_t now_ms)
++{
++	if (frequency != v->ch.rx_hz) {
++		frequency = v->ch.rx_hz;
++		count = next = 0;
++	}
++	unsigned elapsed = count ? (now_ms - last_ms) / SAMPLE_MS : 1u;
++	if (elapsed == 0)
++		return;
++
++	last_ms = count ? last_ms + elapsed * SAMPLE_MS : now_ms;
++	if (elapsed >= HISTORY_SIZE) {
++		count = next = 0;
++	} else {
++		for (unsigned n = 1; n < elapsed; n++)
++			append(0);
++	}
++
++	uint8_t sample = 0;
++	if (frequency && v->rssi_sample_hz == frequency && now_ms - v->rssi_sample_ms < SAMPLE_MS &&
++	    v->state != RS_TX && !v->rx_sleeping && !v->scan && v->rssi_sample_dbm < 0) {
++		int encoded = v->rssi_sample_dbm + RSSI_OFFSET;
++		sample = encoded > 0 ? (uint8_t)encoded : 1u;
++	}
++	append(sample);
++	ui_dirty();
++}
++
++static void scale_range(unsigned visible, int *lo, int *hi)
++{
++	*lo = FIXED_LO;
++	*hi = FIXED_HI;
++	if (!auto_scale)
++		return;
++
++	uint8_t weakest = 255, strongest = 0;
++	for (unsigned age = 0; age < visible; age++) {
++		uint8_t s = sample_at(age);
++		if (!s)
++			continue;
++		if (s < weakest)
++			weakest = s;
++		if (s > strongest)
++			strongest = s;
++	}
++	if (!strongest)
++		return;
++
++	// Snap to 10 dB, with headroom and at least a 20 dB span.
++	*lo = ((int)weakest - 1) / 10 * 10 - RSSI_OFFSET;
++	*hi = ((int)strongest / 10 + 1) * 10 - RSSI_OFFSET;
++	if (*hi - *lo < 20)
++		*lo = *hi - 20;
++}
++
++static void draw_value(const font_t *font, int x, int y, int value, color_t color)
++{
++	char text[8];
++	sbuf_t b;
++	sb_init(&b, text, sizeof text);
++	sb_i32(&b, value);
++	gfx_text(font, x, y, text, color);
++}
++
++static void graph_draw(void)
++{
++	const radio_view_t *v = ui_view();
++	const font_t *font = ui_layout.small;
++	const font_t *tick = ui_layout.tiny;
++	const char *scale = auto_scale ? TR(VALUE_AUTO, "Auto") : TR(POS_VALUE_FIXED, "Fixed");
++	char text[24];
++	sbuf_t b;
++	sb_init(&b, text, sizeof text);
++	sb_u32(&b, seconds[window], 1);
++	sb_str(&b, " s ");
++	sb_str(&b, scale);
++	gfx_clear(ui_col.bg);
++	int y = ui_draw_top(v, &ui_st, TR(RSSI_GRAPH_TITLE, "RSSI graph"), text) + 2;
++
++	sb_init(&b, text, sizeof text);
++	sb_freq(&b, v->ch.rx_hz);
++	gfx_text(font, 0, y, text, ui_col.fg);
++
++	sb_init(&b, text, sizeof text);
++	uint8_t current = count ? sample_at(0) : 0;
++	if (current)
++		sb_i32(&b, (int)current - RSSI_OFFSET);
++	else
++		sb_str(&b, "--");
++	sb_str(&b, " dBm");
++	int w = gfx_width();
++	gfx_text(font, w - gfx_text_width(font, text), y, text, ui_col.fg);
++
++	unsigned span = seconds[window] * 1000u / SAMPLE_MS;
++	unsigned visible = count < span + 1u ? count : span + 1u;
++	int lo, hi;
++	scale_range(visible, &lo, &hi);
++	int left = gfx_text_width(tick, "-160") + 3, right = w - 1;
++	int top = y + font->h + 4, bottom = ui_layout.hint_y - tick->h - 3;
++	if (bottom > top && right > left) {
++		int mid = (top + bottom) / 2;
++		gfx_hline(left, top, right - left + 1, ui_col.line);
++		gfx_hline(left, mid, right - left + 1, ui_col.line);
++		gfx_hline(left, bottom, right - left + 1, ui_col.line);
++		gfx_vline(left, top, bottom - top + 1, ui_col.line);
++		draw_value(tick, 0, top, hi, ui_col.dim);
++		draw_value(tick, 0, mid - tick->h / 2, (lo + hi) / 2, ui_col.dim);
++		draw_value(tick, 0, bottom - tick->h, lo, ui_col.dim);
++
++		int last_x = -1, last_y = 0;
++		for (unsigned age = visible; age-- > 0;) {
++			uint8_t s = sample_at(age);
++			if (!s) {
++				last_x = -1;
++				continue;
++			}
++			int x = right - (int)(age * (unsigned)(right - left) / span);
++			int dbm = (int)s - RSSI_OFFSET;
++			int plot_y = dbm < lo ? bottom : dbm > hi ? top : top + (hi - dbm) * (bottom - top) / (hi - lo);
++			if (last_x < 0) {
++				gfx_pixel(x, plot_y, ui_col.rx);
++			} else {
++				gfx_hline(last_x, last_y, x - last_x + 1, ui_col.rx);
++				int first = plot_y < last_y ? plot_y : last_y;
++				int last = plot_y > last_y ? plot_y : last_y;
++				gfx_vline(x, first, last - first + 1, ui_col.rx);
++			}
++			last_x = x;
++			last_y = plot_y;
++		}
++		sb_init(&b, text, sizeof text);
++		sb_chr(&b, '-');
++		sb_u32(&b, seconds[window], 1);
++		sb_str(&b, " s");
++		gfx_text(tick, left, bottom + 1, text, ui_col.dim);
++		gfx_text(tick, w - gfx_text_width(tick, "0 s"), bottom + 1, "0 s", ui_col.dim);
++	}
++	ui_draw_bottom(&ui_st, TR(RSSI_GRAPH_HINT, "Up/Down Time  OK Scale"));
++	ui_draw_banner(&ui_st);
++}
++
++static bool graph_key(const input_event_t *ev)
++{
++	if (ev->gesture == GESTURE_PRESS && ev->action == ACT_SELECT) {
++		auto_scale = !auto_scale;
++	} else if ((ev->gesture == GESTURE_PRESS || ev->gesture == GESTURE_REPEAT) &&
++	           (ev->action == ACT_NAV_UP || ev->action == ACT_NAV_DOWN)) {
++		if (ev->action == ACT_NAV_UP && window + 1u < sizeof seconds)
++			window++;
++		else if (ev->action == ACT_NAV_DOWN && window)
++			window--;
++	} else {
++		return false;
++	}
++	ui_dirty();
++	return true;
++}
++
++static void graph_enter(void)
++{
++	next = count = 0;
++}
++
++void ui_rssi_reset(void)
++{
++	window = 1;
++	auto_scale = false;
++	graph_enter();
++}
++
++const ui_scr_def_t ui_rssi_graph_screen = {
++	.name = "rssi-graph", .flags = SF_FIELD, .prefix = TRN(RSSI_GRAPH_TITLE, "RSSI graph"),
++	.draw = graph_draw, .key = graph_key, .enter = graph_enter,
++};
++#endif
+diff --git a/docs/spec/ui.md b/docs/spec/ui.md
+index 6aca1e0..980ac52 100644
+--- a/docs/spec/ui.md
++++ b/docs/spec/ui.md
+@@ -170,6 +170,12 @@ including during a zone scan; VFO scan and dual watch keep their own dwell ([rad
+ This group is appended after the Settings groups but is not duplicated in Settings or Find, so every existing
+ Settings and Tools position keeps its number.
+ 
++**Tools > RSSI graph** (`CONFIG_RSSI_GRAPH`) displays the raw RSSI of the tuned channel in dBm, even with the
++squelch closed. The radio publishes its latest receive sample with the tuned frequency and timestamp. The UI stores
++one point per 100 ms while the graph is visible and leaves gaps during TX, receiver sleep, scanning or stale readings.
++A retune to another frequency clears the trace. The graph uses a fixed −150 to −30 dBm range or an automatic range
++based on the visible history. The backlight uses its active brightness while the graph is visible.
++
+ ### 2.1 Channel editor
+ 
+ The Channel screen edits a working copy of the channel. Nothing is written until the user saves.
+diff --git a/docs/user/06-home-screen.md b/docs/user/06-home-screen.md
+index 6eb9919..7fb8a49 100644
+--- a/docs/user/06-home-screen.md
++++ b/docs/user/06-home-screen.md
+@@ -123,3 +123,11 @@ bigger than its frequency. The radio saves the setting and continues to show the
+ it fits. The radio keeps this setting across power off. It keeps **Settings > Display > Hint row** too.
+ 
+ <img src="../ux/screens/160x120i5/home_large_text.png" width="200" alt="Home in large text">
++
++
++## RSSI graph
++
++Open **Tools > RSSI graph** to see the receive level over time in dBm. Press **Up** or **Down** to select
++a window of 2, 5, 10, 20, or 30 seconds. Press **OK** to switch between **Fixed** and **Auto**.
++Fixed keeps the same dBm scale while you rotate the antenna. Auto adjusts the scale to the levels in view.
++Press **Back** to return to Tools. Gaps indicate periods without a current reading on the tuned frequency.
+diff --git a/tests/host/Makefile b/tests/host/Makefile
+index 239f7d77..dad46dde 100644
+--- a/tests/host/Makefile
++++ b/tests/host/Makefile
+@@ -463,7 +463,7 @@ RFTEST  := radioFeaturesTest.c $(CORE)/radio/radio_sm.c $(CORE)/codeplug/codeplu
+ # CONFIG_NET_USRP without the gateway: only the radio core's half (host audio PTT, the shared stream) is tested here;
+ # the network half is usrpNetTest
+ radioFeaturesTest: $(RFTEST) $(wildcard $(CORE)/radio/*.h) $(wildcard $(CORE)/dmr/call/*.h) $(wildcard $(CORE)/usbaudio/*.h)
+-	$(CC) $(CFLAGS) $(CORE_HAL) -I. -DDMR_RX_TRACE=0 -DCONFIG_DMR_IP_GATEWAY=0 -DCONFIG_HOTSPOT=0 -DCONFIG_APRS=0 \
++	$(CC) $(CFLAGS) $(CORE_HAL) -DCONFIG_RSSI_GRAPH=1 -I. -DDMR_RX_TRACE=0 -DCONFIG_DMR_IP_GATEWAY=0 -DCONFIG_HOTSPOT=0 -DCONFIG_APRS=0 \
+ 		-DCONFIG_NET_USRP=1 -o $@ $(RFTEST) -lm
+ 
+ TESTS += radioFeaturesReplayTest
+@@ -778,7 +778,7 @@ i18nTestDefault: i18nTest.c $(I18N) $(LANG_H) $(wildcard $(CORE)/ui/*.h $(CORE)/
+ # the long-press rules; uiSim renders screens to PNG (make ui-gallery: docs/ux/screens/, contact sheets in
+ # docs/ux/screens/sheets/). Built without the __attribute__ override above so the weak service stubs
+ # (ui_svc_stub.c) give way to the simulator's.
+-UIAPP   := $(UI) $(CORE)/ui/ui_app.c $(CORE)/ui/ui_menus.c $(CORE)/ui/ui_find.c $(CORE)/ui/ui_aprs.c $(CORE)/ui/ui_position.c $(CORE)/ui/ui_gps.c $(CORE)/ui/ui_dual.c $(CORE)/radio/tones.c \
++UIAPP   := $(UI) $(CORE)/ui/ui_app.c $(CORE)/ui/ui_menus.c $(CORE)/ui/ui_find.c $(CORE)/ui/ui_aprs.c $(CORE)/ui/ui_position.c $(CORE)/ui/ui_gps.c $(CORE)/ui/ui_rssi.c $(CORE)/ui/ui_dual.c $(CORE)/radio/tones.c \
+            $(CORE)/codeplug/codeplug_talk.c $(CORE)/codeplug/zone_edit.c $(CORE)/codeplug/zone_shift.c $(CORE)/radio/radio_am.c \
+            $(CORE)/radio/radio_bcast.c sim/ui_sim.c sim/ui_png.c
+ # The About page's data header, as the firmware build makes it (tools/gen_about.py; the STM32F4 list stands in)
+@@ -813,6 +813,8 @@ uiFlowTestNoColor: uiFlowTest.c $(UIDEPS)
+ 
+ # UI_LANG=<code> also builds that language in (CONFIG_LANG_<CODE>=1), so a gallery can render in a language that is
+ # off by default: make -B uiSim UI_LANG=fr (docs/dev/translating.md). The CJK face compiles to nothing without Chinese
++uiFlowTest uiSim: UIFLAGS += -DCONFIG_RSSI_GRAPH=1
++
+ UI_LANG_FLAG := $(if $(UI_LANG),-DCONFIG_LANG_$(shell echo '$(UI_LANG)' | tr a-z A-Z)=1)
+ uiSim: uiSim.c $(UIDEPS) $(CJK)
+ 	$(CC) $(UIFLAGS) $(UI_LANG_FLAG) -o $@ uiSim.c $(UIAPP) $(CJK) -lz -lm
+diff --git a/tests/host/radioFeaturesTest.c b/tests/host/radioFeaturesTest.c
+index d365416..96bb7d0 100644
+--- a/tests/host/radioFeaturesTest.c
++++ b/tests/host/radioFeaturesTest.c
+@@ -3663,6 +3663,31 @@ static void test_supply_voltage(void)
+ 	board.caps &= ~CAP_NO_BATTERY;
+ }
+ 
++#if CONFIG_RSSI_GRAPH
++static void test_rssi_sample(void)
++{
++	start();
++	hw.floor_dbm = -121;
++	run(50);
++	CHECK(sm.view.rssi_sample_hz == 146520000 && sm.view.rssi_sample_dbm == -121);
++	uint32_t sampled = sm.view.rssi_sample_ms;
++	hw.floor_dbm = -120;
++	run(50);
++	CHECK(sm.view.rssi_sample_dbm == -120 && sm.view.rssi_sample_ms > sampled);
++
++	req(RREQ_PTT, 1);
++	run(100);
++	CHECK(sm.view.state == RS_TX && sm.view.rssi_sample_hz == 0);
++	req(RREQ_PTT, 0);
++	run(100);
++	CHECK(sm.view.state == RS_IDLE && sm.view.rssi_sample_hz == sm.view.ch.rx_hz);
++
++	req(RREQ_VFO_SET, 145500000);
++	run(100);
++	CHECK(sm.view.rssi_sample_hz == 145500000 && sm.view.rssi_sample_dbm == -120);
++}
++#endif
++
+ static void set_save(radio_settings_t *s) { s->rx_save = 2; s->rx_save_idle_s = 5; }
+ 
+ static void test_battery_save(void)
+@@ -4269,6 +4294,9 @@ int main(void)
+ 	test_battery();
+ 	test_no_battery();
+ 	test_supply_voltage();
++#if CONFIG_RSSI_GRAPH
++	test_rssi_sample();
++#endif
+ 	test_battery_save();
+ 	test_dmr_beeps();
+ 	test_dmr_permit_before_key();
+diff --git a/tests/host/sim/ui_sim.c b/tests/host/sim/ui_sim.c
+index e7bb026..c1f0f3f 100644
+--- a/tests/host/sim/ui_sim.c
++++ b/tests/host/sim/ui_sim.c
+@@ -2628,6 +2628,11 @@ static void step(void)
+ 		ui_notify(&ev);
+ 	}
+ 	view.hotspot = hotspot_on;
++#if CONFIG_RSSI_GRAPH
++	view.rssi_sample_hz = view.ch.rx_hz;
++	view.rssi_sample_ms = now_ms;
++	view.rssi_sample_dbm = view.rssi_dbm;
++#endif
+ 	if (ui_app_tick(&view, now_ms))
+ 		ui_app_draw();
+ 	if (tick_hook != NULL)
+@@ -3167,6 +3172,13 @@ static bool run_token(char *t, char *err, size_t len)
+ 	char *arg = strchr(t, ':');
+ 	if (arg != NULL)
+ 		*arg++ = 0;
++#if CONFIG_RSSI_GRAPH
++	if (arg != NULL && strcmp(t, "rssi") == 0) {
++		view.rssi_dbm = (int16_t)atoi(arg);
++		advance(100);
++		return true;
++	}
++#endif
+ 	if (strcmp(t, "long") == 0)
+ 		return press(arg, true, err, len);
+ 	if (strcmp(t, "ptt") == 0) {
+diff --git a/tests/host/uiFlowTest.c b/tests/host/uiFlowTest.c
+index 4bee4e0..413cf9e 100644
+--- a/tests/host/uiFlowTest.c
++++ b/tests/host/uiFlowTest.c
+@@ -30,6 +30,12 @@
+ #define ADV_BELOW_DIAG_N	0
+ #endif
+ 
++#if CONFIG_RSSI_GRAPH
++#define TOOLS_LAST_EXISTING "ok 6 up up"
++#else
++#define TOOLS_LAST_EXISTING "ok 6 up"
++#endif
++
+ static int fails, flows_run;
+ 
+ typedef struct {
+@@ -206,6 +212,13 @@ static const flow_t flows[] = {
+ 	{ "1 USB network: SCAN wins the strip's word", "usbnet:on", "ok 6 1", "scanning=1 shows=SCAN hides=IP", 3, false },
+ 	{ "Tools omits Hotspot, USB network and Single-freq repeater", "", "ok 6",
+ 	  "screen=tools hides=Hotspot hides=USB_network hides=Single-freq_repeater", 2, false },
++#if CONFIG_RSSI_GRAPH
++	{ "RSSI graph from Tools", "", "ok 6 up ok rssi:-113 expect:screen=rssi-graph expect:shows=-113 up ok rssi:-72",
++	  "screen=rssi-graph shows=-72 shows=10_s shows=Auto", 6, false },
++	{ "RSSI graph shows a gap for unavailable measurements", "ok 6 up ok rssi:-113", "rssi:0",
++	  "screen=rssi-graph shows=--_dBm", 0, false },
++	{ "RSSI graph exits with Back", "ok 6 up ok", "back", "screen=tools", 1, false },
++#endif
+ 	{ "Tools shortcut 3 is reserved", "ok 6", "3", "screen=tools toast=No_item", 1, false },
+ 	{ "Tools shortcut 4 is reserved", "ok 6", "4", "screen=tools toast=No_item usbnet=0", 1, false },
+ 	{ "Tools shortcut 5 is reserved", "ok 6", "5", "screen=tools toast=No_item", 1, false },
+@@ -264,25 +277,25 @@ static const flow_t flows[] = {
+ 	{ "DMR encrypted RX without a usable cipher warns", "cipher:ready", "rx:9991234,201,e", "nomarkbefore=Joe shows=Encrypted:", 0, false },
+ 	{ "DMR clear RX ignores the transmit key", "cipher:ready", "rx:9991234,201,g", "nomarkbefore=Joe hides=Encrypted:", 0, false },
+ #if CONFIG_TONE_SCAN
+-	{ "11 tone search opens on FM", "down tone-search", "ok 6 up ok", "screen=tonescan shows=Search_CTCSS", 4, false },
+-	{ "11 tone search shows the detected DCS code", "down tone-search ok 6 up ok", "down ok",
++	{ "11 tone search opens on FM", "down tone-search", TOOLS_LAST_EXISTING " ok", "screen=tonescan shows=Search_CTCSS", 4 + CONFIG_RSSI_GRAPH, false },
++	{ "11 tone search shows the detected DCS code", "down tone-search " TOOLS_LAST_EXISTING " ok", "down ok",
+ 	  "screen=tonescan shows=D023I", 2, false },
+ #endif
+ 	{ "11 scan start (Tools > Scan)", "", "ok 6 1", "scanning=1", 3, false },
+-	{ "11 extended RX appears in Tools", "extended-bands ok 6 up", "",
++	{ "11 extended RX appears in Tools", "extended-bands " TOOLS_LAST_EXISTING, "",
+ 	  "screen=tools shows=RX_past_bands shows=On", 3, false },
+-	{ "11 extended RX turns off in Tools", "extended-bands ok 6 up", "ok",
++	{ "11 extended RX turns off in Tools", "extended-bands " TOOLS_LAST_EXISTING, "ok",
+ 	  "screen=tools shows=RX_past_bands shows=Off", 4, false },
+-	{ "11 extended RX Tools choice survives restart", "extended-bands ok 6 up ok reboot ok 6 up", "",
++	{ "11 extended RX Tools choice survives restart", "extended-bands " TOOLS_LAST_EXISTING " ok reboot " TOOLS_LAST_EXISTING, "",
+ 	  "screen=tools shows=RX_past_bands shows=Off", 6, false },
+-	{ "11 extended RX turns back on in Tools", "extended-bands ok 6 up ok", "ok",
++	{ "11 extended RX turns back on in Tools", "extended-bands " TOOLS_LAST_EXISTING " ok", "ok",
+ 	  "screen=tools toast=Receive_only._Sensitivity_not_rated", 5, false },
+-	{ "11 extended RX On choice survives restart", "extended-bands ok 6 up ok ok reboot ok 6 up", "",
++	{ "11 extended RX On choice survives restart", "extended-bands " TOOLS_LAST_EXISTING " ok ok reboot " TOOLS_LAST_EXISTING, "",
+ 	  "screen=tools shows=RX_past_bands shows=On", 7, false },
+-	{ "11 zone scan speed opens from Tools", "", "ok 6 up ok",
+-	  "screen=group shows=Zone_scan_speed shows=Empty-channel_dwell shows=25_ms", 4, false },
+-	{ "11 zone scan speed survives a restart", "ok 6 up ok ok", "reboot ok 6 up",
+-	  "screen=tools shows=Zone_scan_speed shows=50_ms", 3, false },
++	{ "11 zone scan speed opens from Tools", "", TOOLS_LAST_EXISTING " ok",
++	  "screen=group shows=Zone_scan_speed shows=Empty-channel_dwell shows=25_ms", 4 + CONFIG_RSSI_GRAPH, false },
++	{ "11 zone scan speed survives a restart", TOOLS_LAST_EXISTING " ok ok", "reboot " TOOLS_LAST_EXISTING,
++	  "screen=tools shows=Zone_scan_speed shows=50_ms", 3 + CONFIG_RSSI_GRAPH, false },
+ 	{ "11 nuisance skip", "ok 6 1", "ctx 1", "pos=4 scanning=1", 2, false },
+ 	{ "11 scan stop", "ok 6 1", "back", "scanning=0", 1, false },
+ 	// Dual watch (docs/ux/dual-watch.md): on in a few presses, PTT on the selected channel, the other one press away
+@@ -371,12 +384,12 @@ static const flow_t flows[] = {
+ #if CONFIG_BCAST_FM
+ 	{ "S FM broadcast step on a radio with the receiver", "bcast", "ok 7 3 down down down down", "shows=FM_broadcast_step",
+ 	  7, false },
+-	{ "Broadcast FM with RX past bands off", "bcast ok 6 up", "", "shows=RX_past_bands shows=Off", 0, false },
++	{ "Broadcast FM with RX past bands off", "bcast " TOOLS_LAST_EXISTING, "", "shows=RX_past_bands shows=Off", 0, false },
+ 	{ "Broadcast FM tunes with RX past bands off", "bcast ok 4 up ok", "1 0 5 7 ok",
+ 	  "screen=home freq=105700000 mode=fm shows=Broadcast_FM", 5, false },
+ 	{ "Broadcast FM needs a receiver", "ok 4 up ok", "0 8 8 1 ok", "freq=146520000 hides=Broadcast_FM", 5, false },
+ 	{ "Broadcast FM does not enable unrelated bands", "bcast ok 4 up ok", "2 2 2 ok", "freq=146520000", 4, false },
+-	{ "Broadcast FM tunes with RX past bands on", "bcast ok 6 up ok long:back ok 4 up ok", "0 8 8 1 ok",
++	{ "Broadcast FM tunes with RX past bands on", "bcast " TOOLS_LAST_EXISTING " ok long:back ok 4 up ok", "0 8 8 1 ok",
+ 	  "screen=home freq=88100000 mode=fm shows=Broadcast_FM", 5, false },
+ 	{ "Broadcast FM steps to the next station", BCAST_881, "up", "freq=88300000", 1, false },
+ 	{ "Broadcast FM can use a 100 kHz step", BCAST_881 " ok 7 3 down down down down ok long:back", "up",
+@@ -1961,7 +1974,7 @@ static void no_battery_checks(void)
+ 		{ "Power settings with a battery", "ok 7 7", "shows=Battery_saver shows=Low_battery" },
+ 		{ "Power settings", "nobattery ok 7 7", "hides=Battery_saver hides=Low_battery shows=Auto_power_off" },
+ 		// a radio that measures its DC input: the last tool is Supply with the reading, nothing battery-only
+-		{ "Tools: Supply", "supply:13800 ok 6 up", "shows=Supply shows=13.8_V hides=Battery" },
++		{ "Tools: Supply", "supply:13800 " TOOLS_LAST_EXISTING, "shows=Supply shows=13.8_V hides=Battery" },
+ 		{ "Supply page", "supply:13800 ok 6 9", "screen=info shows=13.8_V hides=%" },
+ 		{ "Supply: no warning", "supply:9000 battery:14", "banner=none hides=%" },
+ 		{ "Supply: no battery settings", "supply:13800 ok 7 7", "hides=Battery_saver hides=Low_battery" },
+diff --git a/tests/host/uiSim.c b/tests/host/uiSim.c
+index a5203c8..43267b4 100644
+--- a/tests/host/uiSim.c
++++ b/tests/host/uiSim.c
+@@ -37,6 +37,9 @@
+ 
+ // Screens for the gallery: a name and the script that reaches it from Home (zone 0, channel 3, a DMR channel)
+ static const struct { const char *name, *script; } gallery[] = {
++#if CONFIG_RSSI_GRAPH
++	{ "rssi_graph", "ok 6 up ok rssi:-113 wait:800 rssi:-112 wait:650 rssi:-92 wait:650 rssi:-78 wait:700 rssi:-94 wait:350" },
++#endif
+ 	{ "boot", "splash" },
+ 	{ "stub_entry", "splash:loader" },	// while the flashing tools have the radio (web flasher)
+ 	{ "home_dmr", "" },
