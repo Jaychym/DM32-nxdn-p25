@@ -1,0 +1,86 @@
+diff --git a/core/radio/scan.c b/core/radio/scan.c
+--- a/core/radio/scan.c
++++ b/core/radio/scan.c
+@@ -215,7 +215,8 @@
+ 	if (count == 0) {
+ 		return -1;
+ 	}
+-	bool origin_ok = s->origin_pos < count && pos_ok(s, s->origin_pos, usable, ctx);
++	// With priority off the ordinary sweep already checks the origin.
++	bool origin_ok = s->cfg.priority && s->origin_pos < count && pos_ok(s, s->origin_pos, usable, ctx);
+ 	if (s->cfg.priority && origin_ok && s->since_priority >= SCAN_PRIORITY_EVERY) {
+ 		s->since_priority = 0;
+ 		return s->origin_pos;
+diff --git a/core/radio/radio_sm.c b/core/radio/radio_sm.c
+--- a/core/radio/radio_sm.c
++++ b/core/radio/radio_sm.c
+@@ -4140,11 +4140,31 @@
++}
++
++static bool scan_read_usable(const radio_sm_t *sm, uint16_t pos, channel_t *ch)
++{
++	return pos < sm->zone.count && channel_read(sm->zone.channels[pos], ch) && !ch->scan_skip &&
++	       scan_listens(ch, sm->zone.channels[pos]);
+ }
+ 
+ static bool scan_usable(uint16_t pos, void *ctx)
+ {
+-	const radio_sm_t *sm = ctx;
+ 	channel_t ch;
+-	return pos < sm->zone.count && channel_read(sm->zone.channels[pos], &ch) && !ch.scan_skip &&
+-	       scan_listens(&ch, sm->zone.channels[pos]);
++	return scan_read_usable(ctx, pos, &ch);
++}
++
++typedef struct {
++	const radio_sm_t *sm;
++	channel_t *selected;
++} scan_read_ctx_t;
++
++static bool scan_cached_usable(uint16_t pos, void *ctx)
++{
++	scan_read_ctx_t *c = ctx;
++	channel_t ch;
++	if (!scan_read_usable(c->sm, pos, &ch))
++		return false;
++	// Preserve the last valid channel for the priority-origin fallback.
++	*c->selected = ch;
++	return true;
+ }
+ 
+ // Dual watch (SCAN_DUAL): the receiver alternates between two channels, dual[0] and dual[1], skip flags ignored. With
+@@ -4400,7 +4420,8 @@
+ 	} else {
+-		int pos = scan_next_pos(sc, sm->zone.count, scan_usable, sm);
+ 		channel_t ch;
+-		if (pos < 0 || !channel_read(sm->zone.channels[pos], &ch)) {
++		scan_read_ctx_t ctx = { sm, &ch };
++		int pos = scan_next_pos(sc, sm->zone.count, scan_cached_usable, &ctx);
++		if (pos < 0) {
+ 			scan_stop(sm, false, now_ms);
+ 			return false;
+ 		}
+diff --git a/tests/host/radioFeaturesTest.c b/tests/host/radioFeaturesTest.c
+--- a/tests/host/radioFeaturesTest.c
++++ b/tests/host/radioFeaturesTest.c
+@@ -200,5 +200,20 @@
+ static bool all_usable(uint16_t pos, void *ctx) { (void)ctx; return pos != 3; }
++
++static bool counted_usable(uint16_t pos, void *ctx)
++{
++	unsigned *count = ctx;
++	++*count;
++	return all_usable(pos, NULL);
++}
+ 
+ static void test_scan_engine(void)
+ {
++	// A regular scan must read only its next candidate, not the origin too.
++	scan_t fast = {0};
++	scan_cfg_t fast_cfg = { .dwell_ms = 25 };
++	fast.origin_pos = 1;
++	scan_begin(&fast, SCAN_ZONE, &fast_cfg, 0);
++	unsigned reads = 0;
++	CHECK(scan_next_pos(&fast, 6, counted_usable, &reads) == 2);
++	CHECK(reads == 1);
+ 	scan_t s;
